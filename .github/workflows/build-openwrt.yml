@@ -37,12 +37,13 @@ jobs:
       - name: Add helloworld feed
         working-directory: lede
         run: |
-          echo "src-git helloworld https://github.com/jerrykuku/luci-app-ssr-plus" >> $FEED_CONF
+          echo "src-git helloworld https://github.com/fw876/helloworld" >> $FEED_CONF
 
       - name: Add luci-app-trafficctl
         working-directory: lede
         run: |
-          git clone https://github.com/YusDyr/luci-app-trafficctl.git package/luci-app-trafficctl
+          git clone --depth 1 https://github.com/YusDyr/luci-app-trafficctl.git /tmp/luci-app-trafficctl
+          cp -r /tmp/luci-app-trafficctl/luci-app-trafficctl package/luci-app-trafficctl
 
       # ==================== 新增：创建中文语言包 ====================
       - name: Add Chinese i18n for luci-app-trafficctl
@@ -58,6 +59,7 @@ jobs:
           PKG_RELEASE:=1
 
           PKG_BUILD_DIR:=$(BUILD_DIR)/$(PKG_NAME)
+          PKG_BUILD_DEPENDS:=luci-base/host
           PKG_USE_MIPS16:=0
 
           include $(INCLUDE_DIR)/package.mk
@@ -240,14 +242,11 @@ jobs:
           echo "CONFIG_PACKAGE_luci-app-ssr-plus_INCLUDE_Xray=y" >> .config
           echo "CONFIG_PACKAGE_luci-app-ssr-plus_INCLUDE_ChinaDNS_NG=y" >> .config
           echo "CONFIG_PACKAGE_luci-app-ssr-plus_INCLUDE_MosDNS=y" >> .config
-          echo "CONFIG_PACKAGE_luci-app-ssr-plus_INCLUDE_HTTP_Proxy_Server=y" >> .config
-          echo "CONFIG_PACKAGE_luci-app-ssr-plus_INCLUDE_Mihomo=y" >> .config
-          echo "CONFIG_PACKAGE_luci-app-ssr-plus_INCLUDE_GeoData=y" >> .config
           echo "CONFIG_PACKAGE_luci-app-ssr-plus_INCLUDE_Shadow_TLS=y" >> .config
           echo "CONFIG_PACKAGE_luci-app-ssr-plus_INCLUDE_Kcptun=y" >> .config
           echo "CONFIG_PACKAGE_luci-app-ssr-plus_INCLUDE_NaiveProxy=y" >> .config
-          echo "CONFIG_PACKAGE_luci-app-ssr-plus_INCLUDE_Simple_Obfs=y" >> .config
-          echo "CONFIG_PACKAGE_luci-app-ssr-plus_INCLUDE_V2ray_Plugin=y" >> .config
+          echo "CONFIG_PACKAGE_luci-app-ssr-plus_INCLUDE_Shadowsocks_Simple_Obfs=y" >> .config
+          echo "CONFIG_PACKAGE_luci-app-ssr-plus_INCLUDE_Shadowsocks_V2ray_Plugin=y" >> .config
           echo "CONFIG_PACKAGE_luci-app-ssr-plus_INCLUDE_ShadowsocksR_Libev_Client=y" >> .config
           echo "CONFIG_PACKAGE_luci-app-ssr-plus_INCLUDE_ShadowsocksR_Libev_Server=y" >> .config
 
