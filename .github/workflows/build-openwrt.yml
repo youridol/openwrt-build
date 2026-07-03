@@ -260,9 +260,17 @@ jobs:
         working-directory: lede
         run: make download -j${{ env.JOBS }} V=s
 
-      - name: Compile firmware
+      - name: Create swap space (prevent OOM during Go compilation)
+        run: |
+          sudo fallocate -l 4G /swapfile
+          sudo chmod 600 /swapfile
+          sudo mkswap /swapfile
+          sudo swapon /swapfile
+          free -h
+
+      - name: Compile firmware (with swap)
         working-directory: lede
-        run: make -j${{ env.JOBS }} V=s
+        run: make -j${{ env.JOBS }} V=s || make -j1 V=s
 
       - name: Upload artifacts
         uses: actions/upload-artifact@v4
