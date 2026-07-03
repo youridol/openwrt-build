@@ -1,0 +1,270 @@
+name: Build OpenWrt with SSR-Plus and Trafficctl
+
+on:
+  workflow_dispatch:
+  schedule:
+    - cron: '0 0 * * *'
+
+env:
+  REPO_URL: https://github.com/coolsnowwolf/lede.git
+  REPO_BRANCH: master
+  TARGET: x86_64
+  FEED_CONF: feeds.conf.default
+
+jobs:
+  build:
+    runs-on: ubuntu-22.04
+    steps:
+      - name: Checkout lede source
+        uses: actions/checkout@v4
+        with:
+          repository: coolsnowwolf/lede
+          ref: master
+          path: lede
+
+      - name: Install build dependencies
+        run: |
+          sudo apt-get update
+          sudo apt-get install -y build-essential clang flex bison g++ gawk gcc-multilib g++-multilib \
+            gettext git libncurses5-dev libssl-dev python3 python3-distutils-extra rsync unzip zlib1g-dev \
+            file wget subversion upx-ucl autoconf automake curl asciidoc libtool
+
+      - name: Set JOBS
+        run: echo "JOBS=$(nproc)" >> $GITHUB_ENV
+
+      - name: Add helloworld feed
+        working-directory: lede
+        run: |
+          echo "src-git helloworld https://github.com/jerrykuku/luci-app-ssr-plus" >> $FEED_CONF
+
+      - name: Add luci-app-trafficctl
+        working-directory: lede
+        run: |
+          git clone https://github.com/YusDyr/luci-app-trafficctl.git package/luci-app-trafficctl
+
+      # ==================== 新增：创建中文语言包 ====================
+      - name: Add Chinese i18n for luci-app-trafficctl
+        working-directory: lede
+        run: |
+          mkdir -p package/luci-i18n-trafficctl-zh-cn
+
+          cat > package/luci-i18n-trafficctl-zh-cn/Makefile << 'MAKEFILE_EOF'
+          include $(TOPDIR)/rules.mk
+
+          PKG_NAME:=luci-i18n-trafficctl-zh-cn
+          PKG_VERSION:=1.0
+          PKG_RELEASE:=1
+
+          PKG_BUILD_DIR:=$(BUILD_DIR)/$(PKG_NAME)
+          PKG_USE_MIPS16:=0
+
+          include $(INCLUDE_DIR)/package.mk
+
+          define Package/luci-i18n-trafficctl-zh-cn
+            SECTION:=luci
+            CATEGORY:=LuCI
+            SUBMENU:=3. Applications
+            TITLE:=Chinese translation for luci-app-trafficctl
+            DEPENDS:=+luci-app-trafficctl +luci-base
+            PKGARCH:=all
+          endef
+
+          define Package/luci-i18n-trafficctl-zh-cn/description
+            Simplified Chinese language support for Traffic Control LuCI application.
+          endef
+
+          define Build/Prepare
+            mkdir -p $(PKG_BUILD_DIR)
+          endef
+
+          define Build/Configure
+          endef
+
+          define Build/Compile
+            $(STAGING_DIR_HOST)/bin/po2lmo $(CURDIR)/trafficctl.zh-cn.po $(PKG_BUILD_DIR)/trafficctl.zh-cn.lmo
+          endef
+
+          define Package/luci-i18n-trafficctl-zh-cn/install
+            $(INSTALL_DIR) $(1)/usr/lib/lua/luci/i18n
+            $(INSTALL_DATA) $(PKG_BUILD_DIR)/trafficctl.zh-cn.lmo $(1)/usr/lib/lua/luci/i18n/
+          endef
+
+          $(eval $(call BuildPackage,luci-i18n-trafficctl-zh-cn))
+          MAKEFILE_EOF
+
+          cat > package/luci-i18n-trafficctl-zh-cn/trafficctl.zh-cn.po << 'PO_EOF'
+          msgid ""
+          msgstr ""
+          "Content-Type: text/plain; charset=UTF-8\n"
+          "Language: zh_CN\n"
+          "Plural-Forms: nplurals=1; plural=0;\n"
+
+          #: luasrc/view/trafficctl/status.htm
+          msgid "Traffic Control Status"
+          msgstr "流量控制状态"
+
+          msgid "Interface"
+          msgstr "接口"
+
+          msgid "Download"
+          msgstr "下载"
+
+          msgid "Upload"
+          msgstr "上传"
+
+          msgid "Bytes"
+          msgstr "字节"
+
+          msgid "Packets"
+          msgstr "数据包"
+
+          msgid "Status"
+          msgstr "状态"
+
+          msgid "Active"
+          msgstr "活跃"
+
+          msgid "Inactive"
+          msgstr "非活跃"
+
+          #: luasrc/view/trafficctl/rules.htm
+          msgid "Traffic Control Rules"
+          msgstr "流量控制规则"
+
+          msgid "Add Rule"
+          msgstr "添加规则"
+
+          msgid "Edit Rule"
+          msgstr "编辑规则"
+
+          msgid "Delete Rule"
+          msgstr "删除规则"
+
+          msgid "Source IP"
+          msgstr "源 IP"
+
+          msgid "Destination IP"
+          msgstr "目标 IP"
+
+          msgid "Protocol"
+          msgstr "协议"
+
+          msgid "Port"
+          msgstr "端口"
+
+          msgid "Speed Limit (kbps)"
+          msgstr "限速 (kbps)"
+
+          msgid "Burst (kBytes)"
+          msgstr "突发 (千字节)"
+
+          msgid "Enable"
+          msgstr "启用"
+
+          msgid "Disabled"
+          msgstr "已禁用"
+
+          msgid "No rules defined."
+          msgstr "未定义任何规则。"
+
+          msgid "Rule saved successfully."
+          msgstr "规则保存成功。"
+
+          msgid "Rule deleted successfully."
+          msgstr "规则删除成功。"
+
+          msgid "Are you sure you want to delete this rule?"
+          msgstr "确定要删除这条规则吗？"
+
+          msgid "Save & Apply"
+          msgstr "保存并应用"
+
+          msgid "Cancel"
+          msgstr "取消"
+
+          msgid "General Settings"
+          msgstr "常规设置"
+
+          msgid "Enable Traffic Control"
+          msgstr "启用流量控制"
+
+          msgid "Default Speed Limit (kbps)"
+          msgstr "默认限速 (kbps)"
+
+          msgid "Invalid IP address"
+          msgstr "无效的 IP 地址"
+
+          msgid "Invalid port number"
+          msgstr "无效的端口号"
+
+          msgid "Speed limit must be a positive number"
+          msgstr "限速值必须为正数"
+
+          msgid "trafficctl"
+          msgstr "流量控制"
+
+          msgid "Traffic Control"
+          msgstr "流量控制"
+          PO_EOF
+
+      - name: Update and install feeds
+        working-directory: lede
+        run: |
+          ./scripts/feeds update -a
+          ./scripts/feeds install -a
+
+      - name: Generate base .config
+        working-directory: lede
+        run: |
+          if [ "$TARGET" = "x86_64" ]; then
+            cat >> .config <<EOF
+          CONFIG_TARGET_x86=y
+          CONFIG_TARGET_x86_64=y
+          CONFIG_TARGET_x86_64_DEVICE_generic=y
+          EOF
+          else
+            echo "请在此处添加其他目标平台的 base 配置"
+            exit 1
+          fi
+          make defconfig
+
+      - name: Enable required packages (SSR-Plus, Trafficctl, i18n)
+        working-directory: lede
+        run: |
+          # SSR-Plus 相关
+          echo "CONFIG_PACKAGE_luci-app-ssr-plus=y" >> .config
+          echo "CONFIG_PACKAGE_luci-app-ssr-plus_INCLUDE_Iptables_Transparent_Proxy=y" >> .config
+          echo "# CONFIG_PACKAGE_luci-app-ssr-plus_INCLUDE_Nftables_Transparent_Proxy is not set" >> .config
+          echo "CONFIG_PACKAGE_luci-app-ssr-plus_INCLUDE_Xray=y" >> .config
+          echo "CONFIG_PACKAGE_luci-app-ssr-plus_INCLUDE_ChinaDNS_NG=y" >> .config
+          echo "CONFIG_PACKAGE_luci-app-ssr-plus_INCLUDE_MosDNS=y" >> .config
+          echo "CONFIG_PACKAGE_luci-app-ssr-plus_INCLUDE_HTTP_Proxy_Server=y" >> .config
+          echo "CONFIG_PACKAGE_luci-app-ssr-plus_INCLUDE_Mihomo=y" >> .config
+          echo "CONFIG_PACKAGE_luci-app-ssr-plus_INCLUDE_GeoData=y" >> .config
+          echo "CONFIG_PACKAGE_luci-app-ssr-plus_INCLUDE_Shadow_TLS=y" >> .config
+          echo "CONFIG_PACKAGE_luci-app-ssr-plus_INCLUDE_Kcptun=y" >> .config
+          echo "CONFIG_PACKAGE_luci-app-ssr-plus_INCLUDE_NaiveProxy=y" >> .config
+          echo "CONFIG_PACKAGE_luci-app-ssr-plus_INCLUDE_Simple_Obfs=y" >> .config
+          echo "CONFIG_PACKAGE_luci-app-ssr-plus_INCLUDE_V2ray_Plugin=y" >> .config
+          echo "CONFIG_PACKAGE_luci-app-ssr-plus_INCLUDE_ShadowsocksR_Libev_Client=y" >> .config
+          echo "CONFIG_PACKAGE_luci-app-ssr-plus_INCLUDE_ShadowsocksR_Libev_Server=y" >> .config
+
+          # 启用 trafficctl 及其中文语言包
+          echo "CONFIG_PACKAGE_luci-app-trafficctl=y" >> .config
+          echo "CONFIG_PACKAGE_luci-i18n-trafficctl-zh-cn=y" >> .config
+
+          make defconfig
+
+      - name: Download package sources
+        working-directory: lede
+        run: make download -j${{ env.JOBS }} V=s
+
+      - name: Compile firmware
+        working-directory: lede
+        run: make -j${{ env.JOBS }} V=s
+
+      - name: Upload artifacts
+        uses: actions/upload-artifact@v4
+        with:
+          name: openwrt-x86-64-ssrplus
+          path: lede/bin/targets/x86/64/*.img.gz
