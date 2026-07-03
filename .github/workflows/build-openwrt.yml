@@ -33,11 +33,12 @@ jobs:
 
       - name: Free disk space
         run: |
-          sudo rm -rf /usr/share/dotnet /usr/local/lib/android /opt/ghc
+          sudo rm -rf /usr/share/dotnet /usr/local/lib/android /opt/ghc /usr/local/share/boost
           df -h
 
       - name: Set JOBS
-        run: echo "JOBS=$(nproc)" >> $GITHUB_ENV
+        # GHA runner 只有 7GB 内存，Go 编译 Xray 吃内存，限制并行度防 OOM
+        run: echo "JOBS=2" >> $GITHUB_ENV
 
       - name: Add helloworld feed
         working-directory: lede
@@ -50,7 +51,7 @@ jobs:
           git clone --depth 1 https://github.com/YusDyr/luci-app-trafficctl.git /tmp/luci-app-trafficctl
           cp -r /tmp/luci-app-trafficctl/luci-app-trafficctl package/luci-app-trafficctl
 
-      # ==================== 新增：创建中文语言包 ====================
+      # ==================== 新增：创建中文语言包 ==================== 
       - name: Add Chinese i18n for luci-app-trafficctl
         working-directory: lede
         run: |
@@ -183,7 +184,7 @@ jobs:
           msgstr "规则删除成功。"
 
           msgid "Are you sure you want to delete this rule?"
-          msgstr "确定要删除这条规则吗？"
+          msgstr "确定要删除这条规则吗?"
 
           msgid "Save & Apply"
           msgstr "保存并应用"
@@ -265,18 +266,9 @@ jobs:
         working-directory: lede
         run: make download -j${{ env.JOBS }} V=s
 
-      - name: Create swap space
-        run: |
-          sudo rm -f /swapfile
-          sudo dd if=/dev/zero of=/swapfile bs=1M count=2048
-          sudo chmod 600 /swapfile
-          sudo mkswap /swapfile
-          sudo swapon /swapfile
-          free -h
-
-      - name: Compile firmware (with swap)
+      - name: Compile firmware
         working-directory: lede
-        run: make -j${{ env.JOBS }} V=s || make -j1 V=s
+        run: make -j${{ env.JOBS }} V=s
 
       - name: Upload artifacts
         uses: actions/upload-artifact@v4
