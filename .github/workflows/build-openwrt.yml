@@ -31,6 +31,11 @@ jobs:
             gettext git libncurses5-dev libssl-dev python3 python3-distutils-extra rsync unzip zlib1g-dev \
             file wget subversion upx-ucl autoconf automake curl asciidoc libtool
 
+      - name: Free disk space
+        run: |
+          sudo rm -rf /usr/share/dotnet /usr/local/lib/android /opt/ghc
+          df -h
+
       - name: Set JOBS
         run: echo "JOBS=$(nproc)" >> $GITHUB_ENV
 
@@ -260,9 +265,10 @@ jobs:
         working-directory: lede
         run: make download -j${{ env.JOBS }} V=s
 
-      - name: Create swap space (prevent OOM during Go compilation)
+      - name: Create swap space
         run: |
-          sudo fallocate -l 4G /swapfile
+          sudo rm -f /swapfile
+          sudo dd if=/dev/zero of=/swapfile bs=1M count=2048
           sudo chmod 600 /swapfile
           sudo mkswap /swapfile
           sudo swapon /swapfile
