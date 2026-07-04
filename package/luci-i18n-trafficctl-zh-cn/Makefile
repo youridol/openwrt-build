@@ -33,19 +33,13 @@ endef
 
 # Pre-compiled .lmo is placed in src/ during CI (compiled from .po via po2lmo)
 define Build/Prepare
-  mkdir -p $(PKG_BUILD_DIR)
-  $(INSTALL_DATA) ./src/trafficctl.zh-cn.lmo $(PKG_BUILD_DIR)/
-endef
-
-define Build/Configure
-endef
-
-define Build/Compile
+	mkdir -p $(PKG_BUILD_DIR)
+	$(INSTALL_DATA) ./src/trafficctl.zh-cn.lmo $(PKG_BUILD_DIR)/
 endef
 
 define Package/luci-i18n-trafficctl-zh-cn/install
-  $(INSTALL_DIR) $(1)/usr/lib/lua/luci/i18n
-  $(INSTALL_DATA) $(PKG_BUILD_DIR)/trafficctl.zh-cn.lmo $(1)/usr/lib/lua/luci/i18n/
+	$(INSTALL_DIR) $(1)/usr/lib/lua/luci/i18n
+	$(INSTALL_DATA) $(PKG_BUILD_DIR)/trafficctl.zh-cn.lmo $(1)/usr/lib/lua/luci/i18n/
 endef
 
 $(eval $(call BuildPackage,luci-i18n-trafficctl-zh-cn))
