@@ -37,6 +37,10 @@ define Build/Prepare
 	$(INSTALL_DATA) ./src/trafficctl.zh-cn.lmo $(PKG_BUILD_DIR)/
 endef
 
+# No source compilation needed — .lmo is pre-compiled
+define Build/Compile
+endef
+
 define Package/luci-i18n-trafficctl-zh-cn/install
 	$(INSTALL_DIR) $(1)/usr/lib/lua/luci/i18n
 	$(INSTALL_DATA) $(PKG_BUILD_DIR)/trafficctl.zh-cn.lmo $(1)/usr/lib/lua/luci/i18n/
