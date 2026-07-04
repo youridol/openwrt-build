@@ -45,131 +45,13 @@ jobs:
         run: |
           echo "src-git helloworld https://github.com/fw876/helloworld" >> $FEED_CONF
 
-      - name: Add luci-app-trafficctl
+      - name: Add luci-app-trafficctl and i18n package
         working-directory: lede
         run: |
           git clone --depth 1 https://github.com/YusDyr/luci-app-trafficctl.git /tmp/luci-app-trafficctl
           cp -r /tmp/luci-app-trafficctl/luci-app-trafficctl package/luci-app-trafficctl
-
-      # ==================== 创建中文翻译 .po 源文件 ==================== 
-      - name: Create i18n po file
-        working-directory: lede
-        run: |
-          mkdir -p /tmp/i18n-trafficctl
-          cat > /tmp/i18n-trafficctl/trafficctl.zh-cn.po << 'PO_EOF'
-          msgid ""
-          msgstr ""
-          "Content-Type: text/plain; charset=UTF-8\n"
-          "Language: zh_CN\n"
-          "Plural-Forms: nplurals=1; plural=0;\n"
-
-          #: luasrc/view/trafficctl/status.htm
-          msgid "Traffic Control Status"
-          msgstr "流量控制状态"
-
-          msgid "Interface"
-          msgstr "接口"
-
-          msgid "Download"
-          msgstr "下载"
-
-          msgid "Upload"
-          msgstr "上传"
-
-          msgid "Bytes"
-          msgstr "字节"
-
-          msgid "Packets"
-          msgstr "数据包"
-
-          msgid "Status"
-          msgstr "状态"
-
-          msgid "Active"
-          msgstr "活跃"
-
-          msgid "Inactive"
-          msgstr "非活跃"
-
-          #: luasrc/view/trafficctl/rules.htm
-          msgid "Traffic Control Rules"
-          msgstr "流量控制规则"
-
-          msgid "Add Rule"
-          msgstr "添加规则"
-
-          msgid "Edit Rule"
-          msgstr "编辑规则"
-
-          msgid "Delete Rule"
-          msgstr "删除规则"
-
-          msgid "Source IP"
-          msgstr "源 IP"
-
-          msgid "Destination IP"
-          msgstr "目标 IP"
-
-          msgid "Protocol"
-          msgstr "协议"
-
-          msgid "Port"
-          msgstr "端口"
-
-          msgid "Speed Limit (kbps)"
-          msgstr "限速 (kbps)"
-
-          msgid "Burst (kBytes)"
-          msgstr "突发 (千字节)"
-
-          msgid "Enable"
-          msgstr "启用"
-
-          msgid "Disabled"
-          msgstr "已禁用"
-
-          msgid "No rules defined."
-          msgstr "未定义任何规则。"
-
-          msgid "Rule saved successfully."
-          msgstr "规则保存成功。"
-
-          msgid "Rule deleted successfully."
-          msgstr "规则删除成功。"
-
-          msgid "Are you sure you want to delete this rule?"
-          msgstr "确定要删除这条规则吗?"
-
-          msgid "Save & Apply"
-          msgstr "保存并应用"
-
-          msgid "Cancel"
-          msgstr "取消"
-
-          msgid "General Settings"
-          msgstr "常规设置"
-
-          msgid "Enable Traffic Control"
-          msgstr "启用流量控制"
-
-          msgid "Default Speed Limit (kbps)"
-          msgstr "默认限速 (kbps)"
-
-          msgid "Invalid IP address"
-          msgstr "无效的 IP 地址"
-
-          msgid "Invalid port number"
-          msgstr "无效的端口号"
-
-          msgid "Speed limit must be a positive number"
-          msgstr "限速值必须为正数"
-
-          msgid "trafficctl"
-          msgstr "流量控制"
-
-          msgid "Traffic Control"
-          msgstr "流量控制"
-          PO_EOF
+          # 中文语言包来自 openwrt-build 仓库的 package/ 目录
+          cp -r ../package/luci-i18n-trafficctl-zh-cn package/
 
       - name: Update and install feeds
         working-directory: lede
@@ -177,15 +59,14 @@ jobs:
           ./scripts/feeds update -a
           ./scripts/feeds install -a
 
-      # ==================== 编译中文语言包 .lmo（从 luci feed 编译 po2lmo，再转换 .po -> .lmo） ==================== 
+      # ==================== 编译中文语言包 .lmo ==================== 
+      # 从 luci feed 编译 po2lmo，再用它把 .po 转成 .lmo，放到 package 的 src/ 目录
+      # Build/Prepare 阶段会自动复制 .lmo 到构建目录，然后 install 阶段刷入固件
       - name: Compile i18n .lmo
         working-directory: lede
         run: |
-          # po2lmo 源码在 luci feed 里，编译成可执行文件（用 -I 指定头文件路径，#include "" 才会找到）
           gcc -O2 -o /tmp/po2lmo -Ifeeds/luci/modules/luci-base/src feeds/luci/modules/luci-base/src/po2lmo.c
-          # 转 .po 为 .lmo，放入 files/ 覆盖目录（LEDE 构建时会刷入固件 rootfs）
-          mkdir -p files/usr/lib/lua/luci/i18n
-          /tmp/po2lmo /tmp/i18n-trafficctl/trafficctl.zh-cn.po files/usr/lib/lua/luci/i18n/trafficctl.zh-cn.lmo
+          /tmp/po2lmo package/luci-i18n-trafficctl-zh-cn/src/trafficctl.zh-cn.po package/luci-i18n-trafficctl-zh-cn/src/trafficctl.zh-cn.lmo
 
       - name: Generate base .config
         working-directory: lede
@@ -220,8 +101,9 @@ jobs:
           echo "CONFIG_PACKAGE_luci-app-ssr-plus_INCLUDE_ShadowsocksR_Libev_Client=y" >> .config
           echo "CONFIG_PACKAGE_luci-app-ssr-plus_INCLUDE_ShadowsocksR_Libev_Server=y" >> .config
 
-          # 启用 trafficctl（中文语言包通过 files/ 覆盖方式直接写入固件，不需要额外 package）
+          # 启用 trafficctl 及其中文语言包
           echo "CONFIG_PACKAGE_luci-app-trafficctl=y" >> .config
+          echo "CONFIG_PACKAGE_luci-i18n-trafficctl-zh-cn=y" >> .config
 
           make defconfig
 

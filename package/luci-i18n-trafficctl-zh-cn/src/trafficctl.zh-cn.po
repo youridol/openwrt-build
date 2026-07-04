@@ -1,0 +1,112 @@
+msgid ""
+msgstr ""
+"Content-Type: text/plain; charset=UTF-8\n"
+"Language: zh_CN\n"
+"Plural-Forms: nplurals=1; plural=0;\n"
+
+#: luasrc/view/trafficctl/status.htm
+msgid "Traffic Control Status"
+msgstr "流量控制状态"
+
+msgid "Interface"
+msgstr "接口"
+
+msgid "Download"
+msgstr "下载"
+
+msgid "Upload"
+msgstr "上传"
+
+msgid "Bytes"
+msgstr "字节"
+
+msgid "Packets"
+msgstr "数据包"
+
+msgid "Status"
+msgstr "状态"
+
+msgid "Active"
+msgstr "活跃"
+
+msgid "Inactive"
+msgstr "非活跃"
+
+#: luasrc/view/trafficctl/rules.htm
+msgid "Traffic Control Rules"
+msgstr "流量控制规则"
+
+msgid "Add Rule"
+msgstr "添加规则"
+
+msgid "Edit Rule"
+msgstr "编辑规则"
+
+msgid "Delete Rule"
+msgstr "删除规则"
+
+msgid "Source IP"
+msgstr "源 IP"
+
+msgid "Destination IP"
+msgstr "目标 IP"
+
+msgid "Protocol"
+msgstr "协议"
+
+msgid "Port"
+msgstr "端口"
+
+msgid "Speed Limit (kbps)"
+msgstr "限速 (kbps)"
+
+msgid "Burst (kBytes)"
+msgstr "突发 (千字节)"
+
+msgid "Enable"
+msgstr "启用"
+
+msgid "Disabled"
+msgstr "已禁用"
+
+msgid "No rules defined."
+msgstr "未定义任何规则。"
+
+msgid "Rule saved successfully."
+msgstr "规则保存成功。"
+
+msgid "Rule deleted successfully."
+msgstr "规则删除成功。"
+
+msgid "Are you sure you want to delete this rule?"
+msgstr "确定要删除这条规则吗?"
+
+msgid "Save & Apply"
+msgstr "保存并应用"
+
+msgid "Cancel"
+msgstr "取消"
+
+msgid "General Settings"
+msgstr "常规设置"
+
+msgid "Enable Traffic Control"
+msgstr "启用流量控制"
+
+msgid "Default Speed Limit (kbps)"
+msgstr "默认限速 (kbps)"
+
+msgid "Invalid IP address"
+msgstr "无效的 IP 地址"
+
+msgid "Invalid port number"
+msgstr "无效的端口号"
+
+msgid "Speed limit must be a positive number"
+msgstr "限速值必须为正数"
+
+msgid "trafficctl"
+msgstr "流量控制"
+
+msgid "Traffic Control"
+msgstr "流量控制"
