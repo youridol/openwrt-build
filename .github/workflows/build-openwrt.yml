@@ -51,58 +51,12 @@ jobs:
           git clone --depth 1 https://github.com/YusDyr/luci-app-trafficctl.git /tmp/luci-app-trafficctl
           cp -r /tmp/luci-app-trafficctl/luci-app-trafficctl package/luci-app-trafficctl
 
-      # ==================== 新增：创建中文语言包 ==================== 
-      - name: Add Chinese i18n for luci-app-trafficctl
+      # ==================== 创建中文翻译 .po 源文件 ==================== 
+      - name: Create i18n po file
         working-directory: lede
         run: |
-          mkdir -p package/luci-i18n-trafficctl-zh-cn
-
-          cat > package/luci-i18n-trafficctl-zh-cn/Makefile << 'MAKEFILE_EOF'
-          include $(TOPDIR)/rules.mk
-
-          PKG_NAME:=luci-i18n-trafficctl-zh-cn
-          PKG_VERSION:=1.0
-          PKG_RELEASE:=1
-
-          PKG_BUILD_DIR:=$(BUILD_DIR)/$(PKG_NAME)
-          PKG_BUILD_DEPENDS:=luci-base/host
-          PKG_USE_MIPS16:=0
-
-          include $(INCLUDE_DIR)/package.mk
-
-          define Package/luci-i18n-trafficctl-zh-cn
-            SECTION:=luci
-            CATEGORY:=LuCI
-            SUBMENU:=3. Applications
-            TITLE:=Chinese translation for luci-app-trafficctl
-            DEPENDS:=+luci-app-trafficctl +luci-base
-            PKGARCH:=all
-          endef
-
-          define Package/luci-i18n-trafficctl-zh-cn/description
-            Simplified Chinese language support for Traffic Control LuCI application.
-          endef
-
-          define Build/Prepare
-            mkdir -p $(PKG_BUILD_DIR)
-          endef
-
-          define Build/Configure
-          endef
-
-          define Build/Compile
-            $(STAGING_DIR_HOST)/bin/po2lmo $(CURDIR)/trafficctl.zh-cn.po $(PKG_BUILD_DIR)/trafficctl.zh-cn.lmo
-          endef
-
-          define Package/luci-i18n-trafficctl-zh-cn/install
-            $(INSTALL_DIR) $(1)/usr/lib/lua/luci/i18n
-            $(INSTALL_DATA) $(PKG_BUILD_DIR)/trafficctl.zh-cn.lmo $(1)/usr/lib/lua/luci/i18n/
-          endef
-
-          $(eval $(call BuildPackage,luci-i18n-trafficctl-zh-cn))
-          MAKEFILE_EOF
-
-          cat > package/luci-i18n-trafficctl-zh-cn/trafficctl.zh-cn.po << 'PO_EOF'
+          mkdir -p /tmp/i18n-trafficctl
+          cat > /tmp/i18n-trafficctl/trafficctl.zh-cn.po << 'PO_EOF'
           msgid ""
           msgstr ""
           "Content-Type: text/plain; charset=UTF-8\n"
@@ -223,6 +177,16 @@ jobs:
           ./scripts/feeds update -a
           ./scripts/feeds install -a
 
+      # ==================== 编译中文语言包 .lmo（从 luci feed 编译 po2lmo，再转换 .po -> .lmo） ==================== 
+      - name: Compile i18n .lmo
+        working-directory: lede
+        run: |
+          # po2lmo 源码在 luci feed 里，编译成可执行文件
+          gcc -O2 -o /tmp/po2lmo feeds/luci/modules/luci-base/src/po2lmo.c
+          # 转 .po 为 .lmo，放入 files/ 覆盖目录（LEDE 构建时会刷入固件 rootfs）
+          mkdir -p files/usr/lib/lua/luci/i18n
+          /tmp/po2lmo /tmp/i18n-trafficctl/trafficctl.zh-cn.po files/usr/lib/lua/luci/i18n/trafficctl.zh-cn.lmo
+
       - name: Generate base .config
         working-directory: lede
         run: |
@@ -256,15 +220,14 @@ jobs:
           echo "CONFIG_PACKAGE_luci-app-ssr-plus_INCLUDE_ShadowsocksR_Libev_Client=y" >> .config
           echo "CONFIG_PACKAGE_luci-app-ssr-plus_INCLUDE_ShadowsocksR_Libev_Server=y" >> .config
 
-          # 启用 trafficctl 及其中文语言包
+          # 启用 trafficctl（中文语言包通过 files/ 覆盖方式直接写入固件，不需要额外 package）
           echo "CONFIG_PACKAGE_luci-app-trafficctl=y" >> .config
-          echo "CONFIG_PACKAGE_luci-i18n-trafficctl-zh-cn=y" >> .config
 
           make defconfig
 
       - name: Download package sources
         working-directory: lede
-        run: make download -j${{ env.JOBS }} V=s
+        run: make download -j${{ env.JOBS }} V=s IGNORE_ERRORS=n m
 
       - name: Compile firmware
         working-directory: lede
