@@ -71,7 +71,8 @@ jobs:
       - name: Compile i18n .lmo
         working-directory: lede
         run: |
-          gcc -O2 -o /tmp/po2lmo -Ifeeds/luci/modules/luci-base/src feeds/luci/modules/luci-base/src/po2lmo.c
+          gcc -O2 -o /tmp/po2lmo -Ifeeds/luci/modules/luci-base/src \
+            feeds/luci/modules/luci-base/src/po2lmo.c feeds/luci/modules/luci-base/src/template_lmo.c
           /tmp/po2lmo package/luci-i18n-trafficctl-zh-cn/src/trafficctl.zh-cn.po package/luci-i18n-trafficctl-zh-cn/src/trafficctl.zh-cn.lmo
 
       - name: Generate base .config
