@@ -181,8 +181,8 @@ jobs:
       - name: Compile i18n .lmo
         working-directory: lede
         run: |
-          # po2lmo 源码在 luci feed 里，编译成可执行文件
-          gcc -O2 -o /tmp/po2lmo feeds/luci/modules/luci-base/src/po2lmo.c
+          # po2lmo 源码在 luci feed 里，编译成可执行文件（用 -I 指定头文件路径，#include "" 才会找到）
+          gcc -O2 -o /tmp/po2lmo -Ifeeds/luci/modules/luci-base/src feeds/luci/modules/luci-base/src/po2lmo.c
           # 转 .po 为 .lmo，放入 files/ 覆盖目录（LEDE 构建时会刷入固件 rootfs）
           mkdir -p files/usr/lib/lua/luci/i18n
           /tmp/po2lmo /tmp/i18n-trafficctl/trafficctl.zh-cn.po files/usr/lib/lua/luci/i18n/trafficctl.zh-cn.lmo
