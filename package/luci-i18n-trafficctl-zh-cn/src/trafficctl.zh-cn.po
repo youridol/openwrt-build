@@ -4,109 +4,726 @@ msgstr ""
 "Language: zh_CN\n"
 "Plural-Forms: nplurals=1; plural=0;\n"
 
-#: luasrc/view/trafficctl/status.htm
-msgid "Traffic Control Status"
-msgstr "流量控制状态"
-
-msgid "Interface"
-msgstr "接口"
-
-msgid "Download"
-msgstr "下载"
-
-msgid "Upload"
-msgstr "上传"
-
-msgid "Bytes"
-msgstr "字节"
-
-msgid "Packets"
-msgstr "数据包"
-
-msgid "Status"
-msgstr "状态"
+msgid "Accelerates routing in the kernel via nftables flowtable. Speed monitoring and traffic shaping work normally."
+msgstr "通过nftables流表加速内核路由。速率监控和流量整形正常工作。"
 
 msgid "Active"
 msgstr "活跃"
 
-msgid "Inactive"
-msgstr "非活跃"
+msgid "Active connections in conntrack"
+msgstr "conntrack中的活跃连接"
 
-#: luasrc/view/trafficctl/rules.htm
-msgid "Traffic Control Rules"
-msgstr "流量控制规则"
+msgid "Activity"
+msgstr "活动日志"
 
-msgid "Add Rule"
-msgstr "添加规则"
+msgid "Adding to"
+msgstr "添加到"
 
-msgid "Edit Rule"
-msgstr "编辑规则"
+msgid "All"
+msgstr "全部"
 
-msgid "Delete Rule"
-msgstr "删除规则"
+msgid "All active devices"
+msgstr "所有活跃设备"
 
-msgid "Source IP"
-msgstr "源 IP"
+msgid "All devices"
+msgstr "所有设备"
 
-msgid "Destination IP"
-msgstr "目标 IP"
+msgid "Applied — firewall reloading"
+msgstr "已应用 — 防火墙重载中"
 
-msgid "Protocol"
-msgstr "协议"
+msgid "Apply"
+msgstr "应用"
+
+msgid "Applying…"
+msgstr "应用中…"
+
+msgid "Auto-refresh interval for summary table"
+msgstr "摘要表自动刷新间隔"
+
+msgid "Avg"
+msgstr "平均"
+
+msgid "BLOCKED"
+msgstr "已阻断"
+
+msgid "Block Internet"
+msgstr "阻断互联网"
+
+msgid "Block WiFi"
+msgstr "阻断WiFi"
+
+msgid "Blocked"
+msgstr "已阻断"
+
+msgid "Blocking, rate limiting, and traffic shaping continue to work regardless."
+msgstr "阻断、限速和流量整形不受影响。"
+
+msgid "Blocks"
+msgstr "阻断"
+
+msgid "Borrowed"
+msgstr "借入"
+
+msgid "Bot commands:"
+msgstr "机器人命令："
+
+msgid "Bot is running"
+msgstr "机器人运行中"
+
+msgid "Bot is stopped"
+msgstr "机器人已停止"
+
+msgid "Bytes"
+msgstr "字节"
+
+msgid "Bytes dropped"
+msgstr "丢弃字节数"
+
+msgid "Bytes queued in tc"
+msgstr "tc队列中的字节数"
+
+msgid "Bytes queued in traffic shaper"
+msgstr "流量整形器中排队的字节数"
+
+msgid "CPU load (1 min)"
+msgstr "CPU负载（1分钟）"
+
+msgid "Calculating…"
+msgstr "计算中…"
+
+msgid "Chat ID"
+msgstr "聊天ID"
+
+msgid "Chat ID:"
+msgstr "聊天ID："
+
+msgid "Click a row to inspect that device. Download speed updates every 2 seconds."
+msgstr "点击行查看设备详情。下载速率每2秒更新。"
+
+msgid "Click header to sort."
+msgstr "点击表头排序。"
+
+msgid "Click to inspect"
+msgstr "点击查看"
+
+msgid "Click to toggle column visibility"
+msgstr "点击切换列可见性"
+
+msgid "Config"
+msgstr "配置"
+
+msgid "Connection interface (WiFi band or LAN port)"
+msgstr "连接接口（WiFi频段或LAN口）"
+
+msgid "Connections"
+msgstr "连接数"
+
+msgid "Conns"
+msgstr "连接数"
+
+msgid "Control"
+msgstr "控制"
+
+msgid "Current download speed (bytes/sec from router to device)"
+msgstr "当前下载速率（路由器到设备字节/秒）"
+
+msgid "Current mode: "
+msgstr "当前模式："
+
+msgid "Custom"
+msgstr "自定义"
+
+msgid "Customize message"
+msgstr "自定义消息"
+
+msgid "Custom…"
+msgstr "自定义…"
+
+msgid "DL Speed"
+msgstr "下行速率"
+
+msgid "Device"
+msgstr "设备"
+
+msgid "Device hostname from DHCP lease"
+msgstr "来自DHCP租约的设备主机名"
+
+msgid "Disable hardware offload (keeps software offload): "
+msgstr "禁用硬件卸载（保留软件卸载）："
+
+msgid "Dismiss"
+msgstr "忽略"
+
+msgid "Display"
+msgstr "显示"
+
+msgid "Done"
+msgstr "完成"
+
+msgid "Drop"
+msgstr "丢弃"
+
+msgid "Drop ratio"
+msgstr "丢弃率"
+
+msgid "Dropped"
+msgstr "已丢弃"
+
+msgid "Drops"
+msgstr "丢弃"
+
+msgid "Drops excess packets (instant enforcement, low overhead)"
+msgstr "丢弃超额数据包（即时生效，开销低）"
+
+msgid "Dst IP"
+msgstr "目标IP"
+
+msgid "ECN marks"
+msgstr "ECN标记数"
+
+msgid "EWMA"
+msgstr "指数加权移动平均"
+
+msgid "Enabled"
+msgstr "已启用"
+
+msgid "Enter a custom speed value"
+msgstr "输入自定义速率值"
+
+msgid "Extended"
+msgstr "扩展"
+
+msgid "Extended Statistics"
+msgstr "扩展统计"
+
+msgid "Filter connections by protocol"
+msgstr "按协议过滤连接"
+
+msgid "Flow Offload"
+msgstr "流量卸载"
+
+msgid "Flow: /devices → select device → inline keyboard with enabled actions above"
+msgstr "流程：/devices → 选择设备 → 内联键盘（显示已启用的操作）"
+
+msgid "Flows"
+msgstr "流数"
+
+msgid "Full control"
+msgstr "完全控制"
+
+msgid "Graph"
+msgstr "图表"
+
+msgid "Group"
+msgstr "分组"
+
+msgid "Group connections table rows"
+msgstr "连接表行分组"
+
+msgid "HTML:"
+msgstr "HTML："
+
+msgid "Hardware MAC address"
+msgstr "硬件MAC地址"
+
+msgid "Hardware flow offload"
+msgstr "硬件流量卸载"
+
+msgid "Hardware flow offloading active — real-time speed monitoring unavailable."
+msgstr "硬件流量卸载已激活 — 实时速率监控不可用。"
+
+msgid "Hardware flow offloading is active."
+msgstr "硬件流量卸载已激活。"
+
+msgid "Hardware offload"
+msgstr "硬件卸载"
+
+msgid "Hostname"
+msgstr "主机名"
+
+msgid "Hostname / Dst IP"
+msgstr "主机名/目标IP"
+
+msgid "How to get full functionality without disabling offload:"
+msgstr "如何在不关闭卸载的情况下获得完整功能："
+
+msgid "IP address"
+msgstr "IP地址"
+
+msgid "Inet"
+msgstr "互联网"
+
+msgid "Inline keyboard preview:"
+msgstr "内联键盘预览："
+
+msgid "Internet access status (paused = traffic blocked)"
+msgstr "互联网访问状态（暂停=流量被阻）"
+
+msgid "Known devices"
+msgstr "已知设备"
+
+msgid "Last seen"
+msgstr "最后在线"
+
+msgid "Lended"
+msgstr "借出"
+
+msgid "Limit"
+msgstr "限速"
+
+msgid "Limited"
+msgstr "已限速"
+
+msgid "Limited devices"
+msgstr "已限速设备"
+
+msgid "Limiter"
+msgstr "限速器"
+
+msgid "Limiter (nft drop)"
+msgstr "限速器（nft丢弃）"
+
+msgid "Limiting"
+msgstr "限速中"
+
+msgid "Link"
+msgstr "链路"
+
+msgid "Loading…"
+msgstr "加载中…"
+
+msgid "Local IP address"
+msgstr "本地IP地址"
+
+msgid "Log categories"
+msgstr "日志分类"
+
+msgid "Logging"
+msgstr "日志"
+
+msgid "Logging & Persistence"
+msgstr "日志与持久化"
+
+msgid "MAC address"
+msgstr "MAC地址"
+
+msgid "Max"
+msgstr "最大"
+
+msgid "Method"
+msgstr "方法"
+
+msgid "New devices"
+msgstr "新设备"
+
+msgid "No action buttons enabled"
+msgstr "未启用操作按钮"
+
+msgid "No active connections."
+msgstr "无活跃连接。"
+
+msgid "No activity recorded yet."
+msgstr "暂无活动记录。"
+
+msgid "No devices match filter."
+msgstr "没有匹配筛选条件的设备。"
+
+msgid "No extended stats available for this device."
+msgstr "该设备无扩展统计。"
+
+msgid "No extended stats available."
+msgstr "无扩展统计。"
+
+msgid "No offload"
+msgstr "不卸载"
+
+msgid "None (per-flow)"
+msgstr "无（按流）"
+
+msgid "Not enough data yet"
+msgstr "数据不足"
+
+msgid "Note: speed is measured before shaper — bursts above limit are normal"
+msgstr "注意：速率在整形前测量——超限突发是正常的"
+
+msgid "Notifications"
+msgstr "通知"
+
+msgid "Notifications only"
+msgstr "仅通知"
+
+msgid "Off"
+msgstr "关闭"
+
+msgid "Open DHCP/DNS bindings"
+msgstr "打开DHCP/DNS绑定"
+
+msgid "Or disable all flow offload in LuCI → Network → Firewall → General Settings."
+msgstr "或在LuCI → 网络 → 防火墙 → 常规设置中关闭所有流量卸载。"
+
+msgid "Overlimits"
+msgstr "超限次数"
+
+msgid "Packets dropped"
+msgstr "丢弃数据包"
+
+msgid "Packets dropped by rate limiter"
+msgstr "限速器丢弃的数据包"
+
+msgid "Passed"
+msgstr "已通过"
+
+msgid "Paste bot token"
+msgstr "粘贴机器人Token"
+
+msgid "Persist rules"
+msgstr "持久化规则"
+
+msgid "Poll"
+msgstr "轮询"
+
+msgid "Polling interval for per-device speed graph"
+msgstr "每设备速率图轮询间隔"
 
 msgid "Port"
 msgstr "端口"
 
-msgid "Speed Limit (kbps)"
-msgstr "限速 (kbps)"
+msgid "Preview:"
+msgstr "预览："
 
-msgid "Burst (kBytes)"
-msgstr "突发 (千字节)"
+msgid "Proto"
+msgstr "协议"
 
-msgid "Enable"
-msgstr "启用"
+msgid "Protocol"
+msgstr "协议"
 
-msgid "Disabled"
-msgstr "已禁用"
+msgid "Queue"
+msgstr "队列"
 
-msgid "No rules defined."
-msgstr "未定义任何规则。"
+msgid "Queue memory"
+msgstr "队列内存"
 
-msgid "Rule saved successfully."
-msgstr "规则保存成功。"
+msgid "Queued"
+msgstr "已排队"
 
-msgid "Rule deleted successfully."
-msgstr "规则删除成功。"
+msgid "Queues excess traffic (smoother streaming, lower jitter)"
+msgstr "排队超额流量（流媒体更流畅，抖动更低）"
 
-msgid "Are you sure you want to delete this rule?"
-msgstr "确定要删除这条规则吗?"
+msgid "Rate limiting — applies only to new connections"
+msgstr "速率限制 — 仅适用于新连接"
 
-msgid "Save & Apply"
-msgstr "保存并应用"
+msgid "Ratelimits"
+msgstr "速率限制"
 
-msgid "Cancel"
-msgstr "取消"
+msgid "Recent"
+msgstr "最近"
 
-msgid "General Settings"
-msgstr "常规设置"
+msgid "Refresh"
+msgstr "刷新"
 
-msgid "Enable Traffic Control"
-msgstr "启用流量控制"
+msgid "Removing from"
+msgstr "从…移除"
 
-msgid "Default Speed Limit (kbps)"
-msgstr "默认限速 (kbps)"
+msgid "Removing throttle…"
+msgstr "移除限速中…"
 
-msgid "Invalid IP address"
-msgstr "无效的 IP 地址"
+msgid "Running…"
+msgstr "运行中…"
 
-msgid "Invalid port number"
-msgstr "无效的端口号"
+msgid "Saving…"
+msgstr "保存中…"
 
-msgid "Speed limit must be a positive number"
-msgstr "限速值必须为正数"
+msgid "Scanning all devices…"
+msgstr "扫描所有设备中…"
 
-msgid "trafficctl"
-msgstr "流量控制"
+msgid "Search device (name, IP, MAC)…"
+msgstr "搜索设备（名称、IP、MAC）…"
+
+msgid "Sending…"
+msgstr "发送中…"
+
+msgid "Service"
+msgstr "服务"
+
+msgid "Settings"
+msgstr "设置"
+
+msgid "Shaped"
+msgstr "已整形"
+
+msgid "Shaped devices"
+msgstr "已整形设备"
+
+msgid "Shaped devices are usually not offloaded (kernel detects the HTB qdisc)."
+msgstr "已整形设备通常不会被卸载（内核检测到HTB队列）。"
+
+msgid "Shaper"
+msgstr "整形器"
+
+msgid "Shaper (tc/HTB queue)"
+msgstr "整形器（tc/HTB队列）"
+
+msgid "Shapes"
+msgstr "整形"
+
+msgid "Shaping"
+msgstr "整形中"
+
+msgid "Show/hide token"
+msgstr "显示/隐藏Token"
+
+msgid "Simple"
+msgstr "简单平均"
+
+msgid "Simple = arithmetic mean, EWMA = exponential weighted moving average"
+msgstr "简单平均=算术平均，EWMA=指数加权移动平均"
+
+msgid "Software flow offload"
+msgstr "软件流量卸载"
+
+msgid "Software flow offloading is active."
+msgstr "软件流量卸载已激活。"
+
+msgid "Software offload"
+msgstr "软件卸载"
+
+msgid "Speed"
+msgstr "速率"
+
+msgid "Speed Limit"
+msgstr "速率限制"
+
+msgid "Speed graph. Window = avg time. Orange dashed line = speed limit"
+msgstr "速率图。窗口=平均时间。橙色虚线=限速线"
+
+msgid "Speed limit"
+msgstr "速率限制"
+
+msgid "Speed limit: shaper (queue) or limiter (drop)"
+msgstr "速率限制：整形器（队列）或限速器（丢弃）"
+
+msgid "Speed monitoring — conntrack byte counters are not updated"
+msgstr "速率监控 — conntrack字节计数不更新"
+
+msgid "State"
+msgstr "状态"
+
+msgid "Stats"
+msgstr "统计"
+
+msgid "Syslog"
+msgstr "系统日志"
+
+msgid "TCP bytes transferred"
+msgstr "TCP传输字节"
+
+msgid "Table & Speed"
+msgstr "表格与速率"
+
+msgid "Telegram"
+msgstr "Telegram"
+
+msgid "Telegram Bot"
+msgstr "Telegram机器人"
+
+msgid "Test"
+msgstr "测试"
+
+msgid "The flowtable "
+msgstr "流表 "
+
+msgid "Throttle removed"
+msgstr "限速已移除"
+
+msgid "Time window for speed averaging"
+msgstr "速率平均时间窗口"
+
+msgid "To restore speed monitoring:"
+msgstr "恢复速率监控："
+
+msgid "Token:"
+msgstr "Token："
+
+msgid "Total bytes transferred (conntrack)"
+msgstr "传输总字节数（conntrack）"
+
+msgid "Total dropped"
+msgstr "总计丢弃"
+
+msgid "Total drops"
+msgstr "总丢弃数"
+
+msgid "Total queue memory"
+msgstr "队列总内存"
 
 msgid "Traffic Control"
 msgstr "流量控制"
+
+msgid "Traffic shaping (tc/HTB) — bypassed for offloaded flows"
+msgstr "流量整形（tc/HTB）— 已卸载的流量会绕过"
+
+msgid "Traffic shaping and blocking are not affected."
+msgstr "流量整形和阻断不受影响。"
+
+msgid "UDP bytes transferred"
+msgstr "UDP传输字节"
+
+msgid "Unblock Internet"
+msgstr "解除互联网阻断"
+
+msgid "Unblock WiFi"
+msgstr "解除WiFi阻断"
+
+msgid "Unknown error"
+msgstr "未知错误"
+
+msgid "Unknown — device unreachable"
+msgstr "未知 — 设备不可达"
+
+msgid "Utilization"
+msgstr "利用率"
+
+msgid "Variables"
+msgstr "变量"
+
+msgid "Visible columns"
+msgstr "可见列"
+
+msgid "WAN IP"
+msgstr "WAN IP"
+
+msgid "WiFi"
+msgstr "WiFi"
+
+msgid "WiFi SSID"
+msgstr "WiFi名称"
+
+msgid "WiFi band (2.4/5GHz)"
+msgstr "WiFi频段（2.4/5GHz）"
+
+msgid "WiFi blocked"
+msgstr "WiFi已阻断"
+
+msgid "WiFi blocking and internet blocking of new connections still work. "
+msgstr "WiFi阻断和互联网新连接阻断仍然有效。"
+
+msgid "WiFi deny list"
+msgstr "WiFi黑名单"
+
+msgid "WiFi signal (dBm)"
+msgstr "WiFi信号（dBm）"
+
+msgid "Window"
+msgstr "窗口"
+
+msgid "active concurrent connections in queue"
+msgstr "队列中并发活跃连接数"
+
+msgid "ago"
+msgstr "前"
+
+msgid "all active blocks, limits, and shapes"
+msgstr "所有活跃的阻断、限速和整形"
+
+msgid "all devices"
+msgstr "所有设备"
+
+msgid "blocked"
+msgstr "已阻断"
+
+msgid "bytes allocated by the queue discipline"
+msgstr "队列分配器分配的字节数"
+
+msgid "clear filter"
+msgstr "清除筛选"
+
+msgid "command list and bot mode"
+msgstr "命令列表和机器人模式"
+
+msgid "congestion signals without drop"
+msgstr "无丢弃拥塞信号"
+
+msgid "connection type (5G, LAN)"
+msgstr "连接类型（5G, LAN）"
+
+msgid "connections"
+msgstr "连接"
+
+msgid "current speed as percentage of rate limit"
+msgstr "当前速率占限速百分比"
+
+msgid "date (2026-05-26)"
+msgstr "日期（2026-05-26）"
+
+msgid "date + time"
+msgstr "日期+时间"
+
+msgid "device connections"
+msgstr "设备连接"
+
+msgid "device hostname"
+msgstr "设备主机名"
+
+msgid "device list → tap device → action buttons"
+msgstr "设备列表 → 点击设备 → 操作按钮"
+
+msgid "dropped"
+msgstr "已丢弃"
+
+msgid "groups from"
+msgstr "分组来自"
+
+msgid "line break"
+msgstr "换行"
+
+msgid "network interface"
+msgstr "网络接口"
+
+msgid "new"
+msgstr "新"
+
+msgid "old"
+msgstr "旧"
+
+msgid "own-rate vs parent-rate packets"
+msgstr "自身速率 vs 父速率数据包"
+
+msgid "packets dropped by queue overflow"
+msgstr "队列溢出丢弃的数据包"
+
+msgid "percentage of total traffic that was dropped"
+msgstr "丢弃流量占总流量百分比"
+
+msgid "pkts"
+msgstr "包"
+
+msgid "rDNS"
+msgstr "反向DNS"
+
+msgid "rate exceeded events"
+msgstr "超速率事件"
+
+msgid "resolving…"
+msgstr "解析中…"
+
+msgid "router hostname"
+msgstr "路由器主机名"
+
+msgid "router uptime"
+msgstr "路由器运行时间"
+
+msgid "saved"
+msgstr "已保存"
+
+msgid "time (14:32)"
+msgstr "时间（14:32）"
+
+msgid "total connected clients"
+msgstr "已连接客户端总数"
+
+msgid "traffic discarded by nft policer"
+msgstr "nft策略丢弃的流量"
+
+msgid "value"
+msgstr "值"
+
