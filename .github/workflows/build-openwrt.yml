@@ -186,7 +186,7 @@ jobs:
 
       - name: Download package sources
         working-directory: lede
-        run: make download -j${{ env.JOBS }} V=s IGNORE_ERRORS=n m
+        run: make download -j${{ env.JOBS }} V=s
 
       - name: Compile firmware
         working-directory: lede
