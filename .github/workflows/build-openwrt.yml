@@ -17,6 +17,12 @@ jobs:
   build:
     runs-on: ubuntu-22.04
     steps:
+      # 先 checkout openwrt-build 仓库（含自定义 package/）
+      - name: Checkout openwrt-build (custom packages)
+        uses: actions/checkout@v4
+        with:
+          path: openwrt-build
+
       - name: Checkout lede source
         uses: actions/checkout@v4
         with:
@@ -51,7 +57,7 @@ jobs:
           git clone --depth 1 https://github.com/YusDyr/luci-app-trafficctl.git /tmp/luci-app-trafficctl
           cp -r /tmp/luci-app-trafficctl/luci-app-trafficctl package/luci-app-trafficctl
           # 中文语言包来自 openwrt-build 仓库的 package/ 目录
-          cp -r ../package/luci-i18n-trafficctl-zh-cn package/
+          cp -r ../openwrt-build/package/luci-i18n-trafficctl-zh-cn package/
 
       - name: Update and install feeds
         working-directory: lede
