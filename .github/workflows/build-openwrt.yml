@@ -62,6 +62,22 @@ jobs:
           ./scripts/feeds update -a
           ./scripts/feeds install -a
 
+      - name: Force feeds to latest commit (fix outdated packages)
+        working-directory: lede
+        run: |
+          # 强制所有 feed 拉取最新 commit，避免编译出老旧版本
+          for f in feeds/*/; do
+            if [ -d "$f/.git" ]; then
+              feed_name=$(basename "$f")
+              echo ">>> 更新 feed: $feed_name"
+              (cd "$f" && git fetch origin 2>&1 && git reset --hard @{upstream} 2>&1) || \
+              (cd "$f" && default_branch=$(git remote show origin 2>/dev/null | sed -n 's/.*HEAD branch: //p') && \
+                git reset --hard "origin/${default_branch:-master}" 2>&1) || true
+            fi
+          done
+          # 重新生成 feed 索引，pick up 最新包
+          ./scripts/feeds install -a
+
       - name: Generate base .config
         working-directory: lede
         run: |
@@ -101,7 +117,8 @@ jobs:
           echo "CONFIG_PACKAGE_luci-i18n-luci-app-trafficctl-zh-cn=y" >> .config
 
           # 启用 https-dns-proxy 及其中文语言包
-          # luci-app-https-dns-proxy 依赖 https-dns-proxy 自动选中
+          # 显式选中 https-dns-proxy + luci-app + i18n 确保版本一致
+          echo "CONFIG_PACKAGE_https-dns-proxy=y" >> .config
           echo "CONFIG_PACKAGE_luci-app-https-dns-proxy=y" >> .config
           echo "CONFIG_PACKAGE_luci-i18n-https-dns-proxy-zh-cn=y" >> .config
 
