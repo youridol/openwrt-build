@@ -51,99 +51,16 @@ jobs:
         run: |
           echo "src-git helloworld https://github.com/fw876/helloworld" >> $FEED_CONF
 
-      - name: Add luci-app-trafficctl and i18n package
+      - name: Add luci-app-trafficctl (本地包，含中文翻译)
         working-directory: lede
         run: |
-          git clone --depth 1 https://github.com/YusDyr/luci-app-trafficctl.git /tmp/luci-app-trafficctl
-          cp -r /tmp/luci-app-trafficctl/luci-app-trafficctl package/luci-app-trafficctl
-          # 中文语言包来自 openwrt-build 仓库的 package/ 目录
-          cp -r ../openwrt-build/package/luci-i18n-trafficctl-zh-cn package/
+          cp -r ../openwrt-build/package/luci-app-trafficctl package/
 
       - name: Update and install feeds
         working-directory: lede
         run: |
           ./scripts/feeds update -a
           ./scripts/feeds install -a
-
-      # ==================== 编译中文语言包 .lmo ==================== 
-      # po2lmo 依赖 lmo.c（sfh_hash），但 lmo.c 又依赖 bison 生成的 plural_formula.h
-      # 自包含方式：提取 sfh_hash 并 #include po2lmo.c，一步到位
-      - name: Compile i18n .lmo
-        working-directory: lede
-        run: |
-          cat > /tmp/po2lmo_selfcontained.c << 'CEOF'
-          #include <stdio.h>
-          #include <stdlib.h>
-          #include <stdint.h>
-          #include <string.h>
-          #include <fcntl.h>
-          #include <sys/stat.h>
-          #include <sys/mman.h>
-          #include <arpa/inet.h>
-          #include <unistd.h>
-          #include <errno.h>
-          #include <fnmatch.h>
-          #include <dirent.h>
-          #include <ctype.h>
-          #include <limits.h>
-
-          /* sfh_hash from lib/lmo.c (self-contained, no plural deps needed) */
-          uint32_t sfh_hash(const char *data, size_t len, uint32_t init)
-          {
-              uint32_t hash = init + len;
-              uint32_t tmp;
-              int rem;
-
-              if (len <= 0 || data == NULL) return 0;
-
-              rem = len & 3;
-              len >>= 2;
-
-              for (; len > 0; len--)
-              {
-                  hash += *(const uint16_t *)data;
-                  tmp = (*(const uint16_t *)(data + 2) << 11) ^ hash;
-                  hash = (hash << 16) ^ tmp;
-                  data += 4;
-                  hash += hash >> 11;
-              }
-
-              switch (rem)
-              {
-                  case 3:
-                      hash += *(const uint16_t *)data;
-                      hash ^= hash << 16;
-                      hash ^= ((signed char)data[sizeof(uint16_t)]) << 18;
-                      hash += hash >> 11;
-                      break;
-                  case 2:
-                      hash += *(const uint16_t *)data;
-                      hash ^= hash << 11;
-                      hash += hash >> 17;
-                      break;
-                  case 1:
-                      hash += (signed char)*data;
-                      hash ^= hash << 10;
-                      hash += hash >> 1;
-                      break;
-              }
-
-              hash ^= hash << 3;
-              hash += hash >> 5;
-              hash ^= hash << 4;
-              hash += hash >> 17;
-              hash ^= hash << 25;
-              hash += hash >> 6;
-
-              return hash;
-          }
-
-          /* include po2lmo.c from luci feed (uses #include "lib/lmo.h" but we provide sfh_hash above) */
-          #include "feeds/luci/modules/luci-base/src/po2lmo.c"
-          CEOF
-
-          gcc -O2 -o /tmp/po2lmo -I. /tmp/po2lmo_selfcontained.c
-          /tmp/po2lmo package/luci-i18n-trafficctl-zh-cn/src/trafficctl.zh-cn.po package/luci-i18n-trafficctl-zh-cn/src/trafficctl.zh-cn.lmo
 
       - name: Generate base .config
         working-directory: lede
@@ -179,8 +96,9 @@ jobs:
           echo "CONFIG_PACKAGE_luci-app-ssr-plus_INCLUDE_ShadowsocksR_Libev_Server=y" >> .config
 
           # 启用 trafficctl 及其中文语言包
+          # i18n 包由 LuCI 构建系统从 po/zh-cn/ 自动生成，包名格式：luci-i18n-<PKG_NAME>-<lang>
           echo "CONFIG_PACKAGE_luci-app-trafficctl=y" >> .config
-          echo "CONFIG_PACKAGE_luci-i18n-trafficctl-zh-cn=y" >> .config
+          echo "CONFIG_PACKAGE_luci-i18n-luci-app-trafficctl-zh-cn=y" >> .config
 
           make defconfig
 
