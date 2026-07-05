@@ -727,3 +727,64 @@ msgstr "nft策略丢弃的流量"
 msgid "value"
 msgstr "值"
 
+
+# Missing from POT template
+msgid "Avg window"
+msgstr "平均窗口"
+
+msgid "Block"
+msgstr "阻断"
+
+msgid "Blocking"
+msgstr "阻断中"
+
+msgid "Extended stats"
+msgstr "扩展统计"
+
+msgid "Group by"
+msgstr "分组方式"
+
+msgid "Limiter (drop)"
+msgstr "限速器（丢弃）"
+
+msgid "Mode"
+msgstr "模式"
+
+msgid "No active devices."
+msgstr "无活跃设备。"
+
+msgid "ok"
+msgstr "确定"
+
+msgid "Removing throttle for"
+msgstr "正在移除限速"
+
+msgid "Reverse DNS"
+msgstr "反向DNS"
+
+msgid "Run"
+msgstr "运行"
+
+msgid "Shaper (queue)"
+msgstr "整形器（队列）"
+
+msgid "Show"
+msgstr "显示"
+
+msgid "Throttle"
+msgstr "限速"
+
+msgid "Unblock"
+msgstr "解除阻断"
+
+msgid "Unblocking"
+msgstr "解除阻断中"
+
+msgid "What do these stats mean?"
+msgstr "这些统计是什么意思？"
+
+msgid "WiFi Block"
+msgstr "WiFi阻断"
+
+msgid "WiFi Unblock"
+msgstr "解除WiFi阻断"
