@@ -104,6 +104,12 @@ jobs:
 
       - name: Download package sources
         working-directory: lede
+
+          # 启用 https-dns-proxy 及其中文语言包
+          # luci-app-https-dns-proxy 依赖 https-dns-proxy 自动选中
+          echo "CONFIG_PACKAGE_luci-app-https-dns-proxy=y" >> .config
+          echo "CONFIG_PACKAGE_luci-i18n-https-dns-proxy-zh-cn=y" >> .config
+
         run: make download -j${{ env.JOBS }} V=s
 
       - name: Compile firmware
