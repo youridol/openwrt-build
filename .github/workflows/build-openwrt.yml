@@ -100,6 +100,11 @@ jobs:
           echo "CONFIG_PACKAGE_luci-app-trafficctl=y" >> .config
           echo "CONFIG_PACKAGE_luci-i18n-luci-app-trafficctl-zh-cn=y" >> .config
 
+          # 启用 https-dns-proxy 及其中文语言包
+          # luci-app-https-dns-proxy 依赖 https-dns-proxy 自动选中
+          echo "CONFIG_PACKAGE_luci-app-https-dns-proxy=y" >> .config
+          echo "CONFIG_PACKAGE_luci-i18n-https-dns-proxy-zh-cn=y" >> .config
+
           make defconfig
 
       - name: Download package sources
