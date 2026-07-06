@@ -54,7 +54,7 @@ while uci delete https-dns-proxy.@https-dns-proxy[0] 2>/dev/null; do :; done
 uci set https-dns-proxy.config=main
 uci set https-dns-proxy.config.update_dnsmasq_config='*'
 uci set https-dns-proxy.config.force_dns='1'
-uci set https-dns-proxy.config.force_dns_port='53 853'
+uci set https-dns-proxy.config.force_dns_port='53' '853'
 
 # 唯一实例: AliDNS DoH
 uci add https-dns-proxy https-dns-proxy
