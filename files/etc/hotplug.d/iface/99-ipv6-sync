@@ -1,0 +1,27 @@
+#!/bin/sh
+# ============================================================
+# 99-ipv6-sync — Auto-sync WAN IPv6 prefix to LAN
+# ============================================================
+# 触发: wan6 interface up (dhcpv6c 获取全球地址后)
+# 作用: 提取 /64 前缀 → 赋给 br-lan → SIGHUP odhcpd 刷新 RA
+# ============================================================
+
+[ "$ACTION" = "ifup" ] || exit 0
+[ "$INTERFACE" = "wan6" ] || exit 0
+
+sleep 5
+
+WAN=$(ip -6 addr show pppoe-wan | awk '/scope global/ {print $2; exit}' | head -1)
+[ -z "$WAN" ] && exit 0
+
+# 提取 /64 前缀: 240e:350:7e0a:60b9:xxxx:xxxx:xxxx:xxxx → 240e:350:7e0a:60b9::
+PFX=$(echo "$WAN" | cut -d/ -f1 | awk -F: '{printf "%s:%s:%s:%s::", $1, $2, $3, $4}')
+
+# 清除旧地址，分配新地址
+ip -6 addr flush dev br-lan scope global 2>/dev/null
+ip -6 addr add ${PFX}1/64 dev br-lan
+
+# SIGHUP odhcpd: 刷新 RA 前缀，但不清除已分配的地址
+kill -HUP $(cat /var/run/odhcpd.pid 2>/dev/null) 2>/dev/null
+
+logger -t ipv6-sync "LAN: ${PFX}1/64 (synced from pppoe-wan)"
