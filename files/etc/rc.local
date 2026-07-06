@@ -1,0 +1,42 @@
+#!/bin/sh
+# ============================================================
+# rc.local — Gaming network runtime optimizations
+# 每次启动后由 init 执行
+# ============================================================
+
+# --- CPU governor → performance (消除变频延迟) ---
+for cpu in /sys/devices/system/cpu/cpu*/cpufreq/scaling_governor; do
+    [ -w "$cpu" ] && echo performance > "$cpu" 2>/dev/null
+done
+
+# --- RPS: 将网络中断分散到全部 CPU 核心 ---
+# 支持的最大核心数由 rps_cpus mask 决定 (f = 4核, ff = 8核)
+# 根据实际核心数自适应
+cores=$(grep -c ^processor /proc/cpuinfo)
+case $cores in
+    1) mask=1 ;;
+    2) mask=3 ;;
+    4) mask=f ;;
+    8) mask=ff ;;
+    *) mask=f ;;
+esac
+
+for iface in /sys/class/net/*/queues/rx-*/rps_cpus; do
+    [ -w "$iface" ] && echo $mask > "$iface" 2>/dev/null
+done
+
+# --- RPS 流量亲和性 ---
+# 总 flow_entries 32768，平均分配到每个 RX 队列
+queue_count=$(ls -d /sys/class/net/*/queues/rx-* 2>/dev/null | wc -l)
+if [ "$queue_count" -gt 0 ]; then
+    per_queue=$((32768 / queue_count))
+    [ "$per_queue" -lt 1 ] && per_queue=1
+    for q in /sys/class/net/*/queues/rx-*/rps_flow_cnt; do
+        [ -w "$q" ] && echo $per_queue > "$q" 2>/dev/null
+    done
+fi
+
+# --- 禁用 conntrack helper 自动分配 ---
+echo 0 > /proc/sys/net/netfilter/nf_conntrack_helper 2>/dev/null
+
+exit 0

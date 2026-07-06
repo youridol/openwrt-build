@@ -122,7 +122,26 @@ jobs:
           echo "CONFIG_PACKAGE_luci-app-https-dns-proxy=y" >> .config
           echo "CONFIG_PACKAGE_luci-i18n-https-dns-proxy-zh-cn=y" >> .config
 
+          # === 游戏网络优化内核模块 ===
+          # TCP BBR 拥塞控制
+          echo "CONFIG_PACKAGE_kmod-tcp-bbr=y" >> .config
+          # Fullcone NAT (游戏 UDP NAT 穿透)
+          echo "CONFIG_PACKAGE_iptables-mod-fullconenat=y" >> .config
+
           make defconfig
+
+      - name: Apply gaming optimization files overlay
+        working-directory: lede
+        run: |
+          # 将 openwrt-build/files/ 中的配置文件覆盖到固件 rootfs
+          # OpenWrt 构建系统会在打包时将 files/ 目录内容合并到根文件系统
+          if [ -d ../openwrt-build/files ]; then
+            cp -r ../openwrt-build/files ./
+            echo "Gaming optimization files copied to lede/files/"
+            find files/ -type f | sort
+          else
+            echo "No files/ directory found in openwrt-build"
+          fi
 
       - name: Download package sources
         working-directory: lede
@@ -130,7 +149,10 @@ jobs:
 
       - name: Compile firmware
         working-directory: lede
-        run: make -j${{ env.JOBS }} V=s
+        run: |
+          # Gaming optimized build
+          # files/ will be merged into rootfs during image generation
+          make -j${{ env.JOBS }} V=s
 
       - name: Upload artifacts
         uses: actions/upload-artifact@v4

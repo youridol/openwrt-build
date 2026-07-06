@@ -1,0 +1,92 @@
+#!/bin/sh
+# ============================================================
+# 99-gaming-optimize — OpenWrt 游戏网络优化 (first-boot UCI defaults)
+# ============================================================
+# 此脚本在固件首次启动时运行一次，执行完毕后自动删除。
+# 包含: 防火墙调优 / DNS over HTTPS / DHCP / 网络参数
+# ============================================================
+
+. /lib/functions.sh
+
+log() { echo "[gaming-optimize] $*"; }
+
+log "Applying gaming network optimization..."
+
+# ─────────────────────────────────────────────
+# 1. 防火墙优化
+# ─────────────────────────────────────────────
+
+# 流卸载 (hardware flow offload 视硬件而定，此处保持 software)
+uci set firewall.@defaults[0].flow_offloading='1'
+uci set firewall.@defaults[0].flow_offloading_hw='0'
+
+# Fullcone NAT（游戏 UDP NAT 穿透）
+uci set firewall.@defaults[0].fullcone='1'
+
+# 丢弃无效包
+uci set firewall.@defaults[0].drop_invalid='1'
+
+# LAN zone 也做 MTU 修正
+uci set firewall.@zone[0].mtu_fix='1'
+
+log "firewall: flow_offloading=1 fullcone=1 drop_invalid=1 mtu_fix(lan)=1"
+
+# ─────────────────────────────────────────────
+# 2. IPv6 禁用（ISP PPPoE 无 IPv6-PD）
+# ─────────────────────────────────────────────
+uci set network.lan.ipv6='0'
+uci set network.wan.ipv6='0'
+uci set dhcp.lan.dhcpv6='disabled'
+uci set dhcp.lan.ra='disabled'
+uci set dhcp.lan.ndp='disabled'
+
+# 删除 ULA 前缀（不分配本地 IPv6）
+uci delete network.globals.ula_prefix 2>/dev/null
+
+log "network: IPv6 disabled (no ISP PD)"
+
+# ─────────────────────────────────────────────
+# 3. HTTPS DNS 代理 → AliDNS DoH
+# ─────────────────────────────────────────────
+# 先清掉可能存在的默认实例，重新创建
+while uci delete https-dns-proxy.@https-dns-proxy[0] 2>/dev/null; do :; done
+
+uci set https-dns-proxy.config=main
+uci set https-dns-proxy.config.update_dnsmasq_config='*'
+uci set https-dns-proxy.config.force_dns='1'
+uci set https-dns-proxy.config.force_dns_port='53 853'
+
+# 唯一实例: AliDNS DoH
+uci add https-dns-proxy https-dns-proxy
+uci set https-dns-proxy.@https-dns-proxy[-1].bootstrap_dns='223.5.5.5,223.6.6.6'
+uci set https-dns-proxy.@https-dns-proxy[-1].resolver_url='https://dns.alidns.com/dns-query'
+uci set https-dns-proxy.@https-dns-proxy[-1].listen_addr='127.0.0.1'
+uci set https-dns-proxy.@https-dns-proxy[-1].listen_port='5054'
+uci set https-dns-proxy.@https-dns-proxy[-1].user='nobody'
+uci set https-dns-proxy.@https-dns-proxy[-1].group='nogroup'
+
+log "https-dns-proxy: AliDNS DoH (127.0.0.1:5054)"
+
+# ─────────────────────────────────────────────
+# 4. DNSMasq → 全部走 AliDNS DoH
+# ─────────────────────────────────────────────
+# 删除 dnsmasq 可能已有的上游 DNS server
+while uci delete dhcp.@dnsmasq[0].server 2>/dev/null; do :; done
+
+# 只添加 AliDNS DoH 代理
+uci add_list dhcp.@dnsmasq[0].server='127.0.0.1#5054'
+uci set dhcp.@dnsmasq[0].noresolv='1'
+uci set dhcp.@dnsmasq[0].cachesize='8192'
+uci set dhcp.@dnsmasq[0].ednspacket_max='1232'
+
+log "dnsmasq: server=127.0.0.1#5054 (AliDNS DoH only)"
+
+# ─────────────────────────────────────────────
+# 5. 提交全部 UCI 配置
+# ─────────────────────────────────────────────
+uci commit firewall
+uci commit network
+uci commit dhcp
+uci commit https-dns-proxy
+
+log "All UCI configs committed. Done."
