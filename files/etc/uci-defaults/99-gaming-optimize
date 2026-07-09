@@ -4,7 +4,7 @@
 # ============================================================
 # IPv4/IPv6 双栈版本
 # - IPv4: NAT + fullcone + flow_offload + AliDNS DoH
-# - IPv6: 公网直连, SLAAC (无 DHCPv6), 无 NAT
+# - IPv6: DHCPv6-PD (/56 前缀委派) + DHCPv6/SLAAC 混合 + 无 NAT
 # ============================================================
 
 . /lib/functions.sh
@@ -49,34 +49,51 @@ uci set firewall.@rule[-1].target='ACCEPT'
 log "firewall: flow_offloading fullcone drop_invalid mtu_fix icmpv6"
 
 # ─────────────────────────────────────────────
-# 2. IPv6 双栈: wan6 dhcpv6c over PPPoE
+# 2. IPv6 双栈: DHCPv6-PD over PPPoE
 # ─────────────────────────────────────────────
 # PPPoE 拨号时 IPv6CP 协商链路层地址
-# dhcpv6c 在 pppoe-wan 上获取全球地址
-# ISP 不给 PD 前缀，所以 reqprefix=no
-uci set network.lan.ipv6='1'
+# wan_6: dhcpv6c 从 ISP 获取全球地址 + /56 前缀委派 (DHCPv6-PD)
+# LAN: 从 /56 获取 /64 子网, DHCPv6 + SLAAC 混合模式
 uci set network.wan.ipv6='1'
-uci set network.wan6.device='pppoe-wan'
-uci set network.wan6.proto='dhcpv6'
-uci set network.wan6.reqaddress='try'
-uci set network.wan6.reqprefix='no'
-uci set network.wan6.norelease='1'
+uci set network.lan.ipv6='1'
+uci set network.lan.ip6assign='64'
+
+# wan_6: DHCPv6 客户端 (挂载到 PPPoE wan)
+uci delete network.wan_6 2>/dev/null
+uci set network.wan_6='interface'
+uci set network.wan_6.proto='dhcpv6'
+uci set network.wan_6.device='@wan'
+uci set network.wan_6.reqaddress='try'
+uci set network.wan_6.reqprefix='56'
+uci set network.wan_6.norelease='1'
+
 uci delete network.globals.ula_prefix 2>/dev/null
 
 # 确保 PPPoE 启用 IPv6CP
 grep -q '+ipv6' /etc/ppp/options 2>/dev/null || echo '+ipv6' >> /etc/ppp/options
 
-# LAN: SLAAC only (RA server, no DHCPv6)
-uci set dhcp.lan.ra='server'
-uci set dhcp.lan.ndp='disabled'
-uci set dhcp.lan.dhcpv6='disabled'
-uci set dhcp.lan.ra_default='1'
-uci delete dhcp.lan.ra_flags 2>/dev/null
-
-log "network: wan6=dhcpv6c, lan=SLAAC, no PD"
+log "network: wan_6=dhcpv6c+PD(/56), lan=/64, ip6assign"
 
 # ─────────────────────────────────────────────
-# 3. HTTPS DNS 代理 → AliDNS DoH (AAAA 支持)
+# 3. DHCPv6 + SLAAC 混合模式
+# ─────────────────────────────────────────────
+# odhcpd: 启用主 DHCP 服务 (管理 RA + DHCPv6)
+uci set dhcp.odhcpd.maindhcp='1'
+
+# LAN: RA + DHCPv6 混合 (兼容 Android SLAAC + Windows DHCPv6)
+# ra_management=1 (M flag) → 客户端同时使用 SLAAC + DHCPv6 获取地址
+# ndp=hybrid → odhcpd 管理 NDP 中继和直连
+uci set dhcp.lan.ra='server'
+uci set dhcp.lan.dhcpv6='server'
+uci set dhcp.lan.ndp='hybrid'
+uci set dhcp.lan.ra_management='1'
+uci set dhcp.lan.ra_default='1'
+uci set dhcp.lan.master='1'
+
+log "dhcp: odhcpd maindhcp, lan=server+hybrid (DHCPv6+SLAAC)"
+
+# ─────────────────────────────────────────────
+# 4. HTTPS DNS 代理 → AliDNS DoH (AAAA 支持)
 # ─────────────────────────────────────────────
 while uci delete https-dns-proxy.@https-dns-proxy[0] 2>/dev/null; do :; done
 
@@ -96,7 +113,7 @@ uci set https-dns-proxy.@https-dns-proxy[-1].group='nogroup'
 log "https-dns-proxy: AliDNS DoH (127.0.0.1:5054, A+AAAA)"
 
 # ─────────────────────────────────────────────
-# 4. DNSMasq → 全部走 AliDNS DoH
+# 5. DNSMasq → 全部走 AliDNS DoH
 # ─────────────────────────────────────────────
 while uci delete dhcp.@dnsmasq[0].server 2>/dev/null; do :; done
 
@@ -108,7 +125,7 @@ uci set dhcp.@dnsmasq[0].ednspacket_max='1232'
 log "dnsmasq: server=127.0.0.1#5054"
 
 # ─────────────────────────────────────────────
-# 5. 提交全部 UCI 配置
+# 6. 提交全部 UCI 配置
 # ─────────────────────────────────────────────
 uci commit firewall
 uci commit network
