@@ -39,4 +39,24 @@ fi
 # --- 禁用 conntrack helper 自动分配 ---
 echo 0 > /proc/sys/net/netfilter/nf_conntrack_helper 2>/dev/null
 
+# --- txqueuelen: 降低出口队列深度防缓冲膨胀 ---
+# eth0/1 从默认 1000→100, pppoe-wan 已是 3 不变
+for iface in eth0 eth1; do
+    [ -e "/sys/class/net/$iface" ] && ip link set dev $iface txqueuelen 100 2>/dev/null
+done
+
+# --- IRQ Affinity: 网卡中断绑定到指定核心 ---
+# eth0 → CPU0 (mask=1), eth1 → CPU2 (mask=4)
+# 分离 LAN/WAN 中断处理, 避免同一核心被抢占
+for irq in $(grep -E 'eth0|r8168' /proc/interrupts | awk -F: '{print $1}' | head -1); do
+    echo 1 > /proc/irq/$irq/smp_affinity 2>/dev/null
+done
+for irq in $(grep -E 'eth1' /proc/interrupts | awk -F: '{print $1}' | head -1); do
+    echo 4 > /proc/irq/$irq/smp_affinity 2>/dev/null
+done
+
+# --- Busy Polling: 启用 socket 层低延迟轮询 ---
+echo 50 > /proc/sys/net/core/busy_read 2>/dev/null
+echo 50 > /proc/sys/net/core/busy_poll 2>/dev/null
+
 exit 0

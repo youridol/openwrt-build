@@ -1,10 +1,11 @@
 #!/bin/sh
 # ============================================================
-# 99-gaming-optimize — OpenWrt 游戏网络优化 (first-boot UCI defaults)
+# 99-gaming-optimize — OpenWrt FPS 游戏网络优化 (first-boot UCI defaults)
 # ============================================================
-# IPv4/IPv6 双栈版本
+# IPv4/IPv6 双栈 FPS 优化版本 (CS2/Steam 适配)
 # - IPv4: NAT + fullcone + flow_offload + AliDNS DoH
 # - IPv6: DHCPv6-PD (/56 前缀委派) + DHCPv6/SLAAC 混合 + 无 NAT
+# - conntrack: sysctl UDP 超时 30s, max 131072 (见 sysctl.conf)
 # ============================================================
 
 . /lib/functions.sh
