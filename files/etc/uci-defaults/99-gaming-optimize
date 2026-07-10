@@ -49,6 +49,15 @@ uci set firewall.@rule[-1].target='ACCEPT'
 
 log "firewall: flow_offloading fullcone drop_invalid mtu_fix icmpv6"
 
+# IPv6 TCP MSS clamping for PPPoE MTU 1492
+# 防止 IPv6 大包超过 PPPoE 有效 MTU 导致丢包
+cat >> /etc/firewall.user << 'FWEOF'
+# IPv6 TCP MSS clamping (PPPoE MTU 1492)
+ip6tables -t mangle -A FORWARD -p tcp --tcp-flags SYN,RST SYN -o pppoe-wan -j TCPMSS --clamp-mss-to-pmtu
+FWEOF
+
+log "firewall: ip6tables MSS clamp for PPPoE"
+
 # ─────────────────────────────────────────────
 # 2. IPv6 双栈: DHCPv6-PD over PPPoE
 # ─────────────────────────────────────────────
@@ -86,12 +95,14 @@ uci set dhcp.odhcpd.maindhcp='0'
 # LAN: RA + DHCPv6 混合 (兼容 Android SLAAC + Windows DHCPv6)
 # ra_management=1 (M flag) → 客户端同时使用 SLAAC + DHCPv6 获取地址
 # ndp=hybrid → odhcpd 管理 NDP 中继和直连
+# ra_mtu=1452 → PPPoE MTU 1492 - IPv6 header 40 = 1452, 防大包丢包
 uci set dhcp.lan.ra='server'
 uci set dhcp.lan.dhcpv6='server'
 uci set dhcp.lan.ndp='hybrid'
 uci set dhcp.lan.ra_management='1'
 uci set dhcp.lan.ra_default='1'
 uci set dhcp.lan.master='1'
+uci set dhcp.lan.ra_mtu='1452'
 
 log "dhcp: dnsmasq(DHCPv4) + odhcpd(DHCPv6+RA), lan=server+hybrid"
 
