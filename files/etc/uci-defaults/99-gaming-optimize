@@ -103,6 +103,8 @@ uci set dhcp.lan.ra_management='1'
 uci set dhcp.lan.ra_default='1'
 uci set dhcp.lan.master='1'
 uci set dhcp.lan.ra_mtu='1452'
+uci set dhcp.lan.ra_mininterval='30'
+uci set dhcp.lan.ra_maxinterval='120'
 
 log "dhcp: dnsmasq(DHCPv4) + odhcpd(DHCPv6+RA), lan=server+hybrid"
 
