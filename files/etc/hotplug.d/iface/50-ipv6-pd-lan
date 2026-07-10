@@ -1,0 +1,10 @@
+#!/bin/sh
+# When wan_6 DHCPv6-PD gets a prefix, trigger LAN to apply it
+# Fixes: netifd marks prefix as "assigned" but never calls `ip addr add`
+# Without this, br-lan has no global IPv6 after reboot/PPPoE redial
+[ "$ACTION" = "ifup" ] || exit 0
+[ "$INTERFACE" = "wan_6" ] || exit 0
+logger -t "ipv6-pd" "wan_6 up, refreshing LAN prefix"
+sleep 3
+ifup lan
+logger -t "ipv6-pd" "LAN refreshed"
