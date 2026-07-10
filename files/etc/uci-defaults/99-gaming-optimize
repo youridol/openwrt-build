@@ -85,28 +85,33 @@ grep -q '+ipv6' /etc/ppp/options 2>/dev/null || echo '+ipv6' >> /etc/ppp/options
 log "network: wan_6=dhcpv6c+PD(/56), lan=/64, ip6assign"
 
 # ─────────────────────────────────────────────
-# 3. DHCPv6 + SLAAC 混合模式
+# 3. IPv6 纯 SLAAC 模式 (最快获取速度)
 # ─────────────────────────────────────────────
-# DHCP 分工: dnsmasq(DHCPv4) + odhcpd(DHCPv6+RA)
+# DHCP 分工: dnsmasq(DHCPv4) + odhcpd(RA+RDNSS)
 # maindhcp=0: 关键! 设1会导致dnsmasq关闭DHCPv4
 # 因为init script检测到maindhcp=1时设置DNSMASQ_DHCP_VER=0
 uci set dhcp.odhcpd.maindhcp='0'
 
-# LAN: RA + DHCPv6 混合 (兼容 Android SLAAC + Windows DHCPv6)
-# ra_management=1 (M flag) → 客户端同时使用 SLAAC + DHCPv6 获取地址
-# ndp=hybrid → odhcpd 管理 NDP 中继和直连
-# ra_mtu=1452 → PPPoE MTU 1492 - IPv6 header 40 = 1452, 防大包丢包
+# LAN: 纯 SLAAC (无 DHCPv6 开销, 最快 ~1s 获取地址)
+# RDNSS 在 RA 中直接提供 DNS, 无需 DHCPv6
+# dhcpv6=disabled → M=0 O=1, 客户端 SLAAC 获取地址
+# ndp=disabled → 内核处理 NDP, 减少 odhcpd 处理延迟
+# ra_mtu=1452 → PPPoE MTU 1492 - 40, 防大包丢包
 uci set dhcp.lan.ra='server'
-uci set dhcp.lan.dhcpv6='server'
-uci set dhcp.lan.ndp='hybrid'
-uci set dhcp.lan.ra_management='1'
+uci set dhcp.lan.dhcpv6='disabled'
+uci set dhcp.lan.ndp='disabled'
+uci set dhcp.lan.ra_management='0'
 uci set dhcp.lan.ra_default='1'
 uci set dhcp.lan.master='1'
 uci set dhcp.lan.ra_mtu='1452'
-uci set dhcp.lan.ra_mininterval='30'
-uci set dhcp.lan.ra_maxinterval='120'
+uci set dhcp.lan.ra_mininterval='20'
+uci set dhcp.lan.ra_maxinterval='60'
 
-log "dhcp: dnsmasq(DHCPv4) + odhcpd(DHCPv6+RA), lan=server+hybrid"
+# 禁用路由器侧 DAD (无其他路由器在 LAN, 安全)
+sysctl -w net.ipv6.conf.br-lan.dad_transmits=0 2>/dev/null
+sysctl -w net.ipv6.conf.br-lan.accept_dad=0 2>/dev/null
+
+log "dhcp: dnsmasq(DHCPv4) + odhcpd(SLAAC+RA), pure SLAAC, RA 20-60s"
 
 # ─────────────────────────────────────────────
 # 4. HTTPS DNS 代理 → AliDNS DoH (AAAA 支持)
