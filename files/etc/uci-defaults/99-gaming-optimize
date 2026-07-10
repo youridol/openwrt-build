@@ -78,8 +78,10 @@ log "network: wan_6=dhcpv6c+PD(/56), lan=/64, ip6assign"
 # ─────────────────────────────────────────────
 # 3. DHCPv6 + SLAAC 混合模式
 # ─────────────────────────────────────────────
-# odhcpd: 启用主 DHCP 服务 (管理 RA + DHCPv6)
-uci set dhcp.odhcpd.maindhcp='1'
+# DHCP 分工: dnsmasq(DHCPv4) + odhcpd(DHCPv6+RA)
+# maindhcp=0: 关键! 设1会导致dnsmasq关闭DHCPv4
+# 因为init script检测到maindhcp=1时设置DNSMASQ_DHCP_VER=0
+uci set dhcp.odhcpd.maindhcp='0'
 
 # LAN: RA + DHCPv6 混合 (兼容 Android SLAAC + Windows DHCPv6)
 # ra_management=1 (M flag) → 客户端同时使用 SLAAC + DHCPv6 获取地址
@@ -91,7 +93,7 @@ uci set dhcp.lan.ra_management='1'
 uci set dhcp.lan.ra_default='1'
 uci set dhcp.lan.master='1'
 
-log "dhcp: odhcpd maindhcp, lan=server+hybrid (DHCPv6+SLAAC)"
+log "dhcp: dnsmasq(DHCPv4) + odhcpd(DHCPv6+RA), lan=server+hybrid"
 
 # ─────────────────────────────────────────────
 # 4. HTTPS DNS 代理 → AliDNS DoH (AAAA 支持)
