@@ -146,11 +146,21 @@ uci set dhcp.@dnsmasq[0].ednspacket_max='1232'
 log "dnsmasq: server=127.0.0.1#5054"
 
 # ─────────────────────────────────────────────
-# 6. 提交全部 UCI 配置
+# 6. SSR-Plus: 禁用国外 IPv6 (国内双栈, 国外仅IPv4)
+# ─────────────────────────────────────────────
+# mosdns_ipv6=0: 国外域名 AAAA → reject, 仅返回 IPv4
+# 模板默认已设为 main_sequence_disable_IPv6 (见 files/etc/ssrplus/)
+uci set shadowsocksr.@global[0].mosdns_ipv6='0'
+
+log "ssr-plus: mosdns_ipv6=0 (domestic dual-stack, foreign IPv4 only)"
+
+# ─────────────────────────────────────────────
+# 7. 提交全部 UCI 配置
 # ─────────────────────────────────────────────
 uci commit firewall
 uci commit network
 uci commit dhcp
 uci commit https-dns-proxy
+uci commit shadowsocksr
 
 log "All UCI configs committed. Done."
