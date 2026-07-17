@@ -148,11 +148,12 @@ log "dnsmasq: server=127.0.0.1#5054"
 # ─────────────────────────────────────────────
 # 6. SSR-Plus: 禁用国外 IPv6 (国内双栈, 国外仅IPv4)
 # ─────────────────────────────────────────────
-# mosdns_ipv6=0: 国外域名 AAAA → reject, 仅返回 IPv4
-# 模板默认已设为 main_sequence_disable_IPv6 (见 files/etc/ssrplus/)
-uci set shadowsocksr.@global[0].mosdns_ipv6='0'
+# filter_aaaa=1: Web UI 复选框 "禁止海外域名返回IPv6" 勾选
+# get_filter_aaaa() → init script 选择 main_sequence_disable_IPv6
+# 效果: 国内域名 A+AAAA 正常, 国外域名仅 IPv4 (AAAA reject)
+uci set shadowsocksr.@global[0].filter_aaaa='1'
 
-log "ssr-plus: mosdns_ipv6=0 (domestic dual-stack, foreign IPv4 only)"
+log "ssr-plus: filter_aaaa=1 (Web UI checkbox, domestic dual-stack, foreign IPv4 only)"
 
 # ─────────────────────────────────────────────
 # 7. 提交全部 UCI 配置
