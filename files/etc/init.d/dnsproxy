@@ -139,50 +139,103 @@ service_is_running() {
 	pgrep -x dnsproxy >/dev/null 2>&1
 }
 
-# ALL_DOH: 按 UCI 状态与运行状态同步 nftables 拦截规则，并触发 fw4 reload。
-# 拦截有效条件 = lan_dns_intercept=1 且 dnsproxy 服务正在运行
-# （防止 dnsproxy 停止后仍强制客户端 DNS 到失效链路的断网场景）。
-# 规则写入 firewall4 的 /etc/nftables.d/（fw4 自动 include、每次 reload 幂等重建），
-# IPv4/IPv6 的 UDP/TCP 53 一并重定向到本机 dnsmasq，客户端手动指定 DNS 无法绕过。
-update_lan_intercept() {
-	local lan_int
-	config_get_bool lan_int global lan_dns_intercept 1
-
-	# ALL_DOH: 确保 /etc/nftables.d 存在（firewall4 自动 include 该目录；
-	# 部分固件该目录可能不存在，需先创建否则无法写入拦截片段）
-	mkdir -p /etc/nftables.d
-
-	if [ "$lan_int" -eq 1 ] && service_is_running; then
-		local dev
-		dev=$(get_lan_device)
-		# 片段写法对齐 firewall4 自带 10-custom-filter-chains.nft 的声明式风格：
-		# fw4 每次 reload 先 flush 自身 table 再重建 → 该链每次重建，天然幂等；
-		# priority dstnat+1 与 fw4 的 dstnat(-100) 同 hook 不同优先级，不冲突。
-		cat > "$LAN_NFT_FILE" <<-EOF
-			# ALL_DOH: 强制拦截 LAN 客户端 DNS（由 dnsproxy init 管理，勿手工编辑）
-			# 功能: 客户端手动设置 8.8.8.8 / 1.1.1.1 等 DNS 也无法绕过本路由器
-			# 通过 firewall4 的 /etc/nftables.d 机制加载，fw4 reload 时整表重建（幂等）
-			chain dns_intercept_lan {
-				type nat hook prerouting priority dstnat + 1; policy accept;
-				iifname "$dev" udp dport 53 redirect to :53 comment "!alldoh: intercept LAN UDP DNS (v4/v6)"
-				iifname "$dev" tcp dport 53 redirect to :53 comment "!alldoh: intercept LAN TCP DNS (v4/v6)"
-			}
-		EOF
+# ALL_DOH: 检测防火墙后端类型（fw3=iptables-legacy / fw4=nftables）
+# lede(coolsnowwolf) 默认仍是 fw3(xtables-legacy)，无 nft 命令；
+# 官方 OpenWrt 25.x 为 fw4(nftables)。两种后端分别用对应的原生方式实现拦截。
+fw_backend() {
+	if command -v nft >/dev/null 2>&1; then
+		echo nft
 	else
-		# OFF: 不删除文件本身，仅清空为注释占位。
-		# 原因: fw4 的 ruleset 对 /etc/nftables.d/*.nft 使用 glob include，
-		#       若目录为空则 include 无匹配 → fw4 reload 失败；
-		#       保留占位文件可确保 fw4 reload 始终成功且无任何拦截规则。
-		cat > "$LAN_NFT_FILE" <<-EOF
-			# ALL_DOH: LAN DNS 拦截已关闭（由 dnsproxy init 管理，勿手工编辑）
+		echo ipt
+	fi
+}
+
+# ALL_DOH: iptables(fw3) 方案 —— 规则写入 /etc/firewall.user（fw3 restart 时自动执行），
+# 以标记注释包裹，保证幂等（先删旧段再写新段）。IPv4/IPv6 的 UDP/TCP 53 一并 REDIRECT。
+update_lan_intercept_ipt() {
+	local dev begin_marker end_marker
+	dev=$(get_lan_device)
+	FW_USER="/etc/firewall.user"
+	begin_marker="# === ALL_DOH LAN DNS 拦截 BEGIN ==="
+	end_marker="# === ALL_DOH LAN DNS 拦截 END ==="
+
+	# 先移除旧段（无论 ON/OFF 都先清，保证幂等）
+	sed -i "/^${begin_marker}/,/^${end_marker}/d" "$FW_USER" 2>/dev/null
+
+	if [ "$1" = "on" ]; then
+		cat >> "$FW_USER" <<-EOF
+			$begin_marker
+			# 由 dnsproxy init 管理（ALL_DOH），勿手工编辑；
+			# 客户端手动设置 8.8.8.8 / 1.1.1.1 等 DNS 也无法绕过本路由器。
+			# IPv4: fw3 有自定义链 prerouting_rule（PREROUTING 首跳引用）；
+			# IPv6: fw3 的 ip6tables nat 无自定义链，直接追加到 PREROUTING 主链。
+			iptables -t nat -A prerouting_rule -i "$dev" -p udp --dport 53 -j REDIRECT --to-ports 53
+			iptables -t nat -A prerouting_rule -i "$dev" -p tcp --dport 53 -j REDIRECT --to-ports 53
+			ip6tables -t nat -A PREROUTING -i "$dev" -p udp --dport 53 -j REDIRECT --to-ports 53
+			ip6tables -t nat -A PREROUTING -i "$dev" -p tcp --dport 53 -j REDIRECT --to-ports 53
+			$end_marker
 		EOF
 	fi
 
-	# 触发 firewall4 重载，使规则立即生效/移除（fw4 每次都 flush 并重建其 table）
-	if [ -x /etc/init.d/firewall ]; then
-		/etc/init.d/firewall reload 2>/dev/null
-	elif command -v fw4 >/dev/null 2>&1; then
-		fw4 reload 2>/dev/null
+	# fw3 restart 会重新加载规则并执行 /etc/firewall.user
+	/etc/init.d/firewall restart 2>/dev/null
+}
+
+# ALL_DOH: 按 UCI 状态与运行状态同步拦截规则，并触发防火墙重载。
+# 拦截有效条件 = lan_dns_intercept=1 且 dnsproxy 服务正在运行
+# （防止 dnsproxy 停止后仍强制客户端 DNS 到失效链路的断网场景）。
+# - fw4(nftables): 写入 /etc/nftables.d/（fw4 自动 include、reload 幂等重建）
+# - fw3(iptables): 写入 /etc/firewall.user（fw3 restart 自动执行）
+# IPv4/IPv6 的 UDP/TCP 53 一并重定向到本机 dnsmasq，客户端手动指定 DNS 无法绕过。
+update_lan_intercept() {
+	local lan_int backend
+	config_get_bool lan_int global lan_dns_intercept 1
+	backend=$(fw_backend)
+
+	if [ "$backend" = "nft" ]; then
+		# ---- fw4/nftables 后端 ----
+		# 确保 /etc/nftables.d 存在（fw4 自动 include 该目录）
+		mkdir -p /etc/nftables.d
+
+		if [ "$lan_int" -eq 1 ] && service_is_running; then
+			local dev
+			dev=$(get_lan_device)
+			# 片段写法对齐 firewall4 自带 10-custom-filter-chains.nft 的声明式风格：
+			# fw4 每次 reload 先 flush 自身 table 再重建 → 该链每次重建，天然幂等；
+			# priority dstnat+1 与 fw4 的 dstnat(-100) 同 hook 不同优先级，不冲突。
+			cat > "$LAN_NFT_FILE" <<-EOF
+				# ALL_DOH: 强制拦截 LAN 客户端 DNS（由 dnsproxy init 管理，勿手工编辑）
+				# 功能: 客户端手动设置 8.8.8.8 / 1.1.1.1 等 DNS 也无法绕过本路由器
+				# 通过 firewall4 的 /etc/nftables.d 机制加载，fw4 reload 时整表重建（幂等）
+				chain dns_intercept_lan {
+					type nat hook prerouting priority dstnat + 1; policy accept;
+					iifname "$dev" udp dport 53 redirect to :53 comment "!alldoh: intercept LAN UDP DNS (v4/v6)"
+					iifname "$dev" tcp dport 53 redirect to :53 comment "!alldoh: intercept LAN TCP DNS (v4/v6)"
+				}
+			EOF
+		else
+			# OFF: 不删除文件本身，仅清空为注释占位。
+			# 原因: fw4 的 ruleset 对 /etc/nftables.d/*.nft 使用 glob include，
+			#       若目录为空则 include 无匹配 → fw4 reload 失败；
+			#       保留占位文件可确保 fw4 reload 始终成功且无任何拦截规则。
+			cat > "$LAN_NFT_FILE" <<-EOF
+				# ALL_DOH: LAN DNS 拦截已关闭（由 dnsproxy init 管理，勿手工编辑）
+			EOF
+		fi
+
+		# 触发 firewall4 重载，使规则立即生效/移除
+		if [ -x /etc/init.d/firewall ]; then
+			/etc/init.d/firewall reload 2>/dev/null
+		elif command -v fw4 >/dev/null 2>&1; then
+			fw4 reload 2>/dev/null
+		fi
+	else
+		# ---- fw3/iptables 后端 ----
+		if [ "$lan_int" -eq 1 ] && service_is_running; then
+			update_lan_intercept_ipt on
+		else
+			update_lan_intercept_ipt off
+		fi
 	fi
 }
 
