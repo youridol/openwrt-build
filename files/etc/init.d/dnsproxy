@@ -1,0 +1,248 @@
+#!/bin/sh /etc/rc.common
+# ============================================================
+# dnsproxy — ALL_DOH 加密 DNS 代理 服务脚本（procd）
+# ------------------------------------------------------------
+# 本文件由 openwrt-build 仓库 files/ overlay 提供（非上游源码）。
+# 基础逻辑源自 ImmortalWrt packages/net/dnsproxy 上游（GPL-3.0），
+# 本地扩展（带 "ALL_DOH" 标记的段落）：
+#   1. LAN DNS 强制拦截（nftables）自动管理：
+#      - ON : 生成 /etc/nftables.d/10-dnsproxy-lan-intercept.nft
+#             （firewall4 自动 include 该目录，fw4 reload 时幂等重建）
+#      - OFF: 删除该文件
+#      - 无论 ON/OFF 均触发 fw4 reload 让规则立即生效/移除
+#   2. 服务未运行时（stop/disabled）自动移除拦截规则，防止断网。
+# 链路: LAN → dnsmasq:53 → dnsproxy:5353 → DoH/DoT → Internet
+# ============================================================
+
+USE_PROCD=1
+START=90
+
+CONF="dnsproxy"
+PROG="/usr/bin/dnsproxy"
+
+# ALL_DOH: LAN 拦截 nftables 片段（firewall4 自动 include /etc/nftables.d/*.nft）
+LAN_NFT_FILE="/etc/nftables.d/10-dnsproxy-lan-intercept.nft"
+
+is_enabled() {
+	local enabled
+	config_get_bool enabled "$1" "$2" "0"
+	if [ "$enabled" -eq "1" ]; then
+		return 0
+	else
+		return 1
+	fi
+}
+
+is_empty() {
+	local empty
+	config_get empty "$1" "$2" $3
+	if [ -z "$empty" ]; then
+		return 0
+	else
+		return 1
+	fi
+}
+
+append_param() {
+	procd_append_param command "$1" $2
+}
+
+append_param_arg() {
+	local value
+	config_get value "$1" "$2" $4
+	[ -n "$value" ] && append_param "$3" "$value"
+}
+
+append_param_bool() {
+	is_enabled "$1" "$2" && append_param "--${2//_/-}"
+}
+
+load_config_arg() {
+	append_param_bool "$1" "http3"
+	append_param_bool "$1" "insecure"
+	append_param_bool "$1" "ipv6_disabled"
+	append_param_bool "$1" "refuse_any"
+	append_param_bool "$1" "verbose"
+}
+
+load_config_list() {
+	if is_empty "global" "listen_addr"; then
+		append_param "--listen" "127.0.0.1"
+	else
+		config_list_foreach "global" "listen_addr" "append_param '--listen'"
+	fi
+
+	if is_empty "global" "listen_port"; then
+		append_param "--port" "5353"
+	else
+		config_list_foreach "global" "listen_port" "append_param '--port'"
+	fi
+
+	is_empty "bogus_nxdomain" "ip_addr" || config_list_foreach "bogus_nxdomain" "ip_addr" "append_param '--bogus-nxdomain'"
+
+	is_enabled "private_rdns" "enabled" && {
+		append_param "--use-private-rdns"
+		config_list_foreach "private_rdns" "upstream" "append_param '--private-rdns-upstream'"
+	}
+
+	for i in "bootstrap" "fallback" "upstream"; do
+		is_empty "servers" "$i" || config_list_foreach "servers" "$i" "append_param '--$i'"
+	done
+}
+
+load_config_param() {
+	append_param_arg "global" "log_file" "--output"
+	append_param_arg "global" "max_go_routines" "--max-go-routines"
+	append_param_arg "global" "rate_limit" "--ratelimit"
+	append_param_arg "global" "timeout" "--timeout"
+	append_param_arg "global" "udp_buf_size" "--udp-buf-size"
+	append_param_arg "global" "upstream_mode" "--upstream-mode"
+
+	is_enabled "cache" "enabled" && {
+		append_param "--cache"
+		append_param_bool "cache" "cache_optimistic"
+		append_param_arg "cache" "size" "--cache-size"
+		append_param_arg "cache" "min_ttl" "--cache-min-ttl"
+		append_param_arg "cache" "max_ttl" "--cache-max-ttl"
+	}
+
+	is_enabled "dns64" "enabled" && {
+		append_param "--dns64"
+		append_param_arg "dns64" "dns64_prefix" "--dns64-prefix"
+	}
+
+	is_enabled "edns" "enabled" && {
+		append_param "--edns"
+		append_param_arg "edns" "edns_addr" "--edns-addr"
+	}
+
+	is_enabled "tls" "enabled" && {
+		append_param_arg "tls" "tls_crt" "--tls-crt"
+		append_param_arg "tls" "tls_key" "--tls-key"
+		append_param_arg "tls" "https_port" "--https-port"
+		append_param_arg "tls" "tls_port" "--tls-port"
+		append_param_arg "tls" "quic_port" "--quic-port"
+	}
+}
+
+# ALL_DOH: 解析 LAN 接口设备名（兼容新/旧 network 配置格式）
+# 拦截规则绑定 iifname，保证只拦截 LAN 入向流量，不影响 WAN/路由器自身/代理
+get_lan_device() {
+	local dev
+	dev=$(uci -q get network.lan.device)
+	[ -z "$dev" ] && dev=$(uci -q get network.lan.ifname)
+	echo "${dev:-br-lan}"
+}
+
+# ALL_DOH: 服务是否正在运行（procd 实例进程）
+service_is_running() {
+	pgrep -x dnsproxy >/dev/null 2>&1
+}
+
+# ALL_DOH: 按 UCI 状态与运行状态同步 nftables 拦截规则，并触发 fw4 reload。
+# 拦截有效条件 = lan_dns_intercept=1 且 dnsproxy 服务正在运行
+# （防止 dnsproxy 停止后仍强制客户端 DNS 到失效链路的断网场景）。
+# 规则写入 firewall4 的 /etc/nftables.d/（fw4 自动 include、每次 reload 幂等重建），
+# IPv4/IPv6 的 UDP/TCP 53 一并重定向到本机 dnsmasq，客户端手动指定 DNS 无法绕过。
+update_lan_intercept() {
+	local lan_int
+	config_get_bool lan_int global lan_dns_intercept 1
+
+	if [ "$lan_int" -eq 1 ] && service_is_running; then
+		local dev
+		dev=$(get_lan_device)
+		# 片段写法对齐 firewall4 自带 10-custom-filter-chains.nft 的声明式风格：
+		# fw4 每次 reload 先 flush 自身 table 再重建 → 该链每次重建，天然幂等；
+		# priority dstnat+1 与 fw4 的 dstnat(-100) 同 hook 不同优先级，不冲突。
+		cat > "$LAN_NFT_FILE" <<-EOF
+			# ALL_DOH: 强制拦截 LAN 客户端 DNS（由 dnsproxy init 管理，勿手工编辑）
+			# 功能: 客户端手动设置 8.8.8.8 / 1.1.1.1 等 DNS 也无法绕过本路由器
+			# 通过 firewall4 的 /etc/nftables.d 机制加载，fw4 reload 时整表重建（幂等）
+			chain dns_intercept_lan {
+				type nat hook prerouting priority dstnat + 1; policy accept;
+				iifname "$dev" udp dport 53 redirect to :53 comment "!alldoh: intercept LAN UDP DNS (v4/v6)"
+				iifname "$dev" tcp dport 53 redirect to :53 comment "!alldoh: intercept LAN TCP DNS (v4/v6)"
+			}
+		EOF
+	else
+		# OFF: 不删除文件本身，仅清空为注释占位。
+		# 原因: fw4 的 ruleset 对 /etc/nftables.d/*.nft 使用 glob include，
+		#       若目录为空则 include 无匹配 → fw4 reload 失败；
+		#       保留占位文件可确保 fw4 reload 始终成功且无任何拦截规则。
+		cat > "$LAN_NFT_FILE" <<-EOF
+			# ALL_DOH: LAN DNS 拦截已关闭（由 dnsproxy init 管理，勿手工编辑）
+		EOF
+	fi
+
+	# 触发 firewall4 重载，使规则立即生效/移除（fw4 每次都 flush 并重建其 table）
+	if [ -x /etc/init.d/firewall ]; then
+		/etc/init.d/firewall reload 2>/dev/null
+	elif command -v fw4 >/dev/null 2>&1; then
+		fw4 reload 2>/dev/null
+	fi
+}
+
+start_service() {
+	config_load "$CONF"
+
+	is_enabled "global" "enabled" || {
+		# ALL_DOH: 服务未启用时同步移除拦截规则，避免强制失效链路
+		update_lan_intercept
+		return 1
+	}
+
+	local log_file tls_crt tls_key
+	config_get log_file global log_file
+	config_get tls_crt tls tls_crt
+	config_get tls_key tls tls_key
+
+	procd_open_instance "$CONF"
+	procd_set_param command "$PROG"
+
+	load_config_arg "global"
+	load_config_list
+	load_config_param
+
+	# This must be set at last, all other options set after this will be ignored
+	is_enabled "hosts" "enabled" && {
+		append_param "--hosts-file-enabled=true"
+		config_list_foreach "hosts" "hosts_files" "append_param '--hosts-files'"
+	} || append_param "--hosts-file-enabled=false"
+
+	procd_set_param respawn
+	procd_set_param stdout 1
+	procd_set_param stderr 1
+	procd_set_param user dnsproxy
+
+	procd_add_jail dnsproxy ronly log
+	procd_set_param capabilities "/etc/capabilities/dnsproxy.json"
+	procd_add_jail_mount "/etc/hosts"
+	procd_add_jail_mount "/etc/ssl/certs/ca-certificates.crt"
+	[ -z "$log_file" ] || procd_add_jail_mount_rw "$log_file"
+	[ -z "$tls_crt" ] || procd_add_jail_mount "$tls_crt"
+	[ -z "$tls_key" ] || procd_add_jail_mount "$tls_key"
+	is_enabled "hosts" "enabled" && config_list_foreach "hosts" "hosts_files" "procd_add_jail_mount"
+
+	procd_close_instance
+
+	# ALL_DOH: 服务启动后同步 LAN DNS 强制拦截规则
+	update_lan_intercept
+}
+
+stop_service() {
+	# ALL_DOH: 服务停止后移除拦截规则（否则客户端 DNS 被导向失效链路导致断网）
+	config_load "$CONF"
+	update_lan_intercept
+}
+
+# ALL_DOH: reload 入口（LuCI 保存设置后显式触发 / 配置变更自动触发）
+# - 重新评估并同步 nftables 拦截规则
+# - 运行中的 procd 实例参数由 config 变更 trigger 另行处理
+service_reload() {
+	config_load "$CONF"
+	update_lan_intercept
+}
+
+service_triggers() {
+	procd_add_reload_trigger "$CONF"
+}

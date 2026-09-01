@@ -56,6 +56,40 @@ jobs:
         run: |
           cp -r ../openwrt-build/package/luci-app-trafficctl package/
 
+      - name: Fetch luci-app-dnsproxy upstream and apply local patches (ALL_DOH)
+        working-directory: lede
+        run: |
+          # ============================================================
+          # ALL_DOH: 以 patch 形式在 openwrt-build 维护 luci-app-dnsproxy 改动
+          # 原则: 不修改 adm1n5ky/luci-app-dnsproxy 上游仓库, 不改分支
+          # 流程: 上游 clone → 依次 git apply patches/luci-app-dnsproxy/*.patch
+          # 约束: patch 失败必须让 CI 失败（禁止 || true / 静默忽略）
+          #       每次全新 clone → 重复执行天然幂等
+          # ============================================================
+          git clone --depth 1 https://github.com/adm1n5ky/luci-app-dnsproxy.git \
+            package/luci-app-dnsproxy
+
+          # 确保目录下确有 patch，否则明确失败
+          if ! ls ../openwrt-build/patches/luci-app-dnsproxy/*.patch >/dev/null 2>&1; then
+            echo "!!! 未找到 patches/luci-app-dnsproxy/*.patch，构建中止" >&2
+            exit 1
+          fi
+
+          for patch in ../openwrt-build/patches/luci-app-dnsproxy/*.patch; do
+            echo ">>> 应用 patch: $patch"
+            (cd package/luci-app-dnsproxy && git apply --check "$patch") || {
+              echo "!!! patch 应用检查失败（上游可能已变更，需同步更新 $patch）: $patch" >&2
+              exit 1
+            }
+            (cd package/luci-app-dnsproxy && git apply "$patch")
+            echo ">>> patch 应用成功: $patch"
+          done
+
+          # 打印已应用改动，编译日志可确认 patch 生效
+          echo "===== luci-app-dnsproxy 本地 patch 已生效改动 ==="
+          git -C package/luci-app-dnsproxy diff --stat
+          git -C package/luci-app-dnsproxy diff | head -80
+
       - name: Update and install feeds
         working-directory: lede
         run: |
@@ -77,6 +111,16 @@ jobs:
           done
           # 重新生成 feed 索引，pick up 最新包
           ./scripts/feeds install -a
+
+      - name: Remove legacy dnsproxy from packages feed (keep helloworld 0.83.0)
+        working-directory: lede
+        run: |
+          # packages feed 的 dnsproxy 为旧版(0.56.2)，与 helloworld feed 的
+          # 新版(0.83.0) 包名冲突会导致构建二义性。仅保留 helloworld 的新版。
+          # dnsproxy 的 init/config 由 openwrt-build/files overlay 提供。
+          rm -rf package/feeds/packages/dnsproxy
+          echo "Removed package/feeds/packages/dnsproxy (legacy 0.56.2)"
+          ls package/feeds/helloworld/dnsproxy/Makefile && echo "helloworld dnsproxy 0.83.0 ready"
 
       - name: Generate base .config
         working-directory: lede
@@ -116,11 +160,12 @@ jobs:
           echo "CONFIG_PACKAGE_luci-app-trafficctl=y" >> .config
           echo "CONFIG_PACKAGE_luci-i18n-luci-app-trafficctl-zh-cn=y" >> .config
 
-          # 启用 https-dns-proxy 及其中文语言包
-          # 显式选中 https-dns-proxy + luci-app + i18n 确保版本一致
-          echo "CONFIG_PACKAGE_https-dns-proxy=y" >> .config
-          echo "CONFIG_PACKAGE_luci-app-https-dns-proxy=y" >> .config
-          echo "CONFIG_PACKAGE_luci-i18n-https-dns-proxy-zh-cn=y" >> .config
+          # ALL_DOH: dnsproxy + luci-app-dnsproxy + CA 证书（https-dns-proxy 已彻底移除）
+          # 二进制来自 helloworld feed(0.83.0)，init/config 来自 openwrt-build/files
+          echo "CONFIG_PACKAGE_dnsproxy=y" >> .config
+          echo "CONFIG_PACKAGE_luci-app-dnsproxy=y" >> .config
+          echo "CONFIG_PACKAGE_ca-bundle=y" >> .config
+          echo "CONFIG_PACKAGE_ca-certificates=y" >> .config
 
           # === 游戏网络优化内核模块 ===
           # TCP BBR 拥塞控制
