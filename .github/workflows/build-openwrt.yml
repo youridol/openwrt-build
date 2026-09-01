@@ -205,12 +205,13 @@ jobs:
           fi
           # 关键脚本必须可执行（init/hotplug/uci-defaults 均需执行位，
           # 否则固件内 /etc/init.d/dnsproxy 等无法运行 → LuCI 服务控制全部失效）
-          # 注意: 不使用 || true —— 文件缺失/权限异常必须让 CI 明确失败
+          # 注意: 不使用 || true —— 文件缺失/权限异常必须让 CI 明确失败；
+          #       仅对实际存在的目录执行 chmod（避免 glob 无匹配报错）。
           chmod +x files/etc/init.d/dnsproxy
           chmod +x files/etc/rc.local
           chmod +x files/etc/uci-defaults/*
-          chmod +x files/etc/hotplug.d/iface/*
-          chmod +x files/etc/hotplug.d/dhcp/*
+          if [ -d files/etc/hotplug.d/iface ]; then chmod +x files/etc/hotplug.d/iface/*; fi
+          if [ -d files/etc/hotplug.d/dhcp ]; then chmod +x files/etc/hotplug.d/dhcp/*; fi
           echo "files overlay 执行位设置完成:"
           ls -l files/etc/init.d/dnsproxy files/etc/uci-defaults/ files/etc/hotplug.d/iface/ files/etc/rc.local 2>/dev/null
 
