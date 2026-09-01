@@ -81,14 +81,17 @@ jobs:
             exit 1
           fi
 
+          # 注意: 下面在 (cd package/... ) 子 shell 里执行 git apply，相对路径会失效，
+          #       必须先转成绝对路径（以 lede/ 为基准解析）。
           for patch in ../openwrt-build/patches/luci-app-dnsproxy/*.patch; do
-            echo ">>> 应用 patch: $patch"
-            (cd package/luci-app-dnsproxy && git apply --check "$patch") || {
-              echo "!!! patch 应用检查失败（上游可能已变更，需同步更新 $patch）: $patch" >&2
+            abs_patch="$(cd "$(dirname "$patch")" && pwd)/$(basename "$patch")"
+            echo ">>> 应用 patch: $abs_patch"
+            (cd package/luci-app-dnsproxy && git apply --check "$abs_patch") || {
+              echo "!!! patch 应用检查失败（上游可能已变更，需同步更新 $abs_patch）: $abs_patch" >&2
               exit 1
             }
-            (cd package/luci-app-dnsproxy && git apply "$patch")
-            echo ">>> patch 应用成功: $patch"
+            (cd package/luci-app-dnsproxy && git apply "$abs_patch")
+            echo ">>> patch 应用成功: $abs_patch"
           done
 
           # 打印已应用改动，编译日志可确认 patch 生效
