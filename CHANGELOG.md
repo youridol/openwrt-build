@@ -2,6 +2,18 @@
 
 本仓库所有功能/配置改动均记录于此。版本判型遵循全局规范（PATCH / MINOR / MAJOR）。
 
+## [v0.2.4] - 2026-09-01
+
+### 新增
+
+- **luci-app-dnsproxy 完整简体中文汉化**（`patches/luci-app-dnsproxy/0003-add-zh-cn-localization.patch`）：
+  源码级直译 6 个 JS 页面共 206 处字符串：
+  - `main.js`：服务状态/版本/服务控制（启动/重启/停止/启用/禁用）等；
+  - `settings.js`：全部配置选项卡（常规/服务器/缓存/TLS/隐私与安全/性能）与字段说明；
+  - `diagnostics.js`、`logread.js`、`help.js`、`file.js`：诊断/日志/帮助/配置文件页。
+  实现方式为直接替换 `_()` 字符串（不引入 luci.mk/po2lmo 构建链，零额外依赖，
+  CI 仅按既有 patch 流程应用即可自动生效）。
+
 ## [v0.2.3] - 2026-09-01
 
 ### 修复
