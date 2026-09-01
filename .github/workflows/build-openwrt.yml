@@ -46,10 +46,16 @@ jobs:
         # GHA runner 只有 7GB 内存，Go 编译 Xray 吃内存，限制并行度防 OOM
         run: echo "JOBS=2" >> $GITHUB_ENV
 
-      - name: Add helloworld feed
+      - name: Add helloworld feed (dedup-safe)
         working-directory: lede
         run: |
-          echo "src-git helloworld https://github.com/fw876/helloworld" >> $FEED_CONF
+          # 注意: lede feeds.conf.default 自 2026 年起已自带 helloworld feed,
+          # 旧写法直接追加会导致 "Duplicate feed name 'helloworld'" → feeds update
+          # 失败 (exit 25) → 整个构建中止。这里先判重、仅当缺失时才追加, 幂等。
+          grep -q '^src-git helloworld' "$FEED_CONF" 2>/dev/null || \
+            echo "src-git helloworld https://github.com/fw876/helloworld" >> "$FEED_CONF"
+          echo "--- feeds.conf helloworld 条目 ---"
+          grep '^src-git helloworld' "$FEED_CONF"
 
       - name: Add luci-app-trafficctl (本地包，含中文翻译)
         working-directory: lede
