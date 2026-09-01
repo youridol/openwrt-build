@@ -148,6 +148,10 @@ update_lan_intercept() {
 	local lan_int
 	config_get_bool lan_int global lan_dns_intercept 1
 
+	# ALL_DOH: 确保 /etc/nftables.d 存在（firewall4 自动 include 该目录；
+	# 部分固件该目录可能不存在，需先创建否则无法写入拦截片段）
+	mkdir -p /etc/nftables.d
+
 	if [ "$lan_int" -eq 1 ] && service_is_running; then
 		local dev
 		dev=$(get_lan_device)

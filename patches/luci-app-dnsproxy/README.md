@@ -20,6 +20,7 @@ adm1n5ky/luci-app-dnsproxy
 | Patch | 职责 |
 |---|---|
 | `0001-add-lan-dns-intercept.patch` | 新增 LuCI「拦截所有客户端 DNS」ON/OFF 开关（UCI: `dnsproxy.global.lan_dns_intercept`），保存后触发 `dnsproxy` reload 以同步 nftables 拦截规则 |
+| `0002-fix-version-detect-for-opkg.patch` | 修复 Service Control 按钮在 opkg 固件（lede/24.10）全部禁用：`parseVersion` 兼容读取 `/usr/lib/opkg/status`（apk 库缺失时回退），并给 ACL 增加该文件只读权限 |
 
 ## 维护规范
 

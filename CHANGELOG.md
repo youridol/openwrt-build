@@ -2,6 +2,25 @@
 
 本仓库所有功能/配置改动均记录于此。版本判型遵循全局规范（PATCH / MINOR / MAJOR）。
 
+## [v0.2.3] - 2026-09-01
+
+### 修复
+
+- **LuCI「Service Control」全部按钮不可用（实测固件 192.168.3.241）**，两个独立根因：
+  1. **init 脚本无执行位**：`files/etc/init.d/dnsproxy` 以 644 写入 rootfs，
+     `rc init dnsproxy ...` / 服务启停全部 Permission denied，dnsproxy 服务未运行。
+     修复：git 标记该文件 100755 + CI files overlay 步骤统一 `chmod +x`
+     （init/uci-defaults/hotplug/rc.local），且不使用 `|| true` 静默忽略。
+  2. **LuCI 前端版本探测不兼容 opkg**：上游 `parseVersion` 只读 `/lib/apk/db/installed`
+     （apk 格式，OpenWrt 25.x），lede 24.10 用 opkg（无该文件）→ `notInstalled=true` →
+     Service Control 全部按钮被禁用（含 Start/Stop/Restart/Enable/Disable）。
+     新增 `patches/luci-app-dnsproxy/0002-fix-version-detect-for-opkg.patch`：
+     - `main.js`：apk 数据库为空时回退读取 `/usr/lib/opkg/status`，解析
+       `Package: dnsproxy` / `Version: 0.83.0-1`；
+     - ACL 增加 `/usr/lib/opkg/status` 只读权限（否则 rpcd 返回 403）。
+- **`/etc/nftables.d` 目录缺失**：init 写拦截规则文件前 `mkdir -p /etc/nftables.d`
+  （部分固件 firewall4 未创建该目录，写入会失败）。
+
 ## [v0.2.2] - 2026-09-01
 
 ### 修复

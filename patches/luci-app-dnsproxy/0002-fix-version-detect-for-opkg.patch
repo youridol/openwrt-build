@@ -1,0 +1,59 @@
+diff --git a/usr/share/rpcd/acl.d/luci-app-dnsproxy.json b/usr/share/rpcd/acl.d/luci-app-dnsproxy.json
+index 2745570..b8c7eb8 100644
+--- a/usr/share/rpcd/acl.d/luci-app-dnsproxy.json
++++ b/usr/share/rpcd/acl.d/luci-app-dnsproxy.json
+@@ -6,6 +6,7 @@
+                 "/etc/config/dnsproxy": ["read"],
+                 "/etc/passwd": ["read"],
+                 "/lib/apk/db/installed": ["read"],
++                "/usr/lib/opkg/status": ["read"],
+                 "/proc/net/tcp": ["read"],
+                 "/proc/net/tcp6": ["read"],
+                 "/proc/net/udp": ["read"],
+diff --git a/www/luci-static/resources/view/dnsproxy/main.js b/www/luci-static/resources/view/dnsproxy/main.js
+index f17c585..9a30ccc 100644
+--- a/www/luci-static/resources/view/dnsproxy/main.js
++++ b/www/luci-static/resources/view/dnsproxy/main.js
+@@ -152,14 +152,24 @@ function makeActionHandler(action) {
+ //   V:0.73.4-r0
+ //   ...
+ // Блоки разделены пустой строкой.
+-function parseVersion(apkDb) {
+-    if (!apkDb) return null
+-    var blocks = apkDb.split('\n\n')
++// ALL_DOH patch: 兼容 opkg 固件(lede/24.10) — /usr/lib/opkg/status 的格式:
++//   Package: dnsproxy
++//   Version: 0.83.0-1
++//   以空行分隔。解析失败返回 null(视为未安装)。
++function parseVersion(pkgDb) {
++    if (!pkgDb) return null
++    var blocks = pkgDb.split('\n\n')
+     for (var i = 0; i < blocks.length; i++) {
++        // apk 格式: P:<name> + V:<version>
+         if (/^P:dnsproxy$/m.test(blocks[i])) {
+             var m = blocks[i].match(/^V:(.+)$/m)
+             return m ? m[1].trim() : null
+         }
++        // opkg 格式: Package: <name> + Version: <version>
++        if (/^Package:\s*dnsproxy$/m.test(blocks[i])) {
++            var m2 = blocks[i].match(/^Version:\s*(.+)$/m)
++            return m2 ? m2[1].trim() : null
++        }
+     }
+     return null // пакет не найден в базе — не установлен
+ }
+@@ -309,8 +319,12 @@ return view.extend({
+         return Promise.all([
+             uci.load('dnsproxy'),
+             L.resolveDefault(callServiceStatus('dnsproxy'), {}),
+-            // Читаем APK db как обычный файл — не нужен exec, не нужны доп. ACL
+-            L.resolveDefault(fs.read('/lib/apk/db/installed'), ''),
++            // ALL_DOH patch: 先读 apk 数据库(OpenWrt 25.x), 为空则读 opkg 状态文件
++            // (lede/OpenWrt 24.10)。两者都不存在时置空 -> parseVersion 返回 null。
++            L.resolveDefault(fs.read('/lib/apk/db/installed'), '').then(function (apkDb) {
++                if (apkDb && apkDb.length > 0) return apkDb
++                return L.resolveDefault(fs.read('/usr/lib/opkg/status'), '')
++            }),
+         ])
+     },
+ 
