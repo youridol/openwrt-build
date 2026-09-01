@@ -121,15 +121,21 @@ jobs:
           # 重新生成 feed 索引，pick up 最新包
           ./scripts/feeds install -a
 
-      - name: Remove legacy dnsproxy from packages feed (keep helloworld 0.83.0)
+      - name: Align dnsproxy feed link (keep helloworld 0.83.0, drop packages 0.56.2)
         working-directory: lede
         run: |
           # packages feed 的 dnsproxy 为旧版(0.56.2)，与 helloworld feed 的
           # 新版(0.83.0) 包名冲突会导致构建二义性。仅保留 helloworld 的新版。
+          # 注意: feeds install 对 helloworld/dnsproxy 的扫描链接存在不确定性，
+          #       这里显式重建链接（与 feeds install 的标准格式一致），幂等且明确。
           # dnsproxy 的 init/config 由 openwrt-build/files overlay 提供。
           rm -rf package/feeds/packages/dnsproxy
           echo "Removed package/feeds/packages/dnsproxy (legacy 0.56.2)"
-          ls package/feeds/helloworld/dnsproxy/Makefile && echo "helloworld dnsproxy 0.83.0 ready"
+          mkdir -p package/feeds/helloworld
+          ln -sfn ../../../feeds/helloworld/dnsproxy package/feeds/helloworld/dnsproxy
+          echo "Linked package/feeds/helloworld/dnsproxy -> ../../../feeds/helloworld/dnsproxy"
+          ls -l package/feeds/helloworld/dnsproxy/Makefile
+          head -12 package/feeds/helloworld/dnsproxy/Makefile | grep -E "PKG_NAME|PKG_VERSION"
 
       - name: Generate base .config
         working-directory: lede
