@@ -207,6 +207,33 @@ jobs:
         working-directory: lede
         run: make download -j${{ env.JOBS }} V=s
 
+      - name: Prebuild gn host tool with gcc-13 (fix gcc-12 ranges compile error)
+        working-directory: lede
+        run: |
+          # ---------------------------------------------------------------
+          # 背景: helloworld feed 的 gn(2026-08-13, Chromium build tool) 是
+          #       naiveproxy(SSR-Plus INCLUDE_NaiveProxy=y) 的 host 构建依赖
+          #       (naiveproxy/Makefile: PKG_BUILD_DEPENDS:=gn/host)。
+          #       gn 新版在 ubuntu-22.04 默认 gcc-12 上编译失败:
+          #         src/gn/scope.h:241 values_ | std::views::transform(...)
+          #         (libstdc++-12 ranges 适配不完整, gcc-13 已修复)
+          # 方案: 安装 gcc-13, 用 CC=gcc-13 CXX=g++-13 预编译 gn 并落 .built
+          #       stamp(OpenWrt stamp 机制), make world 时自动跳过 gn。
+          # 约束: 不改 helloworld 上游代码、不关闭 SSR-Plus 任何组件、
+          #       不影响 luci-app-dnsproxy 的 patch 流程。
+          # ---------------------------------------------------------------
+          sudo apt-get install -y -qq software-properties-common
+          sudo add-apt-repository -y ppa:ubuntu-toolchain-r/test >/dev/null
+          sudo apt-get update -qq
+          sudo apt-get install -y -qq gcc-13 g++-13
+          # gn 的 Host/Compile 使用 $(NINJA)，先确保 ninja host 工具就绪（幂等）
+          make tools/ninja/compile V=s
+          # gen.py 读取 CC/CXX 环境变量写入 build.ninja（gn 官方构建惯例），
+          # 预编译成功即生成 hostpkg/gn-*/.built stamp
+          CC=gcc-13 CXX=g++-13 make package/feeds/helloworld/gn/host/compile V=s
+          ls -l staging_dir/hostpkg/bin/gn
+          echo "gn host 工具(gcc-13) 预编译成功"
+
       - name: Compile firmware
         working-directory: lede
         run: |

@@ -2,6 +2,23 @@
 
 本仓库所有功能/配置改动均记录于此。版本判型遵循全局规范（PATCH / MINOR / MAJOR）。
 
+## [v0.2.2] - 2026-09-01
+
+### 修复
+
+- **CI 固件编译失败（gn host 工具）**：helloworld feed 的 `gn`（2026-08-13，Chromium 构建工具）
+  是 SSR-Plus 组件 naiveproxy 的 host 构建依赖（`PKG_BUILD_DEPENDS:=gn/host`）。
+  gn 新版在 ubuntu-22.04 默认 gcc-12 下编译失败：
+  `src/gn/scope.h:241` 的 `values_ | std::views::transform(...)` 报 ranges 约束错误
+  （libstdc++-12 的 ranges 适配不完整，gcc-13 已修复），导致 `package_compile` 汇总 Error 2、
+  整个固件构建失败（2026-09-01 run 实测 2h18m 后失败于此）。
+- 处理方案（不改 helloworld 上游、不关闭 SSR-Plus 任何组件）：
+  - CI 新增步骤「Prebuild gn host tool with gcc-13」：安装 `gcc-13/g++-13`
+    （ubuntu-toolchain-r/test PPA），先 `make tools/ninja/compile` 备好 ninja，
+    再以 `CC=gcc-13 CXX=g++-13` 预编译 `package/feeds/helloworld/gn/host/compile`
+    （gn 的 build/gen.py 读取 CC/CXX 环境变量写入 build.ninja），
+    预编译成功即生成 `.built` stamp，`make world` 时 OpenWrt 自动跳过 gn。
+
 ## [v0.2.1] - 2026-09-01
 
 ### 修复
