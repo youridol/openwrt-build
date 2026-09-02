@@ -2,6 +2,25 @@
 
 本仓库所有功能/配置改动均记录于此。版本判型遵循全局规范（PATCH / MINOR / MAJOR）。
 
+## [v0.3.1] - 2026-09-02
+
+### 修复
+
+- **LAN DNS 拦截被 SSR-Plus 透明代理抢先**：SSR-Plus 的 `SS_SPEC_WAN_AC` 链在 PREROUTING
+  第 1 条（fw3 restart 后重新插到最前），先于我们的 DNS REDIRECT（在 prerouting_rule 链内），
+  导致客户端手动指定 8.8.8.8/1.1.1.1 的 DNS 查询被 SSR-Plus 劫持（到真 8.8.8.8 明文），
+  未走 ALL_DOH 加密链路。
+- 修复：`update_lan_intercept_ipt` 改为**用 `-I PREROUTING 1` 把 DNS REDIRECT 插入
+  PREROUTING 最前**（firewall restart 重建链后再次 -I，确保先于 SSR-Plus 规则）；
+  firewall.user 段仅保留说明注释（规则由 init 动态管理），避免重复。
+
+### 验证（192.168.3.254 + Win11 客户端 192.168.3.238）
+
+- Win11 `nslookup <域名> 8.8.8.8`：tracert 第一跳 192.168.3.254；254 的 PREROUTING
+  REDIRECT UDP 计数随查询增长（0→9）；dnsproxy 日志显示该查询
+  `sending request addr=https://doh.360.cn:443/dns-query`（**加密 DoH 上游**）→ 完整链路
+  `Win11 → REDIRECT → dnsmasq:53 → dnsproxy:5353 → DoH` 加密解析生效。
+
 ## [v0.3.0] - 2026-09-02
 
 ### 新增

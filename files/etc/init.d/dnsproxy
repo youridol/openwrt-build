@@ -158,22 +158,29 @@ update_lan_intercept_ipt() {
 	sed -i "/^${begin_marker}/,/^${end_marker}/d" "$FW_USER" 2>/dev/null
 
 	if [ "$1" = "on" ]; then
+		# firewall.user 仅写入说明性标记段（fw3 restart 时执行）。
+		# 实际 iptables 规则由下方 restart 后的 -I 直接插入（保证在 PREROUTING 最前，
+		# 先于 SSR-Plus 透明代理 SS_SPEC_WAN_AC，避免被其抢先劫持 DNS）。
 		cat >> "$FW_USER" <<-EOF
 			$begin_marker
-			# 由 dnsproxy init 管理（ALL_DOH），勿手工编辑；
+			# ALL_DOH: LAN DNS 拦截规则由 dnsproxy init 动态管理（勿在此手工编辑）
 			# 客户端手动设置 8.8.8.8 / 1.1.1.1 等 DNS 也无法绕过本路由器。
-			# IPv4: fw3 有自定义链 prerouting_rule（PREROUTING 首跳引用）；
-			# IPv6: fw3 的 ip6tables nat 无自定义链，直接追加到 PREROUTING 主链。
-			iptables -t nat -A prerouting_rule -i "$dev" -p udp --dport 53 -j REDIRECT --to-ports 53
-			iptables -t nat -A prerouting_rule -i "$dev" -p tcp --dport 53 -j REDIRECT --to-ports 53
-			ip6tables -t nat -A PREROUTING -i "$dev" -p udp --dport 53 -j REDIRECT --to-ports 53
-			ip6tables -t nat -A PREROUTING -i "$dev" -p tcp --dport 53 -j REDIRECT --to-ports 53
 			$end_marker
 		EOF
 	fi
 
 	# fw3 restart 会重新加载规则并执行 /etc/firewall.user
 	/etc/init.d/firewall restart 2>/dev/null
+
+	# fw3 restart 会重建 PREROUTING 链（清空）；SSR-Plus 随后会把它自己的规则
+	# (SS_SPEC_WAN_AC) 重新插到最前。因此这里用 -I 插入 DNS REDIRECT 到最前，
+	# 确保所有 LAN 入向 DNS 一律先走 dnsmasq→dnsproxy(ALL_DOH 加密)。
+	if [ "$1" = "on" ]; then
+		iptables -t nat -I PREROUTING 1 -i "$dev" -p udp --dport 53 -j REDIRECT --to-ports 53 2>/dev/null
+		iptables -t nat -I PREROUTING 1 -i "$dev" -p tcp --dport 53 -j REDIRECT --to-ports 53 2>/dev/null
+		ip6tables -t nat -I PREROUTING 1 -i "$dev" -p udp --dport 53 -j REDIRECT --to-ports 53 2>/dev/null
+		ip6tables -t nat -I PREROUTING 1 -i "$dev" -p tcp --dport 53 -j REDIRECT --to-ports 53 2>/dev/null
+	fi
 }
 
 # ALL_DOH: 按 UCI 状态同步拦截规则，并触发防火墙重载。
