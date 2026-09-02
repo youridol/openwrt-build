@@ -3,6 +3,8 @@ name: Build OpenWrt with SSR-Plus and Trafficctl
 on:
   push:
     branches: [ master ]
+    tags:
+      - 'v*'
   workflow_dispatch:
   schedule:
     - cron: '0 0 * * *'
@@ -258,3 +260,40 @@ jobs:
         with:
           name: openwrt-x86-64-ssrplus
           path: lede/bin/targets/x86/64/*.img.gz
+
+      # ------------------------------------------------------------------
+      # 发版（tag v* push）时：把编译产物上传到 GitHub Release。
+      # release.yml 会先为该 tag 创建 Release（notes 取自 CHANGELOG 对应版本），
+      # 本步在此上传固件文件；master push 场景跳过（只留 artifact）。
+      # ------------------------------------------------------------------
+      - name: Upload firmware to GitHub Release (tag builds only)
+        if: startsWith(github.ref, 'refs/tags/')
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: |
+          VER="${GITHUB_REF_NAME}"
+          echo ">>> 将固件产物上传到 Release $VER"
+          # 等待 release.yml 已创建 Release（通常秒级完成；此处最多等 60s）
+          for i in $(seq 1 12); do
+            if gh release view "$VER" >/dev/null 2>&1; then
+              break
+            fi
+            echo "Release $VER 尚未就绪，等待 5s... ($i/12)"
+            sleep 5
+          done
+          gh release view "$VER" >/dev/null 2>&1 || {
+            echo "!!! Release $VER 不存在（release.yml 未运行？），改用 gh release create 兜底" >&2
+            gh release create "$VER" --title "$VER" --notes "自动生成的 Release（CHANGELOG 日志见 release.yml 工作流）"
+          }
+          # 上传固件（幂等：文件已存在则跳过）
+          ls lede/bin/targets/x86/64/*.img.gz
+          for f in lede/bin/targets/x86/64/*.img.gz; do
+            if gh release view "$VER" --json assets --jq '.assets[].name' | grep -qx "$(basename "$f")"; then
+              echo "已存在: $(basename "$f")，跳过"
+            else
+              gh release upload "$VER" "$f" --clobber
+              echo "已上传: $(basename "$f")"
+            fi
+          done
+          echo ">>> Release $VER 产物上传完成"
+          gh release view "$VER" --json url --jq .url

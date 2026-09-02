@@ -1,0 +1,95 @@
+name: Release
+
+on:
+  push:
+    tags:
+      - 'v*'
+  workflow_dispatch:
+    inputs:
+      tag:
+        description: '要发布/补发 Release 的版本 tag（如 v0.3.2）。留空则用 CHANGELOG 顶部版本。'
+        required: false
+        type: string
+
+# 需要写权限来创建/更新 GitHub Release
+permissions:
+  contents: write
+
+jobs:
+  release:
+    runs-on: ubuntu-latest
+    steps:
+      - name: Checkout repo
+        uses: actions/checkout@v4
+
+      # ------------------------------------------------------------------
+      # 从 CHANGELOG.md 提取与 tag 对应的版本日志段作为 Release notes。
+      # CHANGELOG 约定格式:
+      #   ## [v0.3.2] - 2026-09-02
+      #   ### 变更/修复/新增/移除/CI-CD
+      #   ...
+      #   ## [v0.3.1] - ...
+      # 提取 `## [<tag>]` 起到下一个 `## [` 前的内容（不含版本标题行本身，
+      # 因为 Release title 就是版本号）。
+      # ------------------------------------------------------------------
+      - name: Extract release notes from CHANGELOG
+        id: extract
+        run: |
+          # 确定目标版本 tag：手动触发可指定；push tag 时取 GITHUB_REF_NAME
+          if [ -n "${{ github.event.inputs.tag }}" ]; then
+            VER="${{ github.event.inputs.tag }}"
+          else
+            VER="${GITHUB_REF_NAME}"
+          fi
+          echo "目标版本: $VER"
+          echo "version=$VER" >> "$GITHUB_OUTPUT"
+
+          # 定位 `## [<VER>]` 标题行（CHANGELOG 标题带 v 前缀，如 `## [v0.3.2] - 2026-09-02`）
+          # 用固定字符串匹配，避免正则转义问题
+          start=$(grep -nF "## [$VER]" CHANGELOG.md | head -1 | cut -d: -f1)
+          # 兼容：若 VER 不带 v 前缀而 CHANGELOG 带 v（如手动输入 0.3.2）
+          if [ -z "$start" ] && [ "$VER" != "v${VER#v}" ]; then
+            start=$(grep -nF "## [v$VER]" CHANGELOG.md | head -1 | cut -d: -f1)
+          fi
+          if [ -z "$start" ]; then
+            echo "!!! CHANGELOG.md 中找不到版本 [$VER] 的日志段，中止发布" >&2
+            exit 1
+          fi
+
+          # 下一个版本标题行 = 日志段结束
+          next=$(tail -n +$((start + 1)) CHANGELOG.md | grep -n "^## \[" | head -1 | cut -d: -f1)
+          if [ -n "$next" ]; then
+            end=$((start + next - 1))
+          else
+            end=$(wc -l < CHANGELOG.md)
+          fi
+
+          # 输出日志段（不含版本标题行），裁剪开头/末尾空行
+          sed -n "$((start + 1)),${end}p" CHANGELOG.md > /tmp/release-notes.md
+          perl -0777 -pi -e 's/\n+\z/\n/' /tmp/release-notes.md
+          perl -0777 -pi -e 's/\A\n+//' /tmp/release-notes.md
+
+          echo "===== 提取的 Release notes ====="
+          cat /tmp/release-notes.md
+          echo "================================"
+
+      # ------------------------------------------------------------------
+      # 创建/更新 GitHub Release（幂等：已存在则仅更新 notes）。
+      # 固件产物由 build-openwrt.yml 在编译成功后上传到本 Release。
+      # ------------------------------------------------------------------
+      - name: Create or update GitHub Release
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: |
+          VER="${{ steps.extract.outputs.version }}"
+          if gh release view "$VER" >/dev/null 2>&1; then
+            echo ">>> Release $VER 已存在，更新 notes"
+            gh release edit "$VER" --notes-file /tmp/release-notes.md
+          else
+            echo ">>> 创建 Release $VER"
+            gh release create "$VER" \
+              --title "$VER" \
+              --notes-file /tmp/release-notes.md
+          fi
+          echo ">>> Release $VER 完成"
+          gh release view "$VER" --json url --jq .url
