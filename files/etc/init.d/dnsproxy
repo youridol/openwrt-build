@@ -134,11 +134,6 @@ get_lan_device() {
 	echo "${dev:-br-lan}"
 }
 
-# ALL_DOH: 服务是否正在运行（procd 实例进程）
-service_is_running() {
-	pgrep -x dnsproxy >/dev/null 2>&1
-}
-
 # ALL_DOH: 检测防火墙后端类型（fw3=iptables-legacy / fw4=nftables）
 # lede(coolsnowwolf) 默认仍是 fw3(xtables-legacy)，无 nft 命令；
 # 官方 OpenWrt 25.x 为 fw4(nftables)。两种后端分别用对应的原生方式实现拦截。
@@ -181,23 +176,32 @@ update_lan_intercept_ipt() {
 	/etc/init.d/firewall restart 2>/dev/null
 }
 
-# ALL_DOH: 按 UCI 状态与运行状态同步拦截规则，并触发防火墙重载。
-# 拦截有效条件 = lan_dns_intercept=1 且 dnsproxy 服务正在运行
-# （防止 dnsproxy 停止后仍强制客户端 DNS 到失效链路的断网场景）。
+# ALL_DOH: 按 UCI 状态同步拦截规则，并触发防火墙重载。
+# 用法: update_lan_intercept [auto|off]
+#   auto: lan_dns_intercept=1 且 dnsproxy 配置启用(enabled=1) → 开启拦截，否则关闭
+#         （用配置意图而非 pgrep 进程状态，避免开机时序下 procd 进程未起导致误删规则）
+#   off : 强制关闭拦截（服务停止/禁用时调用）
 # - fw4(nftables): 写入 /etc/nftables.d/（fw4 自动 include、reload 幂等重建）
 # - fw3(iptables): 写入 /etc/firewall.user（fw3 restart 自动执行）
 # IPv4/IPv6 的 UDP/TCP 53 一并重定向到本机 dnsmasq，客户端手动指定 DNS 无法绕过。
 update_lan_intercept() {
-	local lan_int backend
+	local lan_int backend mode
+	mode="${1:-auto}"
 	config_get_bool lan_int global lan_dns_intercept 1
 	backend=$(fw_backend)
+
+	# 是否开启拦截：auto 模式按配置判断，off 模式强制关闭
+	local enable_intercept=0
+	if [ "$mode" = "auto" ] && [ "$lan_int" -eq 1 ] && is_enabled "global" "enabled"; then
+		enable_intercept=1
+	fi
 
 	if [ "$backend" = "nft" ]; then
 		# ---- fw4/nftables 后端 ----
 		# 确保 /etc/nftables.d 存在（fw4 自动 include 该目录）
 		mkdir -p /etc/nftables.d
 
-		if [ "$lan_int" -eq 1 ] && service_is_running; then
+		if [ "$enable_intercept" -eq 1 ]; then
 			local dev
 			dev=$(get_lan_device)
 			# 片段写法对齐 firewall4 自带 10-custom-filter-chains.nft 的声明式风格：
@@ -231,7 +235,7 @@ update_lan_intercept() {
 		fi
 	else
 		# ---- fw3/iptables 后端 ----
-		if [ "$lan_int" -eq 1 ] && service_is_running; then
+		if [ "$enable_intercept" -eq 1 ]; then
 			update_lan_intercept_ipt on
 		else
 			update_lan_intercept_ipt off
@@ -244,7 +248,7 @@ start_service() {
 
 	is_enabled "global" "enabled" || {
 		# ALL_DOH: 服务未启用时同步移除拦截规则，避免强制失效链路
-		update_lan_intercept
+		update_lan_intercept off
 		return 1
 	}
 
@@ -283,13 +287,13 @@ start_service() {
 	procd_close_instance
 
 	# ALL_DOH: 服务启动后同步 LAN DNS 强制拦截规则
-	update_lan_intercept
+	update_lan_intercept auto
 }
 
 stop_service() {
 	# ALL_DOH: 服务停止后移除拦截规则（否则客户端 DNS 被导向失效链路导致断网）
 	config_load "$CONF"
-	update_lan_intercept
+	update_lan_intercept off
 }
 
 # ALL_DOH: reload 入口（LuCI 保存设置后显式触发 / 配置变更自动触发）
@@ -297,7 +301,7 @@ stop_service() {
 # - 运行中的 procd 实例参数由 config 变更 trigger 另行处理
 service_reload() {
 	config_load "$CONF"
-	update_lan_intercept
+	update_lan_intercept auto
 }
 
 service_triggers() {

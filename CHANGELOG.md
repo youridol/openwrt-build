@@ -2,6 +2,24 @@
 
 本仓库所有功能/配置改动均记录于此。版本判型遵循全局规范（PATCH / MINOR / MAJOR）。
 
+## [v0.2.6] - 2026-09-02
+
+### 修复
+
+- **开机时 LAN DNS 拦截规则不生成（时序 bug）**：`start_service` 中 `update_lan_intercept`
+  在 `procd_close_instance` 后立即执行，用 `pgrep dnsproxy` 判断运行状态——但 procd 异步
+  启动进程，开机瞬间进程可能尚未就绪 → 误判为“未运行” → 走了关闭分支，拦截规则不生成。
+- 改为**按配置意图判断**（`lan_dns_intercept=1` 且 `dnsproxy.global.enabled=1` 即开启），
+  `update_lan_intercept` 支持 `auto|off` 两种模式：
+  - `auto`（start/reload）：按配置判断开启或关闭；
+  - `off`（stop/disabled）：强制移除规则，防止客户端 DNS 被导向失效链路断网。
+  删除不再使用的 `service_is_running`（pgrep）辅助函数。
+
+### 验证（虚拟机 192.168.3.241，最新固件）
+
+- stop → 规则移除（v4/v6 均 0）；start → 规则恢复（v4:2 v6:2）；reload → 保持；
+- **reboot → 开机后规则自动生成（v4:2 v6:2，firewall.user ALL_DOH 段存在），dnsproxy running+ENABLED**。
+
 ## [v0.2.5] - 2026-09-02
 
 ### 修复
