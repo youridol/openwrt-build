@@ -2,6 +2,25 @@
 
 本仓库所有功能/配置改动均记录于此。版本判型遵循全局规范（PATCH / MINOR / MAJOR）。
 
+## [v0.3.3] - 2026-09-02
+
+### CI/CD
+
+- **新增发版工作流 `release.yml`**：推送 `v*` tag 时自动创建 GitHub Release，
+  Release notes 自动从 `CHANGELOG.md` 提取对应版本的日志段
+  （`## [<tag>]` 到下一个 `## [` 之间，裁剪首尾空行）；支持 `workflow_dispatch`
+  手动指定 tag 补发/更新（幂等：Release 已存在则仅更新 notes）。
+  CHANGELOG 中找不到对应版本时工作流明确失败（不静默）。
+- `build-openwrt.yml`：`v*` tag 推送时同样触发编译；编译成功后把固件产物
+  （`*.img.gz`）上传到 release.yml 创建的 Release（等待 Release 就绪 ≤60s，
+  文件已存在则跳过）；master 推送仍只保留 artifact。
+
+### 验证
+
+- `v0.3.2` 手动触发：Release 自动创建且 notes 与 CHANGELOG 一致；
+- 重复触发：success（幂等更新 notes）；
+- 不存在的版本（v9.9.9）：明确失败。
+
 ## [v0.3.2] - 2026-09-02
 
 ### 变更
