@@ -56,15 +56,19 @@ config dnsproxy 'private_rdns'
 	list upstream '127.0.0.1:53'
 
 config dnsproxy 'servers'
-	# 国内/国外统一加密解析，不做 DNS 分流：主上游为国内 DoH（稳定可达），
-	# 备选上游与 fallback 亦全部走加密（DoH），禁止明文 DNS 兜底。
+	# 国内/国外统一加密解析主链：主上游为国内 DoH（稳定可达）
+	# 国外域名（google 等）显式分流到 SSR-Plus 的 MosDNS(127.0.0.1:5335)：
+	# MosDNS 由 SSR-Plus 管理（pdnsd_enable=4），上游为经代理的国外 DoH，
+	# 返回真实 IP 不被污染。bootstrap 仅用于解析加密上游主机名（明文是其唯一用途）。
 	list upstream 'https://dns.alidns.com/dns-query'
 	list upstream 'https://doh.pub/dns-query'
 	list upstream 'https://doh.360.cn/dns-query'
+	# 常用国外域名 → SSR-Plus MosDNS(5335)（国外 DoH 经代理，防污染）
+	list upstream '[/google.com/youtube.com/github.com/twitter.com/x.com/facebook.com/instagram.com/whatsapp.com/telegram.org/reddit.com/discord.com/spotify.com/netflix.com/cloudflare.com/cloudflare-dns.com/amazon.com/amazonaws.com/stackoverflow.com/wikipedia.org/medium.com/notion.so/figma.com/vercel.com/herokuapp.com/]127.0.0.1:5335'
 	# bootstrap 仅用于解析加密上游主机名（明文是它唯一且应有的用途）
 	list bootstrap '223.5.5.5'
 	list bootstrap '223.6.6.6'
-	# fallback 备用通道同样加密（DoH），绝不明文
+	# fallback 备用通道同样加密（DoH），绝不明文；8.8.8.8 经 SSR-Plus 代理可达
 	list fallback 'https://1.12.12.12/dns-query'
 	list fallback 'https://8.8.8.8/dns-query'
 

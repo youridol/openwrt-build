@@ -2,6 +2,34 @@
 
 本仓库所有功能/配置改动均记录于此。版本判型遵循全局规范（PATCH / MINOR / MAJOR）。
 
+## [v0.3.0] - 2026-09-02
+
+### 新增
+
+- **国外域名 DNS 分流（走 SSR-Plus 代理）**：
+  - `files/etc/config/dnsproxy`：`servers.upstream` 增加常用国外域名
+    （google/youtube/github/twitter/x/facebook/instagram/whatsapp/telegram/reddit/
+    discord/spotify/netflix/cloudflare/amazon/stackoverflow/wikipedia 等）的
+    domain-specific 规则 → `127.0.0.1:5335`（SSR-Plus MosDNS）；
+  - `files/etc/uci-defaults/99-gaming-optimize`：配置 SSR-Plus 启用 MosDNS
+    （`pdnsd_enable=4`）与国外 DoH 上游（`tunnel_forward_mosdns` =
+    dns.google/cloudflare-dns.com/quad9），MosDNS 监听 5335，上游经 SSR-Plus
+    TPROXY 代理出站，返回真实 IP 防污染。
+- **最终 DNS 架构**：
+  ```
+  LAN → dnsmasq:53 → dnsproxy:5353（ALL_DOH 加密主链）
+                        ├─ 国内域名 → 国内 DoH（阿里/腾讯/360）
+                        ├─ 国外域名 → MosDNS:5335（SSR-Plus，国外 DoH 经代理）
+                        └─ fallback → 1.12.12.12（国内）/ 8.8.8.8（经代理）
+  ```
+
+### 验证（192.168.3.254）
+
+- 国外域名全部真实 IP：google 142.251.152.119、github 20.205.243.166、
+  youtube 142.251.155.4、reddit 151.101.65.140、twitter 151.101.66.146；
+- 国内域名正常：baidu 183.2.172.177、qq 101.91.22.57；
+- MosDNS(5335) 运行、dnsproxy running、SSR-Plus ENABLED、拦截规则 v4:2 v6:2。
+
 ## [v0.2.7] - 2026-09-02
 
 ### 修复（完整审查产出）

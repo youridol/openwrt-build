@@ -133,6 +133,18 @@ uci set dnsproxy.global.lan_dns_intercept='1'
 log "dnsproxy: ALL_DOH (DoH upstream, lan_dns_intercept=ON)"
 
 # ─────────────────────────────────────────────
+# 4.5 SSR-Plus: 启用 MosDNS(5335) 作为国外 DNS（经代理 DoH，防污染）
+#    链路: dnsproxy 对国外域名(google 等)显式分流 → 127.0.0.1:5335
+#    → SSR-Plus MosDNS → 国外 DoH(经 TPROXY 代理) → 真实 IP
+# ─────────────────────────────────────────────
+# pdnsd_enable=4 = mosdns 模式（SSR-Plus init 逻辑 dns_mode=4）
+# tunnel_forward_mosdns: MosDNS 的国外 DoH 上游（逗号分隔，走 SSR-Plus 代理）
+uci set shadowsocksr.@global[0].pdnsd_enable='4'
+uci set shadowsocksr.@global[0].tunnel_forward_mosdns='https://dns.google/dns-query,https://cloudflare-dns.com/dns-query,https://dns.quad9.net/dns-query'
+
+log "ssr-plus: MosDNS(5335) enabled, foreign DoH via proxy"
+
+# ─────────────────────────────────────────────
 # 5. DNSMasq → 全部走 dnsproxy (ALL_DOH)
 # ─────────────────────────────────────────────
 while uci delete dhcp.@dnsmasq[0].server 2>/dev/null; do :; done
