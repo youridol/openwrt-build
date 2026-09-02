@@ -4,13 +4,13 @@
 # ------------------------------------------------------------
 # 本文件由 openwrt-build 仓库 files/ overlay 提供（非上游源码）。
 # 基础逻辑源自 ImmortalWrt packages/net/dnsproxy 上游（GPL-3.0），
-# 本地扩展（带 "ALL_DOH" 标记的段落）：
-#   1. LAN DNS 强制拦截（nftables）自动管理：
-#      - ON : 生成 /etc/nftables.d/10-dnsproxy-lan-intercept.nft
-#             （firewall4 自动 include 该目录，fw4 reload 时幂等重建）
-#      - OFF: 删除该文件
-#      - 无论 ON/OFF 均触发 fw4 reload 让规则立即生效/移除
-#   2. 服务未运行时（stop/disabled）自动移除拦截规则，防止断网。
+# 本地扩展（带 "ALL_DOH" 标记的段落）——LAN DNS 强制拦截自动管理：
+#   - fw4(nftables) 后端: 生成 /etc/nftables.d/10-dnsproxy-lan-intercept.nft
+#     （firewall4 自动 include，fw4 reload 时整表重建幂等）
+#   - fw3(iptables) 后端: 维护 /etc/firewall.user 的 ALL_DOH 标记段
+#     （fw3 restart 自动执行；v4 用 prerouting_rule 链，v6 用 PREROUTING 链）
+#   - ON: lan_dns_intercept=1 且服务启用 → 写入规则；
+#   - OFF: 移除规则；服务停止/禁用时强制关闭，防止客户端 DNS 被导向失效链路断网。
 # 链路: LAN → dnsmasq:53 → dnsproxy:5353 → DoH/DoT → Internet
 # ============================================================
 
@@ -148,7 +148,7 @@ fw_backend() {
 # ALL_DOH: iptables(fw3) 方案 —— 规则写入 /etc/firewall.user（fw3 restart 时自动执行），
 # 以标记注释包裹，保证幂等（先删旧段再写新段）。IPv4/IPv6 的 UDP/TCP 53 一并 REDIRECT。
 update_lan_intercept_ipt() {
-	local dev begin_marker end_marker
+	local dev begin_marker end_marker FW_USER
 	dev=$(get_lan_device)
 	FW_USER="/etc/firewall.user"
 	begin_marker="# === ALL_DOH LAN DNS 拦截 BEGIN ==="

@@ -2,6 +2,25 @@
 
 本仓库所有功能/配置改动均记录于此。版本判型遵循全局规范（PATCH / MINOR / MAJOR）。
 
+## [v0.2.7] - 2026-09-02
+
+### 修复（完整审查产出）
+
+- **0003 汉化补丁补齐拦截开关标题**：审查发现 0003 的 settings.js 两个 hunk（第 6-66、77-316 行）
+  未覆盖第 67-76 行的拦截开关（0001 加入），导致最终文件标题仍是双语
+  「拦截所有客户端 DNS（Intercept all client DNS）」且描述含过时的 firewall4 表述。
+  已重新生成 0003：标题改为纯中文「拦截所有客户端 DNS」，描述改为
+  「由 dnsproxy init 自动管理（fw3 用 iptables、fw4 用 nftables）」，共 210 处替换。
+- **init 注释同步双后端**：文件头与 `update_lan_intercept` 相关注释由仅描述 nftables 更新为
+  fw3/fw4 双后端说明；`FW_USER` 增加 `local` 声明（避免泄漏到全局）。
+- **config/dnsproxy 注释同步**：拦截管理描述由「init + firewall4」改为双后端。
+- **文档同步**：patches README 与 CHANGELOG 中的 0001/0003 描述更新（双后端、210 处）。
+
+### 审查验证
+
+- 干净克隆 → 0001→0002→0003 顺序应用全部成功；6 个 JS 文件 `node --check` 全部通过；
+  拦截开关最终为纯中文标题；ACL json 语法正确；所有 `_()` 字符串无漏汉化（技术术语保留英文）。
+
 ## [v0.2.6] - 2026-09-02
 
 ### 修复
@@ -49,7 +68,7 @@
 ### 新增
 
 - **luci-app-dnsproxy 完整简体中文汉化**（`patches/luci-app-dnsproxy/0003-add-zh-cn-localization.patch`）：
-  源码级直译 6 个 JS 页面共 206 处字符串：
+  源码级直译 6 个 JS 页面共 210 处字符串：
   - `main.js`：服务状态/版本/服务控制（启动/重启/停止/启用/禁用）等；
   - `settings.js`：全部配置选项卡（常规/服务器/缓存/TLS/隐私与安全/性能）与字段说明；
   - `diagnostics.js`、`logread.js`、`help.js`、`file.js`：诊断/日志/帮助/配置文件页。

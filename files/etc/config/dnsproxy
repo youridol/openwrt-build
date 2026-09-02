@@ -7,7 +7,7 @@
 #   - 上游一律加密（https:// = DoH），bootstrap 仅用于解析加密上游主机名
 #   - 无明文 DNS 上游、无明文 fallback（fallback 亦为 DoH）
 #   - UCI 键 dnsproxy.global.lan_dns_intercept 控制 LAN DNS 强制拦截
-#     （LuCI 开关「拦截所有客户端 DNS」，由 init + firewall4 管理）
+#     （LuCI 开关「拦截所有客户端 DNS」，由 init 管理；fw3 用 iptables、fw4 用 nftables）
 # ============================================================
 
 config dnsproxy 'global'

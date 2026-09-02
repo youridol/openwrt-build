@@ -1,5 +1,5 @@
 diff --git a/www/luci-static/resources/tools/dnsproxy/settings.js b/www/luci-static/resources/tools/dnsproxy/settings.js
-index 7f221d2..ac41ae6 100644
+index 7f221d2..86c1396 100644
 --- a/www/luci-static/resources/tools/dnsproxy/settings.js
 +++ b/www/luci-static/resources/tools/dnsproxy/settings.js
 @@ -6,61 +6,61 @@ return L.Class.extend({
@@ -83,7 +83,18 @@ index 7f221d2..ac41ae6 100644
      o.placeholder = '/var/log/dnsproxy.log';
      o.rmempty = true;
      o.cfgvalue = function() { return uci.get('dnsproxy', 'global', 'log_file'); };
-@@ -77,240 +77,240 @@ return L.Class.extend({
+@@ -68,249 +68,249 @@ return L.Class.extend({
+ 
+     /* ── ALL_DOH: LAN DNS 强制拦截（本地 patch 新增，勿在上游修改）── */
+     o = s.taboption('general', form.Flag, 'lan_dns_intercept',
+-      '拦截所有客户端 DNS（Intercept all client DNS）',
++      '拦截所有客户端 DNS',
+       '将所有 LAN 客户端发往任意地址的 DNS 查询（UDP/TCP 端口 53）强制重定向到本机 dnsproxy 链路，' +
+       '客户端手动指定的 DNS（如 8.8.8.8 / 1.1.1.1）无法绕过本路由器。' +
+-      '通过 dnsproxy init + firewall4(/etc/nftables.d) 自动管理，UCI 键: dnsproxy.global.lan_dns_intercept');
++      '由 dnsproxy init 自动管理（fw3 用 iptables、fw4 用 nftables），UCI 键: dnsproxy.global.lan_dns_intercept');
+     o.rmempty = false;
+     o.cfgvalue = function() { return uci.get('dnsproxy', 'global', 'lan_dns_intercept'); };
      o.write    = function(sid, val) { uci.set('dnsproxy', 'global', 'lan_dns_intercept', val); };
  
      /* ── Servers ── */
@@ -1018,7 +1029,7 @@ index 3b086af..8ccc529 100644
          self._followBtn = followBtn
  
 diff --git a/www/luci-static/resources/view/dnsproxy/main.js b/www/luci-static/resources/view/dnsproxy/main.js
-index 9a30ccc..31902b7 100644
+index 9a30ccc..289002b 100644
 --- a/www/luci-static/resources/view/dnsproxy/main.js
 +++ b/www/luci-static/resources/view/dnsproxy/main.js
 @@ -76,9 +76,9 @@ function updateStatusUI(running) {
@@ -1155,3 +1166,14 @@ index 9a30ccc..31902b7 100644
          })
      },
  
+@@ -363,8 +363,8 @@ return view.extend({
+                 ui.changes.apply(mode == '0')
+             })
+             .then(function () {
+-                // ALL_DOH patch: 保存后触发 dnsproxy 服务 reload，重新评估 nftables
+-                // 拦截规则（ON → 写入 /etc/nftables.d 拦截链并 fw4 reload；OFF → 删除并 fw4 reload）
++                // ALL_DOH patch: 保存后触发 dnsproxy 服务 reload，重新评估 LAN DNS 拦截规则
++                // （fw3 用 iptables / fw4 用 nftables，由 init 自动选择并触发防火墙重载）
+                 return callInitAction('dnsproxy', 'reload').catch(function (e) {
+                     ui.addNotification(null, E('p', 'DNS 拦截规则更新失败: ' + e.message))
+                 })
