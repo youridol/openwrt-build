@@ -2,6 +2,19 @@
 
 本仓库所有功能/配置改动均记录于此。版本判型遵循全局规范（PATCH / MINOR / MAJOR）。
 
+## [v0.3.2] - 2026-09-02
+
+### 变更
+
+- **dnsproxy 上游模式改为 `parallel`**（原 `load_balance`）：
+  - 实测（192.168.3.254，冷查询 10 样本中位数）：
+    `parallel 39.6ms` < `load_balance 62.5ms` < `fastest_addr 97.7ms`；
+  - `parallel`：并行查询全部上游取最快响应，延迟最低且稳定（P90 57-59ms）；
+  - `load_balance`：轮询，偶发命中慢上游导致 P90 偏高（93ms）；
+  - `fastest_addr`：每次查询对返回 IP 额外做 TCP/ICMP 探测，开销大（+40-50ms），
+    仅适合上游返回不同质量 IP 的场景；本架构上游为同质国内 DoH、国外域名已分流
+    到 MosDNS，故不推荐。
+
 ## [v0.3.1] - 2026-09-02
 
 ### 修复
