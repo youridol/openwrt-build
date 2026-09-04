@@ -2,6 +2,34 @@
 
 本仓库所有功能/配置改动均记录于此。版本判型遵循全局规范（PATCH / MINOR / MAJOR）。
 
+## [v0.3.4] - 2026-09-04
+
+### 修复（DNS proxy 报错根治）
+
+- **`files/etc/config/dnsproxy` — 移除对 SSR-Plus 代理的 DNS 兜底依赖**：
+  - 删除 `fallback https://8.8.8.8/dns-query`：8.8.8.8 在 SSR-Plus blacklist 中，
+    dnsproxy 进程（与主 netns 同 ns）到 8.8.8.8 的出站被 `REDIRECT :1234` 代理接管；
+    SSR-Plus 规则重建/订阅更新窗口（每日 02:00 cron、开机、节点切换）内必超时，
+    dnsproxy 无健康探活 → 日志刷 `context deadline exceeded` / `i/o timeout` ERROR。
+  - 保留 `fallback https://1.12.12.12/dns-query`（国内直连、不依赖代理）作最兜底。
+  - 上游 `https://doh.pub/dns-query` → `https://1.12.12.12/dns-query`：
+    doh.pub 为域名型 DoH（依赖 bootstrap 明文预解析、曾现 502/超时），
+    1.12.12.12 为 IP 型直连 DoH（china ipset 命中 → 不走代理、无 bootstrap 依赖）。
+  - 国外域名（google/github 等）仍显式分流 MosDNS(5335)→SSR 代理 DoH，防污染不变。
+- **`files/etc/init.d/dnsproxy` — 修复 fw3 LAN DNS 拦截规则被 SSR-Plus/fw3 reload 清空**：
+  - 原实现 `iptables -I PREROUTING 1` + `firewall restart`：fw3 reload/restart 会重建
+    nat 表冲掉规则，且 restart 会连带清掉 SSR-Plus 自身规则（重入风暴）；
+    实测 PREROUTING 中已无任何 `dport 53` 拦截，客户端手填 DNS 可绕过加密链路。
+  - 改为写入 fw3 用户链 `prerouting_rule`（SSR-Plus 不操作该链），命令写入
+    `/etc/firewall.user` 由 fw3 reload 自动幂等重放；不再触发 firewall restart。
+- **`files/etc/uci-defaults/99-gaming-optimize`**：同步注释说明。
+
+### 验证
+
+- 路由器 192.168.3.254 热补丁后：`github.com/www.baidu.com` 解析正常；
+  SSR 规则重建窗口触发后 logread 无 dnsproxy ERROR；`iptables -t nat -S PREROUTING`
+  拦截规则经 `prerouting_rule` 存在且在 SSR 规则之前生效（fw3 reload 后仍存活）。
+
 ## [v0.3.3] - 2026-09-02
 
 ### CI/CD

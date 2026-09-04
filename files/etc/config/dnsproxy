@@ -63,17 +63,23 @@ config dnsproxy 'servers'
 	# 国外域名（google 等）显式分流到 SSR-Plus 的 MosDNS(127.0.0.1:5335)：
 	# MosDNS 由 SSR-Plus 管理（pdnsd_enable=4），上游为经代理的国外 DoH，
 	# 返回真实 IP 不被污染。bootstrap 仅用于解析加密上游主机名（明文是其唯一用途）。
+	#
+	# 2026-09-04 修复（v0.3.4）：
+	# - doh.pub（域名型、偶发 502、依赖 bootstrap）→ 1.12.12.12（IP 型直连，china ipset 命中不代理）
+	# - fallback 删除 8.8.8.8（其流量被 SSR-Plus 代理接管，SSR 重建窗口必超时 → 日志刷 ERROR）
+	#   保留 1.12.12.12（国内可直连、不依赖代理）作最兜底
 	list upstream 'https://dns.alidns.com/dns-query'
-	list upstream 'https://doh.pub/dns-query'
+	list upstream 'https://1.12.12.12/dns-query'
 	list upstream 'https://doh.360.cn/dns-query'
 	# 常用国外域名 → SSR-Plus MosDNS(5335)（国外 DoH 经代理，防污染）
 	list upstream '[/google.com/youtube.com/github.com/twitter.com/x.com/facebook.com/instagram.com/whatsapp.com/telegram.org/reddit.com/discord.com/spotify.com/netflix.com/cloudflare.com/cloudflare-dns.com/amazon.com/amazonaws.com/stackoverflow.com/wikipedia.org/medium.com/notion.so/figma.com/vercel.com/herokuapp.com/]127.0.0.1:5335'
 	# bootstrap 仅用于解析加密上游主机名（明文是它唯一且应有的用途）
 	list bootstrap '223.5.5.5'
 	list bootstrap '223.6.6.6'
-	# fallback 备用通道同样加密（DoH），绝不明文；8.8.8.8 经 SSR-Plus 代理可达
+	# fallback 备用通道同样加密（DoH），绝不明文；
+	# v0.3.4 起仅保留国内可直连 IP-DoH（1.12.12.12），删除依赖 SSR-Plus 代理的 8.8.8.8，
+	# 避免 SSR 规则重建窗口内 fallback 必然超时刷 ERROR
 	list fallback 'https://1.12.12.12/dns-query'
-	list fallback 'https://8.8.8.8/dns-query'
 
 config dnsproxy 'tls'
 	option enabled '0'

@@ -131,6 +131,8 @@ uci set dnsproxy.global.enabled='1'
 uci set dnsproxy.global.lan_dns_intercept='1'
 
 log "dnsproxy: ALL_DOH (DoH upstream, lan_dns_intercept=ON)"
+# v0.3.4 注：上游清单与 fallback 见 files/etc/config/dnsproxy
+# （doh.pub 域名型单点 → 1.12.12.12 IP 直连；fallback 删 8.8.8.8，SSR 重建窗口不再刷 ERROR）
 
 # ─────────────────────────────────────────────
 # 4.5 SSR-Plus: 启用 MosDNS(5335) 作为国外 DNS（经代理 DoH，防污染）
