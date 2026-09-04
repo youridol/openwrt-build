@@ -9,3 +9,8 @@
 *.yml    text eol=lf
 *.yaml   text eol=lf
 *.md     text eol=lf
+# 无扩展名的 OpenWrt 配置文件/脚本强制 LF
+# （core.autocrlf=true 时无扩展名文件不被上面规则覆盖，会被转 CRLF 导致路由器解析失败）
+/etc/config/dnsproxy   text eol=lf
+/etc/init.d/dnsproxy   text eol=lf
+/etc/uci-defaults/99-gaming-optimize text eol=lf
