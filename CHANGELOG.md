@@ -2,6 +2,55 @@
 
 本仓库所有功能/配置改动均记录于此。版本判型遵循全局规范（PATCH / MINOR / MAJOR）。
 
+## [v0.3.5] - 2026-09-21
+
+### 修复（双栈客户端「有公网 IPv6 地址却无法用 IPv6 上网」）
+
+- **`files/etc/uci-defaults/99-gaming-optimize` — `filter_aaaa` 由 `1` 改为 `0`**：
+  - **现象**：客户机（如 Hyper-V `vEthernet (External network)`）已通过
+    SLAAC 获得全局 IPv6 地址（`240e:355:7f2b:8900::/64`）与默认路由
+    （`fe80::230:18ff:fe0b:9b69`），`ping6` 国内外地址均通，但浏览器/IPv6
+    站点访问失败，表现为「拿得到地址、上不了 IPv6 网」。
+  - **根因**：`filter_aaaa=1` 时 SSR-Plus 生成的 MosDNS(5335) 使用
+    `main_sequence_disable_IPv6`，对 `qtype 28`(AAAA) / `65`(HTTPS)
+    一律 `reject 0`。而本固件 dnsmasq 把**所有 gfwlist 域名**
+    （`/tmp/dnsmasq.d/dnsmasq-ssrplus.d/gfw_list.conf`，约 89 万行）
+    **加上** `files/etc/config/dnsproxy` 显式国外域名列表全部指向
+    `127.0.0.1#5335` → **国外域名永远拿不到 AAAA 记录** →
+    客户端只有 A 记录，协议栈根本不会发起 IPv6 连接。
+  - **实测（192.168.3.254，A/B 对照）**：
+    - `filter_aaaa=1`：`google.com / github.com / www.wikipedia.org /
+      www.debian.org / www.kernel.org / www.python.org / www.mozilla.org`
+      的 AAAA 计数**全为 0**（`main_sequence_disable_IPv6`）；
+    - `filter_aaaa=0`：上述域名 AAAA 立即恢复正常
+      （google=5、github=1、wikipedia=2、debian=5…），
+      客户端 `curl -6 https://www.cloudflare.com/` → **HTTP 200 / 1.3 MB**，
+      清华 TUNA 镜像 IPv6 大文件（13.3 MB）下载正常；
+      国内域名（baidu/qq/taobao）AAAA 与 A 记录均无回归。
+  - **说明**：SSR-Plus 本固件仅代理 IPv4（`ip6tables` 中无任何
+    `SS_SPEC_TPROXY`/`TPROXY6` 规则，`uci show shadowsocksr` 无 IPv6 选项），
+    国外 IPv6 为**直连**。原 `filter_aaaa=1` 只能屏蔽记录、无法把 IPv6 流量
+    导入代理，因此「国外仅 IPv4」既不能省流量也不提升匿名性，
+    只会让双栈客户端失去 IPv6 能力。如需恢复旧语义可改回 `1`
+    （代价：国外域名完全无 IPv6）。
+
+### 修复（工程健壮性）
+
+- **`.gitattributes` 无扩展名文件规则此前实际未生效**：
+  原写法为根路径锚定的 `/etc/config/dnsproxy`、`/etc/init.d/dnsproxy`、
+  `/etc/uci-defaults/99-gaming-optimize`，但仓库内真实路径带 `files/` 前缀
+  （`files/etc/...`），`git check-attr` 显示 `attr/` 为空（未匹配）。
+  改为 `**/` 通配（`**/etc/config/dnsproxy` 等）并补上此前遗漏的
+  `files/etc/hotplug.d/iface/50-ipv6-pd-lan`、`files/etc/rc.local`。
+  注：本次核查确认索引内 blob 已为 LF（`git ls-files --eol` 显示 `i/lf`），
+  故 CI 未受影响；此改动消除的是 CRLF 回流的隐患。
+
+### 验证
+
+- 路由器 192.168.3.254 热应用后：国外域名 AAAA 恢复、客户端 IPv6
+  网页与大文件传输正常、国内域名与 DNS 加密链路（dnsproxy→DoH）无回归，
+  `odhcpd/dnsmasq/mosdns/v2ray/dnsproxy` 8 个进程健康。
+
 ## [v0.3.4] - 2026-09-04
 
 ### 修复（DNS proxy 报错根治）

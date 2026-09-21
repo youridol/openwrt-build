@@ -11,6 +11,13 @@
 *.md     text eol=lf
 # 无扩展名的 OpenWrt 配置文件/脚本强制 LF
 # （core.autocrlf=true 时无扩展名文件不被上面规则覆盖，会被转 CRLF 导致路由器解析失败）
-/etc/config/dnsproxy   text eol=lf
-/etc/init.d/dnsproxy   text eol=lf
-/etc/uci-defaults/99-gaming-optimize text eol=lf
+#
+# 注意: 模式必须匹配仓库内的**真实路径**。overlay 文件位于 files/ 前缀下
+# （files/etc/config/dnsproxy 等），原先写成根锚定的 /etc/config/dnsproxy
+# 永远匹配不到（git check-attr 显示 attr 为空，规则形同虚设）。
+# 改用 **/ 通配，无论 overlay 被放到哪一层都能生效。
+**/etc/config/dnsproxy                text eol=lf
+**/etc/init.d/dnsproxy                text eol=lf
+**/etc/uci-defaults/99-gaming-optimize text eol=lf
+**/etc/hotplug.d/iface/50-ipv6-pd-lan text eol=lf
+**/etc/rc.local                       text eol=lf

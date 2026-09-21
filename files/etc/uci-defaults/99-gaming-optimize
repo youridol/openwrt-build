@@ -159,14 +159,27 @@ uci set dhcp.@dnsmasq[0].ednspacket_max='1232'
 log "dnsmasq: server=127.0.0.1#5353 (dnsproxy ALL_DOH)"
 
 # ─────────────────────────────────────────────
-# 6. SSR-Plus: 禁用国外 IPv6 (国内双栈, 国外仅IPv4)
+# 6. SSR-Plus: 允许国外域名返回 IPv6 (AAAA)
 # ─────────────────────────────────────────────
-# filter_aaaa=1: Web UI 复选框 "禁止海外域名返回IPv6" 勾选
-# get_filter_aaaa() → init script 选择 main_sequence_disable_IPv6
-# 效果: 国内域名 A+AAAA 正常, 国外域名仅 IPv4 (AAAA reject)
-uci set shadowsocksr.@global[0].filter_aaaa='1'
+# filter_aaaa=0: Web UI 复选框 "禁止海外域名返回IPv6" 取消勾选
+# get_filter_aaaa() → init script 选择 main_sequence_with_IPv6
+#
+# 【2026-09-21 修复】原值为 '1'，导致本固件在双栈客户端上出现
+#   "已获得公网 IPv6 地址，却无法用 IPv6 上网" 的故障：
+#   filter_aaaa=1 → SSR-Plus 生成的 MosDNS(5335) 使用
+#   main_sequence_disable_IPv6，对 qtype 28(AAAA)/65(HTTPS) 一律 `reject 0`；
+#   而 dnsmasq 把所有 gfwlist 域名 + dnsproxy 显式国外域名列表全部指向
+#   127.0.0.1#5335 → 国外域名永远拿不到 AAAA 记录 →
+#   客户端（如 Windows）只有 A 记录可用，根本不会发起 IPv6 连接。
+#   实测（192.168.3.254）：filter_aaaa=1 时 google/github/wikipedia/
+#   debian/kernel/python/mozilla 等 AAAA 计数全为 0；改为 0 后立即返回
+#   真实 AAAA，客户端 IPv6 访问（含大文件传输）恢复正常。
+# 说明: SSR-Plus 仅代理 IPv4（无 ip6tables/TPROXY6 规则），国外 IPv6 为直连。
+#   如确需 "国外仅 IPv4 走代理" 的严格语义，可自行改回 '1'，
+#   代价是国外域名完全无法使用 IPv6。
+uci set shadowsocksr.@global[0].filter_aaaa='0'
 
-log "ssr-plus: filter_aaaa=1 (Web UI checkbox, domestic dual-stack, foreign IPv4 only)"
+log "ssr-plus: filter_aaaa=0 (allow foreign AAAA, IPv6 enabled)"
 
 # ─────────────────────────────────────────────
 # 7. 提交全部 UCI 配置
