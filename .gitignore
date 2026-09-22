@@ -1,0 +1,65 @@
+# ============================================================
+# .gitignore — openwrt-build
+# ------------------------------------------------------------
+# 本仓库只跟踪「源码 / 构建配方 / 固件运行时配置」：
+#   .github/workflows/  package/  patches/  files/  CHANGELOG.md  AGENTS.md
+# 下列内容一律排除：本机排查工具、一次性排障报告、编译产物、凭据。
+# ============================================================
+
+# ── 本机排查工具（不在 CI 中使用；rsh.py 内含明文凭据）────────
+/rsh.py
+/Test-*.ps1
+/Verify-*.ps1
+
+# ── 路由器临时操作脚本（一次性诊断用，非固件内容）─────────────
+/backup.sh
+/apply-fix.sh
+/restart.sh
+/final-check.sh
+
+# ── 一次性排障报告（会话产物，非项目文档）─────────────────────
+/*故障*报告*.md
+/ChatGPT-*.md
+
+# ── 凭据 / 私钥（安全网）──────────────────────────────────────
+.env
+.env.*
+/secrets*
+id_rsa*
+id_ed25519*
+*.pem
+*.key
+
+# ── 编译产物与中间目录（GHA 中由 lede/ 检出，不进本仓库）──────
+/lede/
+/bin/
+/build_dir/
+/staging_dir/
+/toolchain/
+/dl/
+/feeds/
+/logs/
+/.config
+/.config.old
+*.img
+*.img.gz
+*.ipk
+*.apk
+*.bin
+*.manifest
+*.buildinfo
+*.tar.gz
+.ccache/
+
+# ── Python ────────────────────────────────────────────────────
+__pycache__/
+*.py[cod]
+
+# ── 编辑器 / 操作系统 ─────────────────────────────────────────
+.DS_Store
+Thumbs.db
+desktop.ini
+.vscode/
+.idea/
+*.swp
+*~

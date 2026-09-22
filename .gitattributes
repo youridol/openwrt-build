@@ -1,3 +1,6 @@
+# 无扩展名的仓库元文件强制 LF（.gitignore 本身也是无扩展名文件）
+/.gitignore                           text eol=lf
+
 # 关键文件强制 LF 行尾
 # 原因: patch 若被转成 CRLF 会导致 CI 中 git apply 失败;
 #       shell 脚本(init/uci-defaults)若为 CRLF 会在路由器上解析失败。
