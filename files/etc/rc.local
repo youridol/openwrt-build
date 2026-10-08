@@ -9,35 +9,22 @@ for cpu in /sys/devices/system/cpu/cpu*/cpufreq/scaling_governor; do
     [ -w "$cpu" ] && echo performance > "$cpu" 2>/dev/null
 done
 
-# --- RPS: 将网络中断分散到全部 CPU 核心 ---
-# 支持的最大核心数由 rps_cpus mask 决定 (f = 4核, ff = 8核)
-# 根据实际核心数自适应
-cores=$(grep -c ^processor /proc/cpuinfo)
-case $cores in
-    1) mask=1 ;;
-    2) mask=3 ;;
-    4) mask=f ;;
-    8) mask=ff ;;
-    *) mask=f ;;
-esac
-
-for iface in /sys/class/net/*/queues/rx-*/rps_cpus; do
-    [ -w "$iface" ] && echo $mask > "$iface" 2>/dev/null
-done
-
-# --- RPS 流量亲和性 ---
-# 总 flow_entries 32768，平均分配到每个 RX 队列
-queue_count=$(ls -d /sys/class/net/*/queues/rx-* 2>/dev/null | wc -l)
-if [ "$queue_count" -gt 0 ]; then
-    per_queue=$((32768 / queue_count))
-    [ "$per_queue" -lt 1 ] && per_queue=1
-    for q in /sys/class/net/*/queues/rx-*/rps_flow_cnt; do
-        [ -w "$q" ] && echo $per_queue > "$q" 2>/dev/null
-    done
-fi
-
-# --- 禁用 conntrack helper 自动分配 ---
-echo 0 > /proc/sys/net/netfilter/nf_conntrack_helper 2>/dev/null
+# --- RPS / RPS 流量亲和性：不在此设置 ---
+# 原实现在此把所有队列的 rps_cpus 写为全核 mask、rps_flow_cnt 写为
+# 32768/队列数，实测均未生效：
+#   - rps_cpus 最终由 packet_steering 按队列改写为单核亲和（实测 eth0=1、
+#     eth1=4）。autocore(S99) 也会先写一份全核值。
+#   - rps_sock_flow_entries 最终由 autocore 按 核心数×4096 覆盖（实测 16384）。
+#   - rps_flow_cnt 被 packet_steering 清为 0：/usr/libexec/network/
+#     packet-steering.uc 第 80-86 行在 steering_flows 未设置时把默认值
+#     local_flows=0 无条件写入。其 service_triggers 注册了
+#     `interface.*` raw trigger，任何接口事件都会重跑并再次清零。
+# 保留这段只会让后续维护者误以为 RPS 由此配置，故删除。
+# 若日后需要 rps_flow_cnt 非零，应设 UCI network.globals.steering_flows
+# （packet-steering.uc 的上游开关），而不是改回本文件。
+#
+# 注意：net.netfilter.nf_conntrack_helper 在本内核(6.12)已无该 sysctl 路径，
+# 原 `echo 0 > ...` 因 2>/dev/null 静默失败，一并删除。
 
 # --- txqueuelen: 降低出口队列深度防缓冲膨胀 ---
 # eth0/1 从默认 1000→100, pppoe-wan 已是 3 不变

@@ -1,0 +1,55 @@
+# ============================================================
+# SQM (Smart Queue Management) — cake 整形默认配置
+#   openwrt-build 仓库 files/ overlay
+# ------------------------------------------------------------
+# 目的：控制上行 50 Mbps 瓶颈处的排队时延（bufferbloat），
+#   降低游戏小包（UDP，几 Hz~128 tick 的突发）在队友上传/下载
+#   挤压下的 ping 抖动。不以提高吞吐为目的。
+#
+# 契约带宽：下行 1000 Mbps / 上行 50 Mbps（用户实测签约值）
+#   - 上行 45000 kbit/s = 50 Mbps × 90%（官方推荐 85%–95%；按标称值取 90%）
+#   - 下行 900000 kbit/s = 保守值，刻意低于 1000 Mbps，给 CPU（N2930,
+#     4 核 Bay Trail）留出余量，避免 SQM 尚未成为瓶颈时 CPU 先成为瓶颈。
+#     若刷机后实测下行峰值明显低于 900 Mbps，优先下调本值而非放弃 ingress。
+#
+# 链路层适配（PPPoE over Ethernet，无 VLAN）：
+#   overhead 34 = PPPoE 8 + 以太头 14 + FCS 4 + 前导/IFG 8
+#   tcMPU 68    = 以太最小载荷 46 + 8(PPPoE) + 14(以太头)，避免小包被算小
+#   依据 OpenWrt SQM 文档的 VDSL/PPPoE 组合（linklayer=ethernet,
+#   overhead 34, mpu 68）。cake 自身的 `ethernet` 关键字等价 38/84，
+#   两者相差 4 字节/包，对 50 Mbps 整形精度的影响可忽略。
+#
+# 队列策略：
+#   script=piece_of_cake.qos 会把 cake 的 INGRESS_CAKE_OPTS / EGRESS_CAKE_OPTS
+#   硬编码为 `besteffort`（见上游 src/piece_of_cake.qos），即单一 tin、不做
+#   DSCP 分级；iqdisc_opts/eqdisc_opts 只作为附加参数拼接在末尾。
+#   这正合本机需要：软件 flow offloading 命中后的报文不再经过 mangle，
+#   基于 DSCP/mark 的分级不可靠，而 cake 的 per-flow 公平队列本身即可防止
+#   一条 TCP 大流（Steam 下载/上传）饿死对局的 UDP 小流。
+#   iqdisc_opts 的 `ingress nat dual-dsthost` 用于下行（按目的主机隔离），
+#   eqdisc_opts 的 `nat dual-srchost` 用于上行（按源主机隔离，防单机占满上行）。
+#   注意：nat 只用于 WAN 侧；LAN 口不要加 nat，否则按主机隔离失效。
+# ============================================================
+
+config queue
+	option enabled '1'
+	option interface 'pppoe-wan'
+	option download '900000'
+	option upload '45000'
+	option qdisc 'cake'
+	option script 'piece_of_cake.qos'
+	option linklayer 'ethernet'
+	option overhead '34'
+	option tcMPU '68'
+	option debug_logging '0'
+	option verbosity '5'
+	# squash_dscp / squash_ingress：piece_of_cake 已在 ingress 侧加 wash 语义，
+	# 这里保持不 squash，交由其内部处理
+	option squash_dscp '0'
+	option squash_ingress '0'
+	option ingress_ecn 'ECN'
+	option egress_ecn 'ECN'
+	option qdisc_advanced '1'
+	option qdisc_really_really_advanced '1'
+	option iqdisc_opts 'ingress nat dual-dsthost'
+	option eqdisc_opts 'nat dual-srchost'

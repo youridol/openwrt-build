@@ -1,0 +1,63 @@
+log:
+    level: info
+plugins:
+    - tag: lazy_cache
+      type: cache
+      args:
+        size: 8000
+        lazy_cache_ttl: 86400
+
+    - tag: forward_google
+      type: forward
+      args:
+        concurrent: 2
+        upstreams:
+
+    - tag: main_sequence_disable_IPv6
+      type: sequence
+      args:
+        - exec: $lazy_cache
+        - matches: 
+          - qtype 28 65
+          exec: reject 0
+        - exec: prefer_ipv4
+        - exec: $forward_google
+
+    - tag: main_sequence_with_IPv6
+      type: sequence
+      args:
+        - exec: $lazy_cache
+        - exec: $forward_google
+
+    - tag: udp_server
+      type: udp_server
+      args:
+        entry: DNS_MODE
+        listen: 0.0.0.0:DNS_PORT
+      
+    - tag: tcp_server
+      type: tcp_server
+      args:
+        entry: DNS_MODE
+        listen: 0.0.0.0:DNS_PORT
+
+# ============================================================
+# 本文件是 openwrt-build 对 SSR-Plus 上游模板的 overlay 副本。
+#
+# 【硬约束】`upstreams:` 必须保持在**第 14 行**，且 `concurrent:` 在第 13 行。
+#   原因：/etc/init.d/shadowsocksr 第 1283 行用
+#     awk -v line=14 'NR == line+1 {print text} 1' /etc/ssrplus/mosdns-config.yaml
+#   把 DoH 上游插到第 15 行。行号一旦漂移，上游会被插进错误的 YAML 层级，
+#   mosdns 将无法启动、23614 个 gfw_list 域名解析全部失败。
+#   因此**不要在文件顶部添加注释或空行**（本注释块置于文件末尾即是此故）。
+#   CI 有专门步骤校验该行号，见 build-openwrt.yml 的
+#   "Verify mosdns template contract"。
+#
+# 【与上游模板的唯一有意差异】`reject 0` 规则被前置到 `prefer_ipv4` /
+#   `$forward_google` 之前。上游把 reject 放在 forward 之后，导致每个被拒的
+#   AAAA/HTTPS 查询都会先真向上游发一次再丢弃（mosdns v5 的 sequence 依次执行，
+#   reject 的 ActionReject.Exec 覆盖已写入的应答）。前置后省掉这次无用往返。
+#
+# 【为何仓库要持有该副本】原模板由 luci-app-ssr-plus 包提供且是 opkg conffile，
+#   包升级会覆盖它，故必须从 overlay 固化，否则本次优化会在升级后丢失。
+# ============================================================

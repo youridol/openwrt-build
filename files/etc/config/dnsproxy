@@ -1,8 +1,11 @@
 # ============================================================
 # dnsproxy — ALL_DOH 默认配置（openwrt-build 仓库 files/ overlay）
 # ------------------------------------------------------------
-# 主链路（ALL_DOH，国内国外统一加密解析、不分流）:
+# 主链路（ALL_DOH 加密解析，按域名分流）:
 #   LAN → dnsmasq:53 → dnsproxy:5353 → DoH/DoT → Internet
+#   例外：国外域名列表（见下方 servers 段）显式分流到 SSR-Plus 的 MosDNS
+#   127.0.0.1:5335，由 MosDNS 经代理查询国外 DoH（防污染）。
+#   另：dnsmasq 的 gfw_list.conf（23614 条）也指向 127.0.0.1#5335。
 # 规则:
 #   - 上游一律加密（https:// = DoH），bootstrap 仅用于解析加密上游主机名
 #   - 无明文 DNS 上游、无明文 fallback（fallback 亦为 DoH）

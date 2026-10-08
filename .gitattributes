@@ -1,5 +1,6 @@
 # 无扩展名的仓库元文件强制 LF（.gitignore 本身也是无扩展名文件）
 /.gitignore                           text eol=lf
+/.gitattributes                       text eol=lf
 
 # 关键文件强制 LF 行尾
 # 原因: patch 若被转成 CRLF 会导致 CI 中 git apply 失败;
@@ -12,6 +13,9 @@
 *.yml    text eol=lf
 *.yaml   text eol=lf
 *.md     text eol=lf
+# 本机排查脚本（PowerShell）强制 LF（这些文件当前被 .gitignore 排除，
+# 规则为将来若纳入版本管理时预留）
+*.ps1    text eol=lf
 # 无扩展名的 OpenWrt 配置文件/脚本强制 LF
 # （core.autocrlf=true 时无扩展名文件不被上面规则覆盖，会被转 CRLF 导致路由器解析失败）
 #
@@ -20,7 +24,9 @@
 # 永远匹配不到（git check-attr 显示 attr 为空，规则形同虚设）。
 # 改用 **/ 通配，无论 overlay 被放到哪一层都能生效。
 **/etc/config/dnsproxy                text eol=lf
+**/etc/config/sqm                      text eol=lf
 **/etc/init.d/dnsproxy                text eol=lf
 **/etc/uci-defaults/99-gaming-optimize text eol=lf
 **/etc/hotplug.d/iface/50-ipv6-pd-lan text eol=lf
 **/etc/rc.local                       text eol=lf
+**/etc/sysctl.conf                    text eol=lf

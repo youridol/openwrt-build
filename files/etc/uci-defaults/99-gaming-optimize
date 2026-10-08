@@ -24,6 +24,22 @@ uci set firewall.@defaults[0].fullcone='1'
 uci set firewall.@defaults[0].drop_invalid='1'
 uci set firewall.@zone[0].mtu_fix='1'
 
+# turboacc 的 tcpcca 必须与 sysctl.conf 的 bbr 一致。
+# 原因：/etc/init.d/turboacc 在 S90 启动（晚于 S11sysctl），其第 145 行执行
+#   sysctl -w net.ipv4.tcp_congestion_control="$tcpcca"
+# 实测 turboacc.config.tcpcca 默认 'cubic'，会把 sysctl.conf 设好的 bbr 覆盖
+# 掉（运行时读数为 cubic，尽管 tcp_bbr 模块已加载、bbr 在可用列表中）。
+# 作用域仅限路由器自身发起的 TCP（dnsproxy 的 DoH、代理隧道、opkg），
+# 不影响转发的客户端流量。
+uci set turboacc.config.tcpcca='bbr'
+uci -q set turboacc.config.fastpath='flow_offloading'
+uci -q set turboacc.config.fastpath_fo_hw='0'
+uci -q set turboacc.config.fullcone='1'
+
+# 与第 2 节删除 network.wan6 配套：从 wan zone 的网络列表移除 wan6，
+# 否则 fw3 会引用一个不存在的接口。del_list 对不存在的项是 no-op，幂等。
+uci -q del_list firewall.@zone[1].network='wan6'
+
 # ICMPv6 Input (PMTU discovery — 游戏关键)
 uci add firewall rule
 uci set firewall.@rule[-1].name='ICMPv6-Input'
@@ -51,12 +67,17 @@ log "firewall: flow_offloading fullcone drop_invalid mtu_fix icmpv6"
 
 # IPv6 TCP MSS clamping for PPPoE MTU 1492
 # 防止 IPv6 大包超过 PPPoE 有效 MTU 导致丢包
-cat >> /etc/firewall.user << 'FWEOF'
+# 幂等：本脚本可能被重放（历史上已出现 /etc/firewall.user 中该段重复两遍的
+# 现象），追加前先按标记行判重，避免重复规则累积。
+if ! grep -q 'MSS clamping (PPPoE MTU 1492)' /etc/firewall.user 2>/dev/null; then
+	cat >> /etc/firewall.user << 'FWEOF'
 # IPv6 TCP MSS clamping (PPPoE MTU 1492)
 ip6tables -t mangle -A FORWARD -p tcp --tcp-flags SYN,RST SYN -o pppoe-wan -j TCPMSS --clamp-mss-to-pmtu
 FWEOF
-
-log "firewall: ip6tables MSS clamp for PPPoE"
+	log "firewall: ip6tables MSS clamp for PPPoE (added)"
+else
+	log "firewall: ip6tables MSS clamp already present, skip"
+fi
 
 # ─────────────────────────────────────────────
 # 2. IPv6 双栈: DHCPv6-PD over PPPoE
@@ -67,6 +88,12 @@ log "firewall: ip6tables MSS clamp for PPPoE"
 uci set network.wan.ipv6='1'
 uci set network.lan.ipv6='1'
 uci set network.lan.ip6assign='64'
+
+# wan6: OpenWrt 默认的 dhcpv6 接口（device=eth1），本固件不使用。
+# 实测(2026-10-09)：它只跑一个 -P0 的 odhcp6c，不申请前缀，eth1 上无全局
+# 地址、日志零输出，属纯空转；而 ISP 的 IPv6 实际经 PPPoE 由 wan_6 获取。
+# 不删除会同时存在两个 dhcpv6 客户端（两个 odhcp6c 进程）。
+uci delete network.wan6 2>/dev/null
 
 # wan_6: DHCPv6 客户端 (挂载到 PPPoE wan)
 uci delete network.wan_6 2>/dev/null
@@ -96,14 +123,18 @@ uci set dhcp.odhcpd.maindhcp='0'
 # RDNSS 在 RA 中直接提供 DNS, 无需 DHCPv6
 # dhcpv6=disabled → M=0 O=1, 客户端 SLAAC 获取地址
 # ndp=disabled → 内核处理 NDP, 减少 odhcpd 处理延迟
-# ra_mtu=1452 → PPPoE MTU 1492 - 40, 防大包丢包
+# ra_mtu=1492: 通告 PPPoE 链路的真实 MTU，与 IPv4 侧一致。
+#   原值 1452 的推导「1492 - 40」错把 IPv6 基本头（40B）当成要从 MTU 中
+#   预先扣除的封装开销——IPv6 头是报文本身的一部分，不占链路 MTU 之外。
+#   预先扣 40 字节只会让每个 IPv6 包少用 40 字节载荷，多付分段/开销。
+#   PMTU 发现由 ICMPv6 packet-too-big + MSS clamp 覆盖，无需预扣。
 uci set dhcp.lan.ra='server'
 uci set dhcp.lan.dhcpv6='disabled'
 uci set dhcp.lan.ndp='disabled'
 uci set dhcp.lan.ra_management='0'
 uci set dhcp.lan.ra_default='1'
 uci set dhcp.lan.master='1'
-uci set dhcp.lan.ra_mtu='1452'
+uci set dhcp.lan.ra_mtu='1492'
 uci set dhcp.lan.ra_mininterval='20'
 uci set dhcp.lan.ra_maxinterval='60'
 
@@ -141,8 +172,11 @@ log "dnsproxy: ALL_DOH (DoH upstream, lan_dns_intercept=ON)"
 # ─────────────────────────────────────────────
 # pdnsd_enable=4 = mosdns 模式（SSR-Plus init 逻辑 dns_mode=4）
 # tunnel_forward_mosdns: MosDNS 的国外 DoH 上游（逗号分隔，走 SSR-Plus 代理）
+# 由 3 个收敛为 2 个：去掉 dns.quad9.net。三个上游以 concurrent 竞速取最快，
+# 而 quad9 从国内经代理访问的响应明显慢于 google/cloudflare，参与竞速只增加
+# 方差、不增加可用性（另两个互为冗余）。保留 concurrent 以获韧性。
 uci set shadowsocksr.@global[0].pdnsd_enable='4'
-uci set shadowsocksr.@global[0].tunnel_forward_mosdns='https://dns.google/dns-query,https://cloudflare-dns.com/dns-query,https://dns.quad9.net/dns-query'
+uci set shadowsocksr.@global[0].tunnel_forward_mosdns='https://dns.google/dns-query,https://cloudflare-dns.com/dns-query'
 
 log "ssr-plus: MosDNS(5335) enabled, foreign DoH via proxy"
 
@@ -159,27 +193,32 @@ uci set dhcp.@dnsmasq[0].ednspacket_max='1232'
 log "dnsmasq: server=127.0.0.1#5353 (dnsproxy ALL_DOH)"
 
 # ─────────────────────────────────────────────
-# 6. SSR-Plus: 允许国外域名返回 IPv6 (AAAA)
+# 6. SSR-Plus: filter_aaaa 的拒绝集语义（详见 docs/adr/0001）
 # ─────────────────────────────────────────────
-# filter_aaaa=0: Web UI 复选框 "禁止海外域名返回IPv6" 取消勾选
-# get_filter_aaaa() → init script 选择 main_sequence_with_IPv6
+# filter_aaaa=1 → get_filter_aaaa() 让 init 脚本生成
+#   main_sequence_disable_IPv6，对 qtype 28(AAAA)/65(HTTPS) 执行 `reject 0`。
 #
-# 【2026-09-21 修复】原值为 '1'，导致本固件在双栈客户端上出现
-#   "已获得公网 IPv6 地址，却无法用 IPv6 上网" 的故障：
-#   filter_aaaa=1 → SSR-Plus 生成的 MosDNS(5335) 使用
-#   main_sequence_disable_IPv6，对 qtype 28(AAAA)/65(HTTPS) 一律 `reject 0`；
-#   而 dnsmasq 把所有 gfwlist 域名 + dnsproxy 显式国外域名列表全部指向
-#   127.0.0.1#5335 → 国外域名永远拿不到 AAAA 记录 →
-#   客户端（如 Windows）只有 A 记录可用，根本不会发起 IPv6 连接。
-#   实测（192.168.3.254）：filter_aaaa=1 时 google/github/wikipedia/
-#   debian/kernel/python/mozilla 等 AAAA 计数全为 0；改为 0 后立即返回
-#   真实 AAAA，客户端 IPv6 访问（含大文件传输）恢复正常。
-# 说明: SSR-Plus 仅代理 IPv4（无 ip6tables/TPROXY6 规则），国外 IPv6 为直连。
-#   如确需 "国外仅 IPv4 走代理" 的严格语义，可自行改回 '1'，
-#   代价是国外域名完全无法使用 IPv6。
-uci set shadowsocksr.@global[0].filter_aaaa='0'
+# 关键：该开关的「正确值」取决于 dnsmasq 的路由是否分裂，而不是开关字面。
+#   现网路由（本固件即是）：dnsmasq 默认 server=127.0.0.1#5353（dnsproxy 国内
+#   DoH）；仅 gfw_list.conf 的 23614 个域名 + black.list 走 127.0.0.1#5335
+#   （mosdns）。因此 MosDNS 的 reject 只作用于「需走代理的域名」——
+#   即拒绝集 = 需走代理的域名集，这正是期望语义：
+#     · 被墙域名只剩 IPv4 → 回落经 :1234 代理出站，不会被 IPv6 直连 RST；
+#     · 其余国外域名（taobao 类国内同理）保留真实 AAAA，走 IPv6 直连。
+#
+# 【2026-10-09 修正】仓库原值 '0' 是把 v0.3.5 的结论套在了已变化的架构上。
+#   v0.3.5 当时的前提是「dnsmasq 把所有域名都指向 5335」，那时 '1' 会全局
+#   切断国外 AAAA；而现在路由已分裂，'1' 才等价于上面描述的分类语义。
+#   实测（走客户端真实路径 192.168.3.254）：taobao.com 返回 8 条真实 AAAA；
+#   google.com / chatgpt.com / steamcommunity.com 返回 mosdns 合成 SOA
+#   （fake-ns.mosdns.fake.root）；baidu/qq 的 SOA 来自真实权威（上游确实无
+#   AAAA，非被抑制）。若改回 '0'，那 23614 个被墙域名将拿到真实 AAAA 并
+#   在 IPv6 上直连被 RST，表现为「有 IPv6 但打不开站点」。
+# 说明: SSR-Plus 仅代理 IPv4（无 ip6tables/TPROXY6 规则），其余国外 IPv6 为
+#   直连——这是有意取舍，详见 docs/adr/0002。
+uci set shadowsocksr.@global[0].filter_aaaa='1'
 
-log "ssr-plus: filter_aaaa=0 (allow foreign AAAA, IPv6 enabled)"
+log "ssr-plus: filter_aaaa=1 (reject set = domains routed through proxy)"
 
 # ─────────────────────────────────────────────
 # 7. 提交全部 UCI 配置
@@ -189,5 +228,6 @@ uci commit network
 uci commit dhcp
 uci commit dnsproxy
 uci commit shadowsocksr
+uci commit turboacc
 
 log "All UCI configs committed. Done."

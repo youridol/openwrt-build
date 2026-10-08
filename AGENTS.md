@@ -43,8 +43,10 @@
    不要为了「让 CI 变绿」而加容错兜底。
 
 4. **执行位不可丢。** `files/etc/init.d/*`、`files/etc/uci-defaults/*`、`files/etc/hotplug.d/**`、
-   `files/etc/rc.local` 及 trafficctl 的脚本均需 `+x`，CI 显式 `chmod +x`。
-   新增此类文件后，请一并更新 CI 的 chmod 清单。
+   `files/etc/rc.local` 均需 `+x`，CI 有显式 `chmod +x` 清单（`.github/workflows/build-openwrt.yml`）。
+   新增此类文件后，请一并更新该清单。
+   （`package/luci-app-trafficctl/` 的脚本不在此清单内，它们靠 git 索引里的 100755 位生效；
+   CI 并未对它们 chmod。）
 
 5. **不要提交本机凭据。** `.gitignore` 已排除 `rsh.py` 等**本机排查工具**（内含路由器明文口令）、
    一次性排障报告、编译产物与密钥。**新增此类文件时请同步补充 `.gitignore` 规则**；
@@ -79,11 +81,16 @@
 ```
 LAN 客户端
   └─ dnsmasq:53                     (noresolv=1, server=127.0.0.1#5353)
-       └─ dnsproxy:5353             (ALL_DOH 加密主链, upstream_mode=parallel)
-            ├─ 国内域名 → 阿里 / 1.12.12.12 / 360 DoH
-            └─ 国外域名 → mosdns:5335 (SSR-Plus 管理, pdnsd_enable=4)
-                            └─ 国外 DoH (dns.google / cloudflare / quad9) 经代理出站
+       ├─ 默认 → dnsproxy:5353      (ALL_DOH 加密主链, upstream_mode=parallel)
+       │     ├─ 国内域名 → 阿里 / 1.12.12.12 / 360 DoH
+       │     └─ 24 个硬编码国外域名 → 127.0.0.1:5335
+       └─ gfw_list.conf(23614 条) + black.list → 127.0.0.1#5335
+             └─ mosdns:5335         (SSR-Plus 管理, pdnsd_enable=4)
+                   └─ 国外 DoH（dns.google / cloudflare）经代理出站
 ```
+
+**分流是分裂的**：只有 `gfw_list.conf` 与 `black.list` 里的域名走 mosdns，
+其余（含大多数境外域名）走 dnsproxy 的国内 DoH。这一点是理解 §5 的前提。
 
 - **SSR-Plus 透明代理只代理 IPv4。** `iptables -t nat` 有 `REDIRECT --to-ports 1234`；
   **`ip6tables` 中只有 DNS 重定向，没有任何 TPROXY/REDIRECT** —— 国外 IPv6 是**直连**。
@@ -95,21 +102,29 @@ LAN 客户端
 
 ---
 
-## 5. ⚠️ `filter_aaaa` —— 已知语义冲突（动手前务必确认）
+## 5. ⚠️ `filter_aaaa` —— 语义随 dnsmasq 路由分裂而反转（动手前务必确认）
 
-这是本仓库**最容易误改**的一个开关，两个方向都有真实代价：
+这是本仓库**最容易误改**的一个开关。它的「正确值」**不取决于开关字面，而取决于
+dnsmasq 把哪些域名指向 mosdns:5335**。当前仓库值 **`'1'`**（v0.4.0 起），
+具体理由与完整推演见 `docs/adr/0001-filter-aaaa-semantics.md`。
 
-| 值 | MosDNS 序列 | 效果 | 代价 |
-|---|---|---|---|
-| `'0'` | `main_sequence_with_IPv6` | 国外域名返回真实 AAAA，客户端可用 IPv6 | 被墙域名（如 **chatgpt.com**）在 IPv6 上直连被 **RST** → 打不开 |
-| `'1'` | `main_sequence_disable_IPv6` | 国外域名无 AAAA，全部回落 IPv4 走代理 | 双栈客户端**完全失去国外 IPv6 能力** |
+| dnsmasq 路由 | `filter_aaaa` | 实际效果 |
+|---|---|---|
+| **全量**指向 `#5335`（v0.3.5 时代） | `'1'` | 所有国外域名失去 AAAA → 双栈客户端「有 IPv6 但上不了网」（v0.3.5 修的就是这个） |
+| **分裂**（现状：默认 `#5353`，仅 `gfw_list.conf` 的 23614 条 + `black.list` 走 `#5335`） | `'1'` | 只有**需走代理的域名**失去 AAAA → 被墙域名回落 IPv4 走代理；其余国外域名保留 AAAA 走 IPv6 直连 |
+| 分裂 | `'0'` | 那 23614 个被墙域名拿到真实 AAAA → IPv6 直连被 **RST** → 「有 IPv6 但打不开站点」 |
 
-- 仓库 `files/etc/uci-defaults/99-gaming-optimize` 第 180 行当前为 **`'0'`**，
-  且 **v0.3.5 的 CHANGELOG 明确记载这是刻意修复**（此前 `'1'` 导致「有公网 IPv6 却上不了 IPv6」）。
-- 因此 `'1'` 在**仓库语义**里是「旧 bug 的值」；但它恰好能解 chatgpt-over-IPv6 被 RST 的问题。
-- **这是产品取舍，不是纯技术缺陷。改动前必须先与仓库所有者确认，并同步 CHANGELOG。**
-- 相关机制：`get_filter_aaaa()`（`/etc/init.d/shadowsocksr`）→ `mosdns-config.yaml` 模板里
-  `DNS_MODE` 被 sed 替换。改 UCI 后需 `/etc/init.d/shadowsocksr restart` 重新生成运行时配置。
+- **判定方法**：`grep -c '127.0.0.1#5335' /tmp/dnsmasq.d/dnsmasq-ssrplus.d/gfw_list.conf`
+  与 `/var/etc/dnsmasq.conf.cfg01411c` 的 `server=` 行。先看路由，再判开关值。
+- **实测基线（2026-10-09）**：`taobao.com` 返回 8 条真实 AAAA；`google.com` /
+  `chatgpt.com` / `steamcommunity.com` 返回 mosdns 合成 SOA（`fake-ns.mosdns.fake.root`）；
+  `baidu.com` / `qq.com` 的 SOA 来自真实权威（**上游确实没有 AAAA，不是被抑制**，
+  勿把这当证据）。
+- 相关机制：`get_filter_aaaa()`（`/etc/init.d/shadowsocksr`）→ init 脚本把模板里的
+  `DNS_MODE` 占位符替换为 `main_sequence_disable_IPv6` 或 `main_sequence_with_IPv6`。
+  改 UCI 后需 `/etc/init.d/shadowsocksr restart` 重新生成运行时配置
+  （`/var/etc/ssrplus/mosdns-config.yaml`）。
+- **改动此开关前必须同时确认路由形态，并同步 CHANGELOG 与 ADR-0001。**
 
 ---
 
@@ -170,17 +185,34 @@ LAN 客户端
 
 ## 9. 当前未决 / 风险
 
-- **[待决] `filter_aaaa` 语义冲突**：路由器在线值（`1`）与仓库权威值（`0`）不一致，
-  详见第 5 节。需所有者决定采用哪种语义，并保证「仓库 / 路由器 / CHANGELOG」三者一致。
-- **[已处理] 本机排查脚本防误提交**：已新增 `.gitignore`，排除本机工具（`rsh.py` 含明文口令）、
-  一次性排障报告与编译产物；并在 `.gitattributes` 中为其固定 LF 行尾。
+- **[已解决] `filter_aaaa` 语义冲突**：v0.4.0 起仓库值与路由器在线值统一为 `'1'`，
+  依据见第 5 节与 `docs/adr/0001-filter-aaaa-semantics.md`。
+- **[已处理] 本机排查脚本防误提交**：`.gitignore` 已排除本机工具（含明文口令）、
+  一次性排障报告与编译产物；`.gitattributes` 已加 `*.ps1 text eol=lf`。
   该文件是安全网而非免检牌——提交前仍须确认 `git status`。
+- **[已处理] `v0.3.5` 无 tag**：HEAD 早已含 v0.3.5 的修复提交但从未打 tag；
+  v0.4.0 未补打该 tag（仅本地标签现状，不影响代码）。
+- **[未决] 以下三项需上机确认后才能改动**（详见审计报告 §10）：
+  1. `mosdns-config.yaml` 的 `reject` 规则前置 —— 运行时配置由 SSR-Plus init 脚本
+     生成（模板含 `DNS_MODE`/`DNS_PORT` 占位符），未确认改动位置前不动。
+  2. `rps_flow_cnt` 被清零的写入方（`autocore` 写 4096，实测为 0）。
+  3. `applechina.conf`（173 条指向 `114.114.114.114` 的明文 DNS）与
+     `whitelist_forward.conf`（8 条无效 `server=/域名/127.0.0.1`）的生成路径。
 - **[风险] `package/luci-app-trafficctl` 为 vendored 副本**（v1.8.0）：
   上游更新不会自动进入本仓库，需手动同步；改本地副本不会回流上游。
+- **[风险] 上行吞吐无法测量**：本机无可用上传端点（公共镜像 PUT 返回 405，
+  且未安装测速工具）。SQM 的上行效果目前只能通过「上行饱和时 ping 抬升」间接验证。
+- **[风险] NAT1（fullcone）与软件 flow offloading 的交互无一手来源**：本机实测二者
+  已并存生效（`xt_FULLCONENAT` 与 `xt_FLOWOFFLOAD` 同时被引用），但跨流量形态的
+  保持情况仍需刷机后实测。
 
 ---
 
 ## 附：本机排查工具（勿提交）
+
+> **注意**：以下文件当前**不在磁盘上**（除 `rsh.py` 曾被引用外，其余从未纳入版本管理）。
+> 表中保留其用途描述，供将来重新创建时参照；对应 `.gitignore` 规则已就位。
+> 路由器连接可用 `Y:\openwrt\rt.ps1`（plink，固定 hostkey）作为替代通道。
 
 | 文件 | 用途 |
 |---|---|

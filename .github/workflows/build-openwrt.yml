@@ -173,9 +173,16 @@ jobs:
           echo "CONFIG_PACKAGE_luci-app-ssr-plus_INCLUDE_ShadowsocksR_Libev_Server=y" >> .config
 
           # 启用 trafficctl 及其中文语言包
-          # i18n 包由 LuCI 构建系统从 po/zh-cn/ 自动生成，包名格式：luci-i18n-<PKG_NAME>-<lang>
+          # i18n 包名由 luci.mk 推导，不是「luci-i18n-<PKG_NAME>-<lang>」：
+          #   LUCI_NAME   = 目录名            = luci-app-trafficctl
+          #   LUCI_TYPE   = 第 2 段           = app
+          #   LUCI_BASENAME = patsubst luci-app-%,%,LUCI_NAME = trafficctl
+          #   LuciTranslation 生成 Package/luci-i18n-$(LUCI_BASENAME)-zh-cn
+          # 故正确符号为 luci-i18n-trafficctl-zh-cn。
+          # 原写 luci-i18n-luci-app-trafficctl-zh-cn 从不匹配任何符号，
+          # 被 confdata.c 静默忽略 → 中文包实际从未编入（本次修正）。
           echo "CONFIG_PACKAGE_luci-app-trafficctl=y" >> .config
-          echo "CONFIG_PACKAGE_luci-i18n-luci-app-trafficctl-zh-cn=y" >> .config
+          echo "CONFIG_PACKAGE_luci-i18n-trafficctl-zh-cn=y" >> .config
 
           # ALL_DOH: dnsproxy + luci-app-dnsproxy + CA 证书（https-dns-proxy 已彻底移除）
           # 二进制来自 helloworld feed(0.83.0)，init/config 来自 openwrt-build/files
@@ -190,7 +197,78 @@ jobs:
           # Fullcone NAT (游戏 UDP NAT 穿透)
           echo "CONFIG_PACKAGE_iptables-mod-fullconenat=y" >> .config
 
+          # === SQM / cake 上行整形（控制 50Mbps 上行瓶颈的排队时延）===
+          # 实测现固件缺 tc 与 sch_cake.ko，导致 pppoe-wan 为 noqueue、无任何队列管理。
+          # sqm-scripts 来自 coolsnowwolf/packages feed（v1.6.0 依赖 iptables 而非
+          # nftables，与本固件 fw3/iptables 后端匹配）；tc 来自 iproute2 的 tc-tiny
+          # （默认变体，提供 /sbin/tc）；kmod-sched-core 为 tc 的依赖。
+          echo "CONFIG_PACKAGE_sqm-scripts=y" >> .config
+          echo "CONFIG_PACKAGE_luci-app-sqm=y" >> .config
+          echo "CONFIG_PACKAGE_kmod-sched-cake=y" >> .config
+          echo "CONFIG_PACKAGE_kmod-ifb=y" >> .config
+          echo "CONFIG_PACKAGE_kmod-sched-core=y" >> .config
+          echo "CONFIG_PACKAGE_tc-tiny=y" >> .config
+
+          # === 显式排除不用的文件服务 ===
+          # 实测这两个服务对用户无用：vsftpd 监听 0.0.0.0:21 但无实际用途；
+          # ksmbd 未配置任何 share（仅 globals），445 端口空转。
+          # 注意: 必须在 make defconfig 之前写入，否则依赖解析会把它们重新选上。
+          echo "# CONFIG_PACKAGE_vsftpd is not set" >> .config
+          echo "# CONFIG_PACKAGE_luci-app-vsftpd is not set" >> .config
+          echo "# CONFIG_PACKAGE_luci-i18n-vsftpd-zh-cn is not set" >> .config
+          echo "# CONFIG_PACKAGE_ksmbd-server is not set" >> .config
+          echo "# CONFIG_PACKAGE_luci-app-ksmbd is not set" >> .config
+          echo "# CONFIG_PACKAGE_luci-i18n-ksmbd-zh-cn is not set" >> .config
+          echo "# CONFIG_PACKAGE_autosamba is not set" >> .config
+
           make defconfig
+
+      - name: Verify SQM / i18n enabled and file services excluded
+        working-directory: lede
+        run: |
+          # defconfig 会按依赖解析重算所有符号，可能把上面的排除项重新选上。
+          # 这里显式复核，任一项不符即失败（不使用 || true）。
+          echo "=== SQM / cake 相关（应全部为 =y）==="
+          for sym in CONFIG_PACKAGE_sqm-scripts CONFIG_PACKAGE_kmod-sched-cake \
+                     CONFIG_PACKAGE_kmod-ifb CONFIG_PACKAGE_kmod-sched-core \
+                     CONFIG_PACKAGE_tc-tiny; do
+            if grep -q "^${sym}=y$" .config; then
+              echo "OK   ${sym}=y"
+            else
+              echo "FAIL ${sym} 未启用："
+              grep -E "^#? ?${sym}[ =]" .config || echo "  (符号不存在于 .config)"
+              exit 1
+            fi
+          done
+
+          echo "=== luci-app-sqm（缺失只告警，不阻断）==="
+          grep -q "^CONFIG_PACKAGE_luci-app-sqm=y$" .config \
+            && echo "OK   CONFIG_PACKAGE_luci-app-sqm=y" \
+            || echo "WARN luci-app-sqm 未启用（LuCI 里无 SQM 页面，但内核与脚本仍生效）"
+
+          echo "=== trafficctl 中文语言包（符号名易写错，必须校验）==="
+          # 正确符号：luci-i18n-trafficctl-zh-cn
+          #   luci.mk 由目录名推导 LUCI_BASENAME=trafficctl，再生成
+          #   Package/luci-i18n-$(LUCI_BASENAME)-$(lang)。
+          # 历史错误写法 luci-i18n-luci-app-trafficctl-zh-cn 不匹配任何符号，
+          # 会被 confdata.c 静默忽略，导致中文包从未编入 —— 故在此阻断。
+          if grep -q "^CONFIG_PACKAGE_luci-i18n-trafficctl-zh-cn=y$" .config; then
+            echo "OK   CONFIG_PACKAGE_luci-i18n-trafficctl-zh-cn=y"
+          else
+            echo "FAIL 中文语言包未启用，检查符号名是否写成 luci-i18n-luci-app-trafficctl-zh-cn"
+            grep -E "^#? ?CONFIG_PACKAGE_luci-i18n-.*trafficctl.*=" .config || echo "  (无任何 trafficctl i18n 符号)"
+            exit 1
+          fi
+
+          echo "=== 应被排除的文件服务（必须不为 =y）==="
+          for sym in CONFIG_PACKAGE_vsftpd CONFIG_PACKAGE_ksmbd-server \
+                     CONFIG_PACKAGE_autosamba; do
+            if grep -q "^${sym}=y$" .config; then
+              echo "FAIL ${sym} 仍被启用（依赖解析把它选回来了）"
+              exit 1
+            fi
+            echo "OK   ${sym} 未启用"
+          done
 
       - name: Apply gaming optimization files overlay
         working-directory: lede
@@ -216,6 +294,45 @@ jobs:
           if [ -d files/etc/hotplug.d/dhcp ]; then chmod +x files/etc/hotplug.d/dhcp/*; fi
           echo "files overlay 执行位设置完成:"
           ls -l files/etc/init.d/dnsproxy files/etc/uci-defaults/ files/etc/hotplug.d/iface/ files/etc/rc.local 2>/dev/null
+
+      - name: Verify mosdns template contract (upstreams at line 14, reject before forward)
+        working-directory: lede
+        run: |
+          # files/etc/ssrplus/mosdns-config.yaml 是本仓库对 SSR-Plus 模板的 overlay。
+          # 它必须满足 SSR-Plus init 脚本（/etc/init.d/shadowsocksr 第 1283 行）的契约：
+          #   awk -v line=14 'NR == line+1 {print text} 1'
+          # 即 `upstreams:` 必须正好在第 14 行，否则 DoH 上游会被插到错误位置
+          # → mosdns 配置损坏 → 23614 个 gfw_list 域名解析全部失败。
+          # 该契约无法被 YAML 语法检查发现，故在此显式断言。
+          # 同时断言 reject 规则排在 forward 之前（v0.4.0 的优化意图）。
+          T=files/etc/ssrplus/mosdns-config.yaml
+          [ -f "$T" ] || { echo "FAIL 缺少 $T"; exit 1; }
+
+          line14="$(sed -n '14p' "$T" | sed 's/[[:space:]]*$//')"
+          if [ "$line14" != "        upstreams:" ]; then
+            echo "FAIL 模板第 14 行不是 'upstreams:'，实际为: [$line14]"
+            echo "     这会让 init 脚本的 awk 把上游插错位置，mosdns 将无法启动。"
+            sed -n '10,18p' "$T"
+            exit 1
+          fi
+          echo "OK   第 14 行 = upstreams:"
+
+          reject_ln="$(grep -n 'exec: reject 0' "$T" | head -1 | cut -d: -f1)"
+          forward_ln="$(grep -n 'exec: \$forward_google' "$T" | head -1 | cut -d: -f1)"
+          if [ -z "$reject_ln" ] || [ -z "$forward_ln" ]; then
+            echo "FAIL 模板缺少 reject 或 forward 规则 (reject=$reject_ln forward=$forward_ln)"
+            exit 1
+          fi
+          if [ "$reject_ln" -ge "$forward_ln" ]; then
+            echo "FAIL reject (行 $reject_ln) 未排在 forward (行 $forward_ln) 之前"
+            exit 1
+          fi
+          echo "OK   reject 行 $reject_ln < forward 行 $forward_ln"
+
+          grep -q 'DNS_MODE' "$T" || { echo "FAIL 模板缺少 DNS_MODE 占位符"; exit 1; }
+          grep -q 'DNS_PORT' "$T" || { echo "FAIL 模板缺少 DNS_PORT 占位符"; exit 1; }
+          echo "OK   DNS_MODE / DNS_PORT 占位符存在"
+          echo "mosdns 模板契约校验通过。"
 
       - name: Download package sources
         working-directory: lede

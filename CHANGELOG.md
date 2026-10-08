@@ -2,6 +2,197 @@
 
 本仓库所有功能/配置改动均记录于此。版本判型遵循全局规范（PATCH / MINOR / MAJOR）。
 
+## [v0.4.0] - 2026-10-09
+
+> 依据：`docs/audit/2026-10-09-network-audit.md`（对在线路由器 `192.168.3.254` 的只读全链路审计，
+> 含改动前基线与我方证据；审计过程中有三处初判被实测推翻，已在报告内显式标注）。
+> 本次为功能级改动（整形 / DNS 序列 / 分流语义 / 构建包），故按 MINOR 定为 v0.4.0。
+> 未打 `v0.3.5` tag —— HEAD 已含该修复但无 tag，本次不补。
+
+### 新增（SQM / cake 整形）
+
+- **`files/etc/config/sqm`（新文件）**：cake 整形默认配置。
+  - 动因：实测固件**不含 `tc` 二进制，也不含 `sch_cake.ko`/`ifb.ko`**，`pppoe-wan`
+    为 `qdisc noqueue`、无任何队列管理；上行 50 Mbps 是全链路最窄瓶颈，
+    其排队时延是游戏 ping 抖动的直接来源。
+  - 参数：`download 900000` / `upload 45000`（50 Mbps × 90%）、`qdisc cake`、
+    `script piece_of_cake.qos`、`linklayer ethernet`、`overhead 34`、`tcMPU 68`。
+  - 下行取保守的 900 Mbps 而非 1000，是为 N2930（4 核 Bay Trail）留余量，
+    避免 CPU 先于 SQM 成为瓶颈；若刷机后实测峰值明显低于 900 再下调。
+  - 队列：`iqdisc_opts 'ingress nat dual-dsthost'` + `eqdisc_opts 'nat dual-srchost'`。
+  - 技术依据（一手来源已核）：**SQM 与 software flow offloading 兼容**，
+    仅 hardware flow offloading 不兼容（内核 `__nf_flow_queue_xmit()` 仍调用
+    `dev_queue_xmit()`，即 egress qdisc 不被绕过）。故**不关闭** `flow_offloading`，
+    NAT1（fullcone）不受影响 —— 实测本机 `xt_FULLCONENAT` 与 `xt_FLOWOFFLOAD`
+    已同时被引用并生效。
+  - 已知限制：软件 flow offloading 命中后的报文不再经过 mangle，因此**不采用
+    DSCP 分级**（其有效性无一手依据），只依赖 cake 的 per-flow 公平队列防大流饿死小包。
+
+### 修复（BBR 未生效）
+
+- **`turboacc.config.tcpcca` 由 `cubic` 改为 `bbr`**（`files/etc/uci-defaults/99-gaming-optimize`）：
+  - **现象**：`sysctl net.ipv4.tcp_congestion_control` 运行时为 `cubic`，
+    而 `/etc/sysctl.conf` 与 `/etc/sysctl.d/12-tcp-bbr.conf` 均写 `bbr`，
+    `kmod-tcp-bbr` 已加载且 `bbr` 在可用列表中。
+  - **根因**：`/etc/init.d/turboacc` 以 `S90` 启动（晚于 `S11sysctl`），
+    其第 145 行 `sysctl -w net.ipv4.tcp_congestion_control="$tcpcca"`，
+    而 `turboacc.config.tcpcca` 默认 `cubic`，开机后覆盖了 sysctl 的值。
+  - **作用域澄清**：该开关只影响**路由器自身发起的 TCP**（dnsproxy 的 DoH 出站、
+    代理隧道、`ssrplusupdate.sh`、opkg），**不影响** LAN 客户端转发的 TCP。
+    原 `sysctl.conf` 注释将其描述为对游戏的作用，属过度声明，已更正。
+
+### 修复（DNS 解析语义）
+
+- **新增 `files/etc/ssrplus/mosdns-config.yaml` overlay，把 `reject` 规则前置**：
+  - **问题**：上游模板把 `qtype 28/65 → reject 0` 排在 `$forward_google` **之后**。
+    mosdns v5 的 `sequence` 依次执行每条 rule，`ActionReject.Exec` 用
+    `qCtx.SetResponse(r)` 覆盖已写入的应答 —— 因此每个被拒的 AAAA/HTTPS 查询都会
+    **先真向上游发一次再丢弃**，白付一次经代理的往返。
+  - **落点**：语句顺序**只由模板决定**。`/etc/init.d/shadowsocksr` 第 1283–1288 行
+    只做四件事（在第 15 行插 DoH 上游、替换 `DNS_PORT`、替换 `DNS_MODE`、改
+    `concurrent`），**不重排 `args:` 序列**。故必须改模板。
+  - **为何用 overlay**：原模板由 `luci-app-ssr-plus` 包提供且登记为 opkg conffile，
+    包升级会覆盖它。仓库此前无该文件副本，新增 overlay 才能固化。
+  - **硬约束**：`upstreams:` 必须保持在第 14 行（init 脚本用
+    `awk -v line=14 'NR == line+1 {print text} 1'` 注入上游）。因此说明性注释
+    **只能放在文件末尾**，文件顶部不得增加任何行。
+  - **CI 守卫**：新增步骤 `Verify mosdns template contract`，断言第 14 行确为
+    `upstreams:`、`reject` 行号小于 `forward` 行号、`DNS_MODE`/`DNS_PORT` 占位符存在。
+    该契约无法被 YAML 语法检查发现，出错会让 mosdns 启动失败、23614 个 gfw_list
+    域名解析全部中断，故必须阻断在构建期。
+  - **本地验证**：已按 init 脚本的真实命令（awk 注入 + 两次 sed + `DNS_MODE` 替换）
+    在本地完整模拟，转换结果经 YAML 解析确认 `plugins=6`、`upstreams` 2 条、
+    `concurrent=2`、`reject` 下标 1 < `forward` 下标 3、`lazy_cache` 仍在首位、
+    `udp/tcp_server` 的 `entry`/`listen` 正确。
+- **`shadowsocksr.@global[0].filter_aaaa` 由 `'0'` 改为 `'1'`**：
+  - **这是对 v0.3.5 结论的修正，方向相反。** v0.3.5 的前提是「dnsmasq 把所有域名
+    都指向 `127.0.0.1#5335`」；该前提已不成立 —— 现网 dnsmasq 默认走
+    `127.0.0.1#5353`（dnsproxy 国内 DoH），仅 `gfw_list.conf` 的 23614 个域名
+    与 `black.list` 走 `#5335`（mosdns）。
+  - 因此 `'1'` 下 mosdns 的 `reject 0` 只作用于**需走代理的域名**，即
+    **拒绝集 = 需走代理的域名集**，正是期望语义：被墙域名回落 IPv4 走代理，
+    其余国外域名保留真实 AAAA 走 IPv6 直连。
+  - 实测（客户端真实路径）：`taobao.com` 返回 8 条真实 AAAA；
+    `google.com`/`chatgpt.com`/`steamcommunity.com` 返回 mosdns 合成 SOA；
+    `baidu.com`/`qq.com` 的 SOA 来自真实权威（上游确实无 AAAA，非被抑制）。
+  - 若沿用仓库原值 `'0'`，那 23614 个被墙域名将拿到真实 AAAA 并在 IPv6 上
+    直连被 RST，表现为「有 IPv6 但打不开站点」。详见 `docs/adr/0001-filter-aaaa-semantics.md`。
+- **`tunnel_forward_mosdns` 由 3 个上游收敛为 2 个**（去掉 `https://dns.quad9.net/dns-query`）：
+  三个上游以 `concurrent` 竞速取最快，quad9 从国内经代理访问明显慢于
+  google/cloudflare，参与竞速只增加方差、不增加可用性。
+- **`files/etc/config/dnsproxy` 头部注释更正**：原文写「国内国外统一加密解析、
+  不分流」，与同文件 `servers` 段的显式分流（国外域名 → `127.0.0.1:5335`）矛盾。
+
+### 修复（内核旋钮冲突与死配置）
+
+- **`files/etc/rc.local` 删除 RPS 段**：实测该段从未生效 —— `rps_cpus` 最终由
+  `packet_steering`（其 `service_triggers` 注册了 `interface.*` raw trigger，
+  接口事件会再次触发 reload）改写为单核亲和（`eth0=1`、`eth1=4`），
+  `rps_sock_flow_entries` 由 `autocore`（`S99`，最后执行）按 `核心数 × 4096`
+  覆盖为 16384。保留该段只会误导后续维护者。
+- **`files/etc/rc.local` 删除 `nf_conntrack_helper` 写入**：该 sysctl 路径在
+  内核 6.12 已不存在，原 `echo 0 > ... 2>/dev/null` 静默失败。
+- **`files/etc/sysctl.conf` 删除 `net.core.rps_sock_flow_entries = 32768`**：
+  同上，运行时值由 `autocore` 决定（16384），该行是死配置。
+- **`rc.local` / `sysctl.conf` 的 RPS 死配置根因已确证**（审计报告 §10 未决项 1 结案）：
+  - `rps_flow_cnt` 的唯一清零点为 `/usr/libexec/network/packet-steering.uc` 第 80–86 行——
+    当 UCI `network.@globals[0].steering_flows` 未设置时，默认 `local_flows=0` 被
+    **无条件**写入所有队列。证据：该脚本 `-n` dry-run 输出与实测 `eth0=1`/`eth1=4`
+    的 `rps_cpus` 指纹完全一致，而 `autocore`（写 `f`）与 `rc.local`（写 `f`）在 4 核下
+    都产不出该值，故必是它最后覆盖。其 `service_triggers` 含
+    `procd_add_raw_trigger "interface.*" 1000 …reload`，接口事件会再次清零。
+  - 因此**若日后需要 `rps_flow_cnt` 非零，应设 `network.globals.steering_flows`**
+    （上游 UCI 开关），而不是改 `rc.local`。本次未改（属可选优化，不影响既定目标）。
+- **`files/etc/sysctl.conf` 删除 `net.ipv4.tcp_notsent_lowat = 131072`**：
+  该值的正确用法是「降低」以改善交互延迟；而代理出口 RTT ≈200ms、上行 50 Mbps
+  → BDP ≈1.25 MB，原值 128 KB 不到 BDP 的 1/10，会压制代理隧道与 DoH 吞吐，
+  两种目的都不达成。恢复内核默认（不限制）。
+- **`files/etc/sysctl.conf` 恢复 `net.ipv4.tcp_timestamps` 为内核默认 1**：
+  原值 `0` 关闭 RFC1323 时间戳，同时失去 PAWS（防序号回绕重放）与 RTT 采样；
+  唯一收益是每包省 12 字节，而「关闭可降低延迟」在官方文档中**无任何依据**
+  （RFC 7323 §1.3 反而指出其对长肥管道是收益项）。
+
+### 修复（DHCPv6 与 MTU）
+
+- **`dhcp.lan.ra_mtu` 由 `1452` 改为 `1492`**：原值推导「1492 − 40」错把 IPv6
+  基本头（40 B）当成要从链路 MTU 中预先扣除的封装开销。IPv6 头是报文本身的
+  一部分，不占 MTU 之外；预先扣 40 字节只会让每个 IPv6 包少用 40 字节载荷。
+  已通告 PPPoE 链路真实 MTU，PMTU 发现由 ICMPv6 `packet-too-big` + MSS clamp 覆盖。
+- **删除 `network.wan6`**：实测该接口只跑一个 `-P0` 的 `odhcp6c`，不申请前缀，
+  `eth1` 上无全局地址、日志零输出，属纯空转；ISP 的 IPv6 实际经 PPPoE 由
+  `wan_6` 获取。同时 `del_list firewall.@zone[1].network='wan6'`，避免 fw3 引用
+  不存在的接口。
+
+### 修复（工程健壮性）
+
+- **CI 修正 trafficctl 中文语言包的 CONFIG 符号名**（先于本次改动存在的静默失效）：
+  - 原写 `CONFIG_PACKAGE_luci-i18n-luci-app-trafficctl-zh-cn=y`，**该符号从不匹配任何包**，
+    被 kconfig 的 `confdata.c` 静默忽略（未知符号直接 `continue`，不报错），
+    因此中文语言包**从未被编入固件**。
+  - 正确符号为 `CONFIG_PACKAGE_luci-i18n-trafficctl-zh-cn`。推导依据 `luci.mk`：
+    `LUCI_NAME = 目录名 = luci-app-trafficctl` → `LUCI_TYPE = word 2 = app` →
+    `LUCI_BASENAME = patsubst luci-app-%,%,LUCI_NAME = trafficctl` →
+    `LuciTranslation` 生成 `Package/luci-i18n-$(LUCI_BASENAME)-zh-cn`。
+  - 同时在 CI 校验步骤中新增对该符号的**阻断式检查**（写错即 `exit 1`），
+    避免同类静默失效再次发生。
+- **`99-gaming-optimize` 的 MSS clamp 追加改为幂等**：原代码无条件
+  `cat >> /etc/firewall.user`，实测该段在现网 `/etc/firewall.user` 中**已重复两遍**。
+  改为追加前按标记行 `grep -q` 判重。
+- **`.gitattributes` 补规则**：新增 `*.ps1`、`**/etc/config/sqm`、`**/etc/sysctl.conf`。
+  其中 `*.ps1` 是修正 AGENTS.md §9 的失实声明（原称已固定 LF，实际无该规则）。
+
+### 变更（构建）
+
+- **CI 增加 SQM 相关包**：`sqm-scripts`、`luci-app-sqm`、`kmod-sched-cake`、
+  `kmod-ifb`、`kmod-sched-core`、`tc-tiny`。
+  - `sqm-scripts` 取自 coolsnowwolf/packages feed 的 **v1.6.0**（依赖 `iptables`
+    而非 `nftables`，与本固件 fw3/iptables 后端匹配）；OpenWrt 官方 master 的
+    v1.8.0 依赖 `nftables`，**不适用**。
+  - `tc` 由 iproute2 的 `tc-tiny`（默认变体）提供 `/sbin/tc`。
+- **CI 显式排除 `vsftpd`、`ksmbd-server`、`autosamba` 及其 LuCI/i18n 包**：
+  实测用户不使用 SMB/FTP；`ksmbd` 未配置任何 share（仅 globals），`445` 空转。
+  注意 `luci-app-vsftpd` 在 lede 的 `DEFAULT_PACKAGES.router` 里，故排除写在
+  `make defconfig` **之前**。
+- **CI 新增校验步骤** `Verify SQM enabled and file services excluded`：
+  在 `make defconfig` 之后逐项复核（SQM 全部 `=y`、被排除项不为 `=y`），
+  任一项不符即 `exit 1`，不使用 `|| true`（遵循「禁止静默失败」红线）。
+
+### 新增（文档）
+
+- `docs/audit/2026-10-09-network-audit.md`：本次全链路审计报告（数据流图、
+  改动前基线、15 项问题、逐项回滚、验收清单）。
+- `docs/adr/0001-filter-aaaa-semantics.md`：记录 `filter_aaaa` 的语义随
+  dnsmasq 路由分裂而反转这一反直觉结论。
+- `docs/adr/0002-no-ipv6-proxy.md`：记录「境外 IPv6 不经代理」是有意取舍而非遗漏。
+- `GLOSSARY.md`：固定链路术语（分流 / 拒绝集 / 直连 / 强制代理 / 健康检查 /
+  整形 / 排队时延 / overhead / 跳数）。
+- `AGENTS.md`：更正 §2 红线 4（trafficctl 的 chmod 描述与 CI 不符）、
+  §5（filter_aaaa 语义）、§9（.ps1 规则失实）、附录（9 个本机工具实际不存在）。
+
+### 验证
+
+- 静态检查：`ash -n` 通过 `files/etc/uci-defaults/99-gaming-optimize`、
+  `files/etc/rc.local`、`files/etc/init.d/dnsproxy`；YAML 通过
+  `python -c "import yaml"` 解析 `.github/workflows/build-openwrt.yml`。
+- 端到端验证**待用户刷机后执行**，清单见审计报告 §8（配置生效 / DNS 回归 /
+  游戏与抖动 / 性能四组），并保留改动前基线用于前后对比。
+- 未在路由器上执行任何改动（本次仅改仓库）；NAT1 保持与否、下行峰值是否受
+  影响，均属刷机后实测项。
+
+### 未完成 / 已知限制
+
+- **`mosdns-config.yaml` 的 `reject` 前置未落地**：运行时配置由 SSR-Plus init
+  脚本生成（源模板含 `DNS_MODE`/`DNS_PORT` 占位符），改动位置未确认前不修改，
+  以免改到不被读取的文件。见审计报告 §10 未决项 2。
+- **`rps_flow_cnt` 被清零的写入方未定位**（`autocore` 写 4096，实测为 0）。
+  在定位前不基于该参数做任何调优。见 §10 未决项 1。
+- **上行吞吐无法测量**（本机无可用上传端点，公共镜像 PUT 返回 405），
+  SQM 的上行效果只能通过「上行饱和时 ping 抬升」间接验证。
+- **`applechina.conf` 的 173 条明文 DNS（`114.114.114.114`）未改**：用户已确认
+  希望改走加密链，但该文件由 SSR-Plus 生成，生成路径未确认前不修改。
+- **`whitelist_forward.conf` 的 8 条无效 `server=/域名/127.0.0.1` 未清理**：
+  实测未形成自环（解析 0–1ms 正常返回），属冗余而非故障，同因 SSR-Plus 生成路径未知。
+
 ## [v0.3.5] - 2026-09-21
 
 ### 修复（双栈客户端「有公网 IPv6 地址却无法用 IPv6 上网」）
