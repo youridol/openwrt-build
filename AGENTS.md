@@ -135,7 +135,7 @@ dnsmasq 把哪些域名指向 mosdns:5335**。当前仓库值 **`'1'`**（v0.4.0
 | 路由器 | OpenWrt 24.10.5 x86/64（SSH: `root@192.168.3.254`） |
 | 本机 | Windows，`192.168.3.238`，网关/DNS = `192.168.3.254` |
 | 双栈 | 本机持有运营商公网 IPv6 `240e:355:7f2b:8900::/64`（**原生可用**） |
-| 路由器 SSH | dropbear，老 KEX；Windows 自带 `ssh.exe` 可能不兼容 → 用 `rsh.py`(paramiko) |
+| 路由器 SSH | dropbear，老 KEX；Windows 自带 `ssh.exe` 无密钥会 `Permission denied`。**可用通道**：`Y:\openwrt\rt.ps1` 内的 `plink.exe`（PuTTY，固定 hostkey `SHA256:0rLDon8UFR9NpWfDbLO75PhFq38LrCEOHipFeYAoNN0`，端口 22）。`rsh.py` 当前不在磁盘上（见附录）。 |
 
 **验证纪律**（本项目历史上多次因「只看进程在跑」而误判）：
 
@@ -192,12 +192,22 @@ dnsmasq 把哪些域名指向 mosdns:5335**。当前仓库值 **`'1'`**（v0.4.0
   该文件是安全网而非免检牌——提交前仍须确认 `git status`。
 - **[已处理] `v0.3.5` 无 tag**：HEAD 早已含 v0.3.5 的修复提交但从未打 tag；
   v0.4.0 未补打该 tag（仅本地标签现状，不影响代码）。
-- **[未决] 以下三项需上机确认后才能改动**（详见审计报告 §10）：
-  1. `mosdns-config.yaml` 的 `reject` 规则前置 —— 运行时配置由 SSR-Plus init 脚本
-     生成（模板含 `DNS_MODE`/`DNS_PORT` 占位符），未确认改动位置前不动。
-  2. `rps_flow_cnt` 被清零的写入方（`autocore` 写 4096，实测为 0）。
-  3. `applechina.conf`（173 条指向 `114.114.114.114` 的明文 DNS）与
-     `whitelist_forward.conf`（8 条无效 `server=/域名/127.0.0.1`）的生成路径。
+- **[已解决] mosdns 模板的 `reject` 前置**：v0.4.0 已新增
+  `files/etc/ssrplus/mosdns-config.yaml` overlay 并加 CI 契约校验。
+  **硬约束：`upstreams:` 必须留在第 14 行**（init 脚本用
+  `awk -v line=14 'NR == line+1 {print text} 1'` 注入上游），因此该文件的
+  说明性注释只能写在末尾，顶部不得增删任何行。
+- **[已解决] `rps_flow_cnt` 的清零点**：确认为 `/usr/libexec/network/packet-steering.uc`
+  第 80–86 行——UCI `network.@globals[0].steering_flows` 未设置时，默认值
+  `local_flows=0` 被无条件写入；其 `service_triggers` 含 `interface.*` raw trigger，
+  接口事件会再次清零。**若日后需要它非零，应设 `network.globals.steering_flows`
+  （上游 UCI 开关），不要改 `rc.local`。**
+- **[未决] SSR-Plus 运行时生成文件的改动路径**（审计报告 §10 第 6 条）：
+  `applechina.conf`（173 条明文 `114.114.114.114`）、
+  `whitelist_forward.conf`（8 条无效 `server=/域名/127.0.0.1`）、
+  `dnsmasq` 的 `log-facility=/dev/null` 三者都需先定位生成路径再决定用 overlay
+  还是 UCI，否则会被 `ssrplusupdate.sh`（每日 02:00）或服务重启覆盖。
+  **这是当前最优先的后续项。**
 - **[风险] `package/luci-app-trafficctl` 为 vendored 副本**（v1.8.0）：
   上游更新不会自动进入本仓库，需手动同步；改本地副本不会回流上游。
 - **[风险] 上行吞吐无法测量**：本机无可用上传端点（公共镜像 PUT 返回 405，
