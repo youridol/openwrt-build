@@ -2,6 +2,29 @@
 
 本仓库所有功能/配置改动均记录于此。版本判型遵循全局规范（PATCH / MINOR / MAJOR）。
 
+## [v0.4.2] - 2026-10-09
+
+### 新增（LAN 固定 IP 固化）
+
+- **`99-gaming-optimize` 增加 `network.lan.ipaddr='192.168.3.254'`**：
+  - **动因**：本仓库此前**从未**设置 `network.lan.ipaddr`。而 `/bin/config_generate`
+    第 165 行对 lan 的默认值是硬编码的 `192.168.1.1`（`/etc/board.json` 的
+    `network.lan` 不含 `ipaddr`）。旧行为因此是：
+    - 保留配置刷机 → 沿用旧 IP（现有路由器为 `192.168.3.254`）
+    - **全新刷机（不保留配置）→ 回退 `192.168.1.1`**，客户端仍按
+      `192.168.3.254` 访问即失联
+  - **改动**：同时写 `ipaddr` / `netmask` / `proto='static'` / `device='br-lan'`，
+    使任何刷机方式下 LAN 均为 `192.168.3.254/24`。
+  - **执行顺序已核实无冲突**：`/etc/init.d/boot` 的 `boot()` 先执行
+    `/bin/config_generate`，再执行 `uci_apply_defaults`（按文件名排序运行
+    uci-defaults）。本脚本（`99-gaming-optimize`）排在 `15_odhcpd`、
+    `14_migrate-dhcp-release` **之后**，且后两者都不写 `network`。
+    `config_generate` 仅在 boot 内调用一次，不会再覆盖。
+  - **风险**：LAN IP 变更本身会中断网络（需 `network reload` 或重启）。
+    本脚本属**首开机一次性执行**，对已运行的路由器无影响；仅影响新刷固件的首次启动。
+    当前路由器已是该值，因此本次改动**不产生任何中断**。
+  - 同步更新该节点日志为 `network: lan=192.168.3.254/24, ...`。
+
 ## [v0.4.1] - 2026-10-09
 
 > 刷机实测后的修复版本。v0.4.0 的改动在真实固件上验证，发现并修复 BBR 未生效的

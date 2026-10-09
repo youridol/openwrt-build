@@ -102,6 +102,18 @@ uci set network.wan.ipv6='1'
 uci set network.lan.ipv6='1'
 uci set network.lan.ip6assign='64'
 
+# LAN 固定 IP：固化为 192.168.3.254，使**全新刷机（不保留配置）**也保持可达。
+# 背景：本仓库此前从未设置 network.lan.ipaddr，而 /bin/config_generate 第 165 行
+#   对 lan 的默认值是硬编码的 192.168.1.1（board.json 的 network.lan 不含 ipaddr）。
+#   因此旧行为是：保留配置刷机 → 沿用旧 IP；全新刷机 → 回退 192.168.1.1，
+#   若客户端仍按 192.168.3.254 访问就会失联。
+# 注意：ipaddr 变更属于会中断网络的操作（需 /etc/init.d/network reload 或重启）。
+#   本脚本只在首次开机（uci-defaults 一次性执行）时生效，不影响已运行的路由器。
+uci set network.lan.ipaddr='192.168.3.254'
+uci set network.lan.netmask='255.255.255.0'
+uci set network.lan.proto='static'
+uci set network.lan.device='br-lan'
+
 # wan6: OpenWrt 默认的 dhcpv6 接口（device=eth1），本固件不使用。
 # 实测(2026-10-09)：它只跑一个 -P0 的 odhcp6c，不申请前缀，eth1 上无全局
 # 地址、日志零输出，属纯空转；而 ISP 的 IPv6 实际经 PPPoE 由 wan_6 获取。
@@ -122,7 +134,7 @@ uci delete network.globals.ula_prefix 2>/dev/null
 # 确保 PPPoE 启用 IPv6CP
 grep -q '+ipv6' /etc/ppp/options 2>/dev/null || echo '+ipv6' >> /etc/ppp/options
 
-log "network: wan_6=dhcpv6c+PD(/56), lan=/64, ip6assign"
+log "network: lan=192.168.3.254/24, wan_6=dhcpv6c+PD(/56), lan=/64, ip6assign"
 
 # ─────────────────────────────────────────────
 # 3. IPv6 纯 SLAAC 模式 (最快获取速度)
