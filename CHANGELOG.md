@@ -2,6 +2,81 @@
 
 本仓库所有功能/配置改动均记录于此。版本判型遵循全局规范（PATCH / MINOR / MAJOR）。
 
+## [v0.4.3] - 2026-10-09
+
+### 修复（SSR-Plus 三项 UCI 写入曾整体失效 —— 本节是本仓库迄今最隐蔽的坑）
+
+- **`99-gaming-optimize` 写 `shadowsocksr.@global[0].*` 前先确保 `global` 段存在**：
+  - **症状**：v0.4.x 刷机后 `tunnel_forward_mosdns` 是包默认的
+    `tcp://8.8.4.4:53,tcp://8.8.8.8:53`，`pdnsd_enable` / `filter_aaaa` 也未被本脚本写入。
+  - **根因（曾误判为 LuCI 覆盖，已被实测推翻）**：
+    1. uci-defaults 按**文件名排序**执行，`99-gaming-optimize`（`9`）**先于**
+       `luci-ssr-plus`（`l`）。
+    2. 此刻 `/etc/config/shadowsocksr` 仍由 opkg conffile 提供，实测为 **0 字节**
+       （`wc -c /rom/etc/config/shadowsocksr` = 0）。
+    3. **空配置上 `uci set shadowsocksr.@global[0].<k>=<v>` 会失败** ——
+       实测 `uci: Invalid argument` + `Entry not found`，退出码 1。
+       故本节原来三条 `uci set ...@global[0].*` 全部静默丢弃。
+    4. 随后 `luci-ssr-plus` 检测到空配置，执行
+       `[ -s /etc/config/shadowsocksr ] || /etc/init.d/shadowsocksr reset`，
+       用 `/usr/share/shadowsocksr/shadowsocksr.config` 模板铺底。该模板**不含**
+       `tunnel_forward_mosdns`（只有旧的 `tunnel_forward '8.8.4.4:53'`），
+       于是 LuCI 读取时回落到 `client.lua` 的 `o.default`。
+  - **对策**：不能简单地在写前 `uci add shadowsocksr global` 抢先建段 ——
+    实测该做法会让文件提前变非空，导致紧随其后的 `luci-ssr-plus` 里
+    `[ -s /etc/config/shadowsocksr ] || /etc/init.d/shadowsocksr reset`
+    **跳过 reset**，结果是只有 `global` 一个段、缺 `server_subscribe` /
+    `access_control` / `socks5_proxy` / `http_proxy` / `server_global` /
+    `global_xray_fragment` / `clash_client_group` 共 7 个段；
+    实测该分支下对 `@server_subscribe[0]` 的写入直接失败（退出码 1）。
+  - **正确做法**：以「配置是否为空」为判据**主动先跑一次模板铺底**
+    （`[ ! -s /etc/config/shadowsocksr ]` 时调用
+    `/etc/init.d/shadowsocksr reset`），使其结果与 `luci-ssr-plus` 将要做的
+    一致；随后在此之上写入本节的值。判据与 `luci-ssr-plus` **同源**，
+    故行为一致；非空（升级/保留配置）时保持不动。
+  - **端到端验证**（隔离副本模拟空配置首刷）：
+    - 模板铺底后段数 = **8**（与 `shadowsocksr.config` 模板一致）
+    - `pdnsd_enable=4`、`tunnel_forward_mosdns=<DoH>`、`filter_aaaa=1` **三项均写入成功**
+    - 模拟 `luci-ssr-plus` 对 `@server_subscribe[0]` 的写入**成功**（原风险点已消除）
+    - 幂等复跑：段数仍为 8、`global` 段仍为 1（无重复累积）
+  - **覆盖范围**：`pdnsd_enable`、`tunnel_forward_mosdns`、`filter_aaaa` 三处受影响；
+    前两处集中在第 4.5 节，`filter_aaaa` 另加同源守卫防御将来调整脚本顺序。
+  - 同时把这些 `uci set` 改为带显式失败日志（`|| log "ERROR: ..."`），
+    避免同类静默丢弃再次发生（红线 3：禁止静默失败）。
+
+### 变更（MSS clamp 改为 fw4/fw3 双后端）
+
+- **`99-gaming-optimize` 的 IPv6 MSS clamp 按防火墙后端分派**：
+  - **背景**：内核升到 6.18.55 后后端由 fw3(iptables) 变为 fw4(nftables)。
+    fw4 **不加载** `/etc/firewall.user`（`uci show firewall` 中无该 include），
+    故原先写入该文件的 `ip6tables` 行在 fw4 上是**死代码**。
+  - **改动**：`command -v nft && [ -x /sbin/fw4 ]` 为真时写
+    `/etc/nftables.d/10-mss-clamp.nft`（`table inet mssclamp`，含
+    `maxseg size set rt mtu`）；否则沿用原 `/etc/firewall.user` 写法。
+    与 `files/etc/init.d/dnsproxy` 的双后端策略保持一致。
+  - **功能冗余说明**：该功能并未缺失 —— fw4 的 `mtu_fix=1`（本脚本设置）
+    已为 lan/wan 生成 ingress/egress 共 **4 条** `maxseg size set rt mtu` 规则，
+    覆盖 IPv4/IPv6。显式规则作为冗余保留。
+  - **机制已验证（只读证据）**：`/etc/nftables.d/10-dnsproxy-lan-intercept.nft`
+    的链原样出现在 live ruleset，证明 fw4 确实 glob include 该目录；
+    `/etc/nftables.d/` 也在 `/lib/upgrade/keep.d/firewall4` 保留清单内。
+    本片段已通过 `nft -c` 语法校验。
+  - **启动顺序**：`/etc/init.d/boot`（START=10，跑 uci-defaults）早于
+    `/etc/init.d/firewall`（START=19），故首开机即生效。
+
+### 更正（撤销上一版的两处错误判断）
+
+- **撤回「LuCI 下拉框无法表示 DoH 值 → 保存时被重置」的结论**。
+  浏览器实测：该字段渲染为 `L.ui.Combobox`，**自定义值被正确渲染**为
+  `<li data-value="https://dns.google/dns-query,..." selected="">`，
+  `<input type="hidden" name="cbid...tunnel_forward_mosdns">` 的值也完全正确。
+  LuCI 侧不存在该问题；真实原因是上面的 uci-defaults 写入失败。
+- **撤回「`192.168.1.4` 是 `config_generate` 分配的默认 LAN 网段」的结论**。
+  实测日志为 `udhcpc: unicasting a release of 192.168.1.4 to 192.168.1.1` ——
+  它是 **WAN 侧 `eth1` 在 `proto='dhcp'` 阶段从上游 DHCP 租到的地址**
+  （`board.json` 中 `network.wan.protocol='dhcp'`），随后因切到 PPPoE 而释放。
+  结论方向不变（dnsproxy 于开机 29 秒内因上游不可达而报错），但根因描述已更正。
+
 ## [v0.4.2] - 2026-10-09
 
 ### 新增（LAN 固定 IP 固化）

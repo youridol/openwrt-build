@@ -334,6 +334,79 @@ jobs:
           echo "OK   DNS_MODE / DNS_PORT 占位符存在"
           echo "mosdns 模板契约校验通过。"
 
+      - name: Verify SSR-Plus uci-defaults ordering contract
+        working-directory: lede
+        run: |
+          # files/etc/uci-defaults/99-gaming-optimize 会写 shadowsocksr.@global[0].*，
+          # 但 uci-defaults 按**文件名排序**执行：'99-gaming-optimize' 先于
+          # 'luci-ssr-plus'。而首次刷机时 /etc/config/shadowsocksr 由 opkg conffile
+          # 提供、实测为 0 字节 —— 空配置上 `uci set shadowsocksr.@global[0].k=v`
+          # 会以 `Entry not found` 失败（退出码 1），导致写入静默丢弃。
+          # 本步骤断言该脚本含「空配置先铺底」的守卫，防止将来被改回。
+          T=files/etc/uci-defaults/99-gaming-optimize
+          [ -f "$T" ] || { echo "FAIL 缺少 $T"; exit 1; }
+
+          # 1) 必须有「空文件 → 先 reset 铺底」的守卫（判据与 luci-ssr-plus 同源）
+          if ! grep -q '\[ ! -s /etc/config/shadowsocksr \]' "$T"; then
+            echo "FAIL 缺少「空配置先铺底」守卫。"
+            echo "     uci-defaults 中本脚本先于 luci-ssr-plus 执行，首刷时"
+            echo "     /etc/config/shadowsocksr 为 0 字节，直接 uci set @global[0] 会"
+            echo "     以 'Entry not found' 静默失败，三项 SSR-Plus 设置全部丢失。"
+            exit 1
+          fi
+          echo "OK   存在「空配置先铺底」守卫"
+
+          # 2) 铺底必须调用 reset（模板来自 /usr/share/shadowsocksr/shadowsocksr.config）
+          if ! grep -q '/etc/init.d/shadowsocksr reset' "$T"; then
+            echo "FAIL 守卫存在但未调用 /etc/init.d/shadowsocksr reset（模板不会铺底）"
+            exit 1
+          fi
+          echo "OK   铺底调用 /etc/init.d/shadowsocksr reset"
+
+          # 3) 写 shadowsocksr.@global[0] 的每一**节**之前都应有段存在性守卫。
+          #    计数规则：守卫行必须为 1 或 2 处，且存在写入；同一守卫可保护
+          #    其后连续的多条写入（第 4.5 节即 1 个守卫保护 2 条写入），
+          #    故不要求 guard_n >= set_n，而要求「每处守卫之后至少有一条写入」
+          #    且写入均为带失败日志的形式（见步骤 4）。
+          guard_n="$(grep -c 'uci -q get shadowsocksr.@global\[0\]' "$T")"
+          set_n="$(grep -cE '^[[:space:]]*uci set shadowsocksr\.@global\[0\]' "$T")"
+          echo "守卫数=$guard_n  写入数=$set_n"
+          if [ "$guard_n" -lt 1 ]; then
+            echo "FAIL 未找到段存在性守卫（空配置下写入会静默失败）"
+            exit 1
+          fi
+          if [ "$set_n" -lt 1 ]; then
+            echo "FAIL 未找到 @global[0] 写入（本脚本应设置 SSR-Plus 的 MOSDNS/AAAA 开关）"
+            exit 1
+          fi
+          # 每一处守卫之后必须至少有一处写入，否则守卫是多余的或写入被移走
+          last_guard="$(grep -n 'uci -q get shadowsocksr.@global\[0\]' "$T" | tail -1 | cut -d: -f1)"
+          last_set="$(grep -nE '^[[:space:]]*uci set shadowsocksr\.@global\[0\]' "$T" | tail -1 | cut -d: -f1)"
+          if [ "$last_set" -lt "$last_guard" ]; then
+            echo "FAIL 最后一处守卫(行 $last_guard)之后没有写入(最后写入在行 $last_set)"
+            exit 1
+          fi
+          echo "OK   守卫覆盖所有 @global[0] 写入"
+
+          # 4) 禁止裸 uci set（无失败反馈）—— 红线 3：禁止静默失败。
+          #    正则锚定行首非注释、且行尾非续行符 '\'（续行写法下一行才接日志）。
+          #    注释行（以 # 开头）不计入 —— 第 4.5 节的说明文字里引用了该写法。
+          if grep -nE '^[[:space:]]*uci set shadowsocksr\.@global\[0\]\.[^\\]*$' "$T" \
+               | grep -vE ':[[:space:]]*#'; then
+            echo "FAIL 存在未接失败日志的裸 uci set（应写成 'uci set ... || log ERROR ...'）"
+            exit 1
+          fi
+          echo "OK   shadowsocksr.@global[0] 写入均带失败日志"
+
+          # 5) MSS clamp 必须按后端分派（fw4 不加载 /etc/firewall.user）
+          if ! grep -q '/etc/nftables.d/10-mss-clamp.nft' "$T"; then
+            echo "FAIL 缺少 fw4(nftables) 后端的 MSS clamp 路径。"
+            echo "     fw4 不加载 /etc/firewall.user，只写该文件等于死代码。"
+            exit 1
+          fi
+          echo "OK   MSS clamp 含 fw4/nftables 分支"
+          echo "SSR-Plus uci-defaults 顺序契约校验通过。"
+
       - name: Download package sources
         working-directory: lede
         run: make download -j${{ env.JOBS }} V=s
