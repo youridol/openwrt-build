@@ -2,10 +2,17 @@
 # shellcheck shell=dash
 # Test Telegram bot connection by sending a test message.
 # Usage: trafficctl-telegram-test.sh <token> <chat_id> [message]
+#        TCTL_TG_TOKEN=<token> trafficctl-telegram-test.sh - <chat_id> [message]
+#
+# Prefer the environment form: an argument is visible in ps to every local user.
 
-TOKEN="$1"
 CHAT_ID="$2"
 CUSTOM_MSG="$3"
+if [ -n "$TCTL_TG_TOKEN" ]; then
+	TOKEN="$TCTL_TG_TOKEN"
+else
+	TOKEN="$1"
+fi
 
 if [ -z "$TOKEN" ] || [ -z "$CHAT_ID" ]; then
 	echo '{"ok":false,"msg":"token and chat_id required"}'
@@ -71,10 +78,13 @@ fi
 
 MSG_JSON=$(_json_encode "$MSG")
 
-RESULT=$(curl -s -m 10 -X POST \
-	"https://api.telegram.org/bot${TOKEN}/sendMessage" \
+# The URL carries the bot token, so it goes through a curl config file on stdin
+# rather than argv, which is world-readable via ps and /proc.
+RESULT=$(printf 'url = "https://api.telegram.org/bot%s/sendMessage"\n' "$TOKEN" | \
+	curl -s -m 10 -X POST \
 	-H "Content-Type: application/json" \
-	-d "{\"chat_id\":\"${CHAT_ID}\",\"text\":\"${MSG_JSON}\",\"parse_mode\":\"HTML\"}" 2>/dev/null)
+	-d "{\"chat_id\":\"${CHAT_ID}\",\"text\":\"${MSG_JSON}\",\"parse_mode\":\"HTML\"}" \
+	--config - 2>/dev/null)
 
 if echo "$RESULT" | jsonfilter -e '@.ok' 2>/dev/null | grep -q "true"; then
 	echo '{"ok":true,"msg":"test message sent"}'

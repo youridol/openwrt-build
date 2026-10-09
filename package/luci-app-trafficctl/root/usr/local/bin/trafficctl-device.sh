@@ -42,6 +42,15 @@ if [ -z "$MAC" ]; then
     MAC=$(ip neigh show "$IP" 2>/dev/null | grep -oE '[0-9a-fA-F:]{17}' | head -1)
 fi
 MAC=$(echo "$MAC" | tr 'A-F' 'a-f')
+[ "$NAME" = "*" ] && NAME=""
+
+# Same precedence as the summary: manual alias wins, then the lease name above,
+# then cached reverse DNS (the only automatic source for routed devices).
+ALIAS=$(awk -v ip="$IP" '$1 == ip {sub(/^[^ ]+ +/, ""); print; exit}' /etc/trafficctl/names 2>/dev/null)
+[ -n "$ALIAS" ] && NAME="$ALIAS"
+if [ -z "$NAME" ] && [ "$(uci -q get trafficctl.main.resolve_names 2>/dev/null)" != "0" ]; then
+    NAME=$(awk -v ip="$IP" '$1 == ip && $2 != "-" {print $2; exit}' /tmp/trafficctl_rdns_cache 2>/dev/null)
+fi
 [ -z "$NAME" ] && NAME="*"
 
 # Detect connection type — specific interface or band
@@ -50,7 +59,10 @@ CONN_LAST=""
 CONN_CACHE="/tmp/trafficctl_conn_cache"
 [ -f "$CONN_CACHE" ] || : > "$CONN_CACHE"
 
-if [ -n "$MAC" ]; then
+if ! tctl_ip_in_lan "$IP"; then
+    # Not on any connected LAN subnet — reached via a downstream router.
+    CONN_TYPE="routed"
+elif [ -n "$MAC" ]; then
     _wifi_stations=$(
         for _wi in $(iw dev 2>/dev/null | awk '/Interface/{print $2}'); do
             _ch=$(iw dev "$_wi" info 2>/dev/null | awk '/channel/{print $2}')
@@ -115,9 +127,13 @@ BLOCK_BYTES=0
 if tctl_is_blocked "$IP"; then
     BLOCKED=true
     if [ "$TCTL_FW" = "nft" ]; then
-        block_line=$(nft list chain inet fw4 forward 2>/dev/null | grep "ip saddr $IP.*drop")
-        BLOCK_PACKETS=$(echo "$block_line" | grep -oE 'packets [0-9]+' | awk '{print $2}')
-        BLOCK_BYTES=$(echo "$block_line" | grep -oE 'bytes [0-9]+' | awk '{print $2}')
+        # A block is two rules — the v4 one keyed on the address and the v6 one
+        # keyed on the MAC (see tctl_block_add) — so the counters are summed
+        # across both. The v6 rule carries no address, only its "_mac" comment.
+        block_line=$(nft list chain inet fw4 forward 2>/dev/null \
+            | grep -e "ip saddr $IP.*drop" -e "comment \"$(tctl_block_comment "$IP")_mac\"")
+        BLOCK_PACKETS=$(echo "$block_line" | grep -oE 'packets [0-9]+' | awk '{ t += $2 } END { printf "%.0f", t }')
+        BLOCK_BYTES=$(echo "$block_line" | grep -oE 'bytes [0-9]+' | awk '{ t += $2 } END { printf "%.0f", t }')
     else
         block_line=$(iptables -L FORWARD -nvx 2>/dev/null | grep "DROP" | grep "$IP")
         BLOCK_PACKETS=$(echo "$block_line" | awk '{print $1}')
@@ -133,9 +149,14 @@ if [ -n "$MAC" ]; then
     IFACES=$(tctl_get_wifi_interfaces)
     for iface in $IFACES; do
         maclist=$(uci -q get "wireless.${iface}.maclist")
-        if echo "$maclist" | grep -qi "$MAC"; then
-            WIFI_BLOCKED=true
-            break
+        listed=0
+        echo "$maclist" | grep -qi "$MAC" && listed=1
+        # Being listed means the opposite thing per policy: on a deny radio a
+        # listed MAC is blocked, on an allow (whitelist) radio an UNlisted one is.
+        if [ "$(tctl_get_wifi_filter_mode "$iface")" = "allow" ]; then
+            [ "$listed" = "0" ] && { WIFI_BLOCKED=true; break; }
+        else
+            [ "$listed" = "1" ] && { WIFI_BLOCKED=true; break; }
         fi
     done
 fi
@@ -211,7 +232,7 @@ BEGIN { total=0; n_tcp=0; n_udp=0; n_other=0; est=0; tw=0; ss=0; cw=0 }
     else if (state == "SYN_SENT") ss++
     else if (state == "CLOSE_WAIT") cw++
 }
-END { printf "%d %d %d %d %d %d %d %d", total, n_tcp, n_udp, n_other, est, tw, ss, cw }
+END { printf "%.0f %d %d %d %d %d %d %d", total, n_tcp, n_udp, n_other, est, tw, ss, cw }
 ')
 
 TOTAL=$(echo "$META_LINE" | awk '{print $1}')
@@ -233,8 +254,37 @@ CW=$(echo "$META_LINE" | awk '{print $8}')
 [ -z "$CW" ] && CW=0
 
 # Build connections JSON array
-CONNS_OUT=$(echo "$CONNTRACK_DATA" | awk -v ip="$IP" -v pf="$PROTO_FILTER" '
-BEGIN { n=0 }
+# Resolve egress interface per destination for policy-routed connections
+# (mwan3 etc.). Only connections carrying a NON-zero conntrack mark are
+# resolved: `ip route get <dst> mark <mark>` honours the fwmark ip-rules, so it
+# reports the WAN that mwan3 actually selected. mark=0 connections (no policy
+# routing, e.g. plain single-WAN or podkop) are left blank instead of showing a
+# misleading main-table egress.
+OIF_MAP="/tmp/trafficctl_oif_$$"
+: > "$OIF_MAP"
+if command -v ip >/dev/null 2>&1; then
+    echo "$CONNTRACK_DATA" | awk -v ip="$IP" '
+    { dst=""; mark="0"; sk="src=" ip; seen=0; got=0
+      for (i=1; i<=NF; i++) {
+          if ($i==sk && !seen) { seen=1; continue }
+          if (seen && !got && index($i,"dst=")==1) { dst=substr($i,5); got=1 }
+          if (index($i,"mark=")==1) mark=substr($i,6)
+      }
+      if (dst!="" && dst!=ip && mark!="0" && mark!="") print dst, mark
+    }' | sort -u | while read -r dip dmark; do
+        [ -n "$dip" ] || continue
+        dev=$(ip route get "$dip" mark "$dmark" 2>/dev/null | grep -oE 'dev [^ ]+' | head -1 | cut -d' ' -f2)
+        case "$dev" in lo|"") continue ;; esac
+        echo "$dip $dev" >> "$OIF_MAP"
+    done
+fi
+
+CONNS_OUT=$(echo "$CONNTRACK_DATA" | awk -v ip="$IP" -v pf="$PROTO_FILTER" -v oifmap="$OIF_MAP" '
+BEGIN {
+    n=0
+    while ((getline line < oifmap) > 0) { split(line, p, " "); oifdev[p[1]] = p[2] }
+    close(oifmap)
+}
 {
     proto=""
     for (i=1; i<=NF; i++) {
@@ -275,11 +325,14 @@ BEGIN { n=0 }
     else if (dport == "993") svc="imaps"
     else if (dport == "8080") svc="http-alt"
 
+    oif = ""
+    if (dst in oifdev) oif = oifdev[dst]
     if (n > 0) printf ","
-    printf "{\"proto\":\"%s\",\"dst\":\"%s\",\"host\":\"\",\"port\":%s,\"service\":\"%s\",\"bytes\":%d,\"state\":\"%s\"}", proto, dst, dport, svc, bytes, state
+    printf "{\"proto\":\"%s\",\"dst\":\"%s\",\"host\":\"\",\"port\":%s,\"service\":\"%s\",\"bytes\":%.0f,\"state\":\"%s\",\"oif\":\"%s\"}", proto, dst, dport, svc, bytes, state, oif
     n++
 }
 ')
+rm -f "$OIF_MAP"
 
 # Optionally resolve DNS for connection destinations
 if [ "$DO_RDNS" = "1" ]; then
@@ -325,8 +378,13 @@ if [ "$DO_RDNS" = "1" ]; then
     fi
 fi
 
+# Listed as blocked yet associated right now = the radio never got the block.
+WIFI_PENDING=false
+tctl_wifi_block_pending "$([ "$WIFI_BLOCKED" = "true" ] && echo 1 || echo 0)" "$CONN_TYPE" \
+    && WIFI_PENDING=true
+
 # Output final JSON
-printf '{"ip":"%s","name":"%s","mac":"%s","conn_type":"%s","conn_last":"%s","timestamp":%d,"blocked":%s,"block_packets":%d,"block_bytes":%d,"wifi_blocked":%s,"total":%d,"protocols":{"tcp":%d,"udp":%d,"other":%d},"tcp_states":{"established":%d,"time_wait":%d,"syn_sent":%d,"close_wait":%d},"connections":[%s],"rate_limit_kbit":%d,"shape_kbit":%d}\n' \
+printf '{"ip":"%s","name":"%s","mac":"%s","conn_type":"%s","conn_last":"%s","timestamp":%d,"blocked":%s,"block_packets":%d,"block_bytes":%.0f,"wifi_blocked":%s,"wifi_block_pending":%s,"total":%.0f,"protocols":{"tcp":%d,"udp":%d,"other":%d},"tcp_states":{"established":%d,"time_wait":%d,"syn_sent":%d,"close_wait":%d},"connections":[%s],"rate_limit_kbit":%d,"shape_kbit":%d}\n' \
     "$IP" "$NAME" "$MAC" "$CONN_TYPE" "$CONN_LAST" "$TIMESTAMP" "$BLOCKED" "$BLOCK_PACKETS" "$BLOCK_BYTES" \
-    "$WIFI_BLOCKED" "$TOTAL" "$N_TCP" "$N_UDP" "$N_OTHER" \
+    "$WIFI_BLOCKED" "$WIFI_PENDING" "$TOTAL" "$N_TCP" "$N_UDP" "$N_OTHER" \
     "$EST" "$TW" "$SS" "$CW" "$CONNS_OUT" "$RATE_LIM" "$SHAPE_KBIT"

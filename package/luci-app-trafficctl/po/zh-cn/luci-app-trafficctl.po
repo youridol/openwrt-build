@@ -797,3 +797,544 @@ msgstr "WiFi阻断"
 
 msgid "WiFi Unblock"
 msgstr "解除WiFi阻断"
+
+msgid "Active devices"
+msgstr "活跃设备"
+
+msgid "Devices"
+msgstr "设备"
+
+msgid "Display & Table"
+msgstr "显示与表格"
+
+
+msgid " flag (Linux 5.7+, set automatically by fw4/nftables) periodically syncs "
+msgstr "（Linux 5.7+，由 fw4/nftables 自动设置）会周期性同步"
+
+msgid " flag should sync hardware byte counts back to conntrack, but on many "
+msgstr "标志本应将硬件字节数同步回 conntrack，但在许多"
+
+msgid "\"all\" for every device, or a CIDR such as 10.0.20.0/24"
+msgstr "「all」表示每台设备，或填 CIDR 如 10.0.20.0/24"
+
+msgid "%s down / %s up"
+msgstr "%s 下行 / %s 上行"
+
+msgid "%s down and %s up"
+msgstr "%s 下行、%s 上行"
+
+msgid "1 hour"
+msgstr "1 小时"
+
+msgid "15 min"
+msgstr "15 分钟"
+
+msgid "4 hours"
+msgstr "4 小时"
+
+msgid "Accumulated on the router"
+msgstr "在路由器上累计"
+
+msgid "Accumulated since"
+msgstr "累计起始"
+
+msgid "Action"
+msgstr "操作"
+
+msgid "Active inbound connections"
+msgstr "活跃入站连接"
+
+msgid "Active subnet limits"
+msgstr "生效的子网限速"
+
+msgid "All of"
+msgstr "全部"
+
+msgid "App"
+msgstr "应用"
+
+msgid "Applied once, the first time a device appears on the network. A device that already has a limit is left alone."
+msgstr "仅在设备首次出现在网络中时应用一次。已有速率限制的设备不会被改动。"
+
+msgid "Behind a downstream router (routed subnet)"
+msgstr "位于下游路由器之后（路由子网）"
+
+msgid "Blocked from WiFi (MAC deny list)"
+msgstr "已被 WiFi 阻断（MAC 拒绝列表）"
+
+msgid "Bridge port — these bytes are also counted in its bridge"
+msgstr "网桥端口 —— 这些字节已计入其所属网桥"
+
+msgid "Bridge ports, switch conduits and ifb mirrors. Their bytes are already counted in the bridge or uplink above."
+msgstr "网桥端口、交换机通道与 ifb 镜像。其字节已计入上方的网桥或上行链路。"
+
+msgid "Byte totals unavailable on this router."
+msgstr "本路由器无法提供字节总量。"
+
+msgid "Bytes received from remote clients"
+msgstr "从远端客户端接收的字节"
+
+msgid "Bytes sent back to remote clients"
+msgstr "发回远端客户端的字节"
+
+msgid "Cancel"
+msgstr "取消"
+
+msgid "Carries the default route"
+msgstr "承载默认路由"
+
+msgid "Click again to confirm"
+msgstr "再次点击以确认"
+
+msgid "Clients"
+msgstr "客户端"
+
+msgid "Collecting interface counters…"
+msgstr "正在采集接口计数器…"
+
+msgid "Connection interface (WiFi band, LAN port or routed)"
+msgstr "连接接口（WiFi 频段、LAN 口或路由）"
+
+msgid "Currently tracked connections hold"
+msgstr "当前跟踪的连接占用"
+
+msgid "Cut all internet access"
+msgstr "切断全部互联网访问"
+
+msgid "Cut internet"
+msgstr "切断互联网"
+
+msgid "Cutting…"
+msgstr "正在切断…"
+
+msgid "Destination"
+msgstr "目标"
+
+msgid "Device name"
+msgstr "设备名称"
+
+msgid "Devices already known:"
+msgstr "已知设备："
+
+msgid "Devices keep talking to each other and to the router — only the way out is closed. "
+msgstr "设备之间以及与路由器之间的通信不受影响 —— 只关闭出口。"
+
+msgid "Devices on the WiFi deny list that are still connected — those blocks are not in effect on the running radio."
+msgstr "仍在连接中的 WiFi 拒绝列表设备 —— 这些阻断在当前运行的射频上未生效。"
+
+msgid "Distinct remote clients"
+msgstr "不同远端客户端数"
+
+msgid "Download"
+msgstr "下行"
+
+msgid "Every device in"
+msgstr "以下范围内的每台设备："
+
+msgid "Every device this router forwards for"
+msgstr "本路由器为其转发的每台设备"
+
+msgid "Ext. port"
+msgstr "外部端口"
+
+msgid "External (WAN) port"
+msgstr "外部（WAN）端口"
+
+msgid "Flow offload is active and the kernel does not support the nftables counter maps trafficctl uses in that mode, so byte counters stop updating for offloaded connections. Speeds and totals would be far too low, so they are not shown. Disabling hardware offload in Settings → Flow Offload restores them."
+msgstr "流量卸载已启用，而本内核不支持 trafficctl 在该模式下使用的 nftables 计数映射，因此已卸载连接的字节计数器停止更新。速率与总量会严重偏低，故不予显示。在「设置 → 流量卸载」中关闭硬件卸载即可恢复。"
+
+msgid "Forwarded traffic only — this kernel cannot install the prerouting rule, "
+msgstr "仅统计转发流量 —— 本内核无法安装 prerouting 规则，"
+
+msgid "Give upload its own ceiling instead of matching download"
+msgstr "为上行单独设定上限，而不是与下行相同"
+
+msgid "Global internet cut needs nftables (fw4). This router is running iptables."
+msgstr "全局断网需要 nftables（fw4）。本路由器正在使用 iptables。"
+
+msgid "How often live data is polled: speeds, graphs, drop/backlog counters, and the connection table in device view"
+msgstr "实时数据轮询间隔：速率、图表、丢弃/积压计数，以及设备视图中的连接表"
+
+msgid "If your current firmware uses fw3 (iptables) or ships a kernel older than 5.7, "
+msgstr "若当前固件使用 fw3（iptables）或内核低于 5.7，"
+
+msgid "Iface"
+msgstr "接口"
+
+msgid "In"
+msgstr "入站"
+
+msgid "In this mode the kernel\\'s conntrack, firewall, and tc are bypassed for offloaded flows:"
+msgstr "此模式下，已卸载的流会绕过内核的 conntrack、防火墙与 tc："
+
+msgid "Inbound rate limit (drops packets above the rate)"
+msgstr "入站速率限制（超出速率的包会被丢弃）"
+
+msgid "Inbound traffic control for DNAT port forwards and router-local open ports configured in the firewall. Pause drops all inbound traffic on the port instantly (without touching the firewall config); Limit polices the inbound rate."
+msgstr "对防火墙中配置的 DNAT 端口转发与路由器本机开放端口做入站流量控制。暂停会立即丢弃该端口上的全部入站流量（不修改防火墙配置）；限速则对入站速率做管控。"
+
+msgid "Interfaces"
+msgstr "接口"
+
+msgid "Internet is cut for all devices"
+msgstr "已切断全部设备的互联网访问"
+
+msgid "Keep after reboot"
+msgstr "重启后保留"
+
+msgid "Kept after reboot — undoing it needs LAN or physical access."
+msgstr "重启后仍保留 —— 撤销需要 LAN 或物理接触。"
+
+msgid "LAN keeps working"
+msgstr "LAN 不受影响"
+
+msgid "Limit inbound to"
+msgstr "入站限速至"
+
+msgid "Limit new devices"
+msgstr "限制新设备"
+
+msgid "Limited subnets"
+msgstr "已限速的子网"
+
+msgid "Mbit/s"
+msgstr "Mbit/s"
+
+msgid "Name"
+msgstr "名称"
+
+msgid "New Device Defaults"
+msgstr "新设备默认值"
+
+msgid "No active devices"
+msgstr "无活跃设备"
+
+msgid "No baseline recorded yet. It is taken from the current leases when you switch this on."
+msgstr "尚未记录基线。开启时会以当前租约作为基线。"
+
+msgid "No port forwards or WAN-open ports are configured in the firewall."
+msgstr "防火墙中未配置任何端口转发或 WAN 开放端口。"
+
+msgid "Not counted: flow offload is active and this router cannot provide the nftables counters trafficctl uses in that mode, so the kernel byte counters stop updating for offloaded connections. Any total here would be far too low. See Settings → Flow Offload."
+msgstr "未计数：流量卸载已启用，而本路由器无法提供 trafficctl 在该模式下使用的 nftables 计数器，因此已卸载连接的内核字节计数器停止更新。此处任何总量都会严重偏低。见「设置 → 流量卸载」。"
+
+msgid "Not measurable while flow offload is active: in that mode the router counts bytes per address only, so traffic cannot be split by protocol. See Settings → Flow Offload."
+msgstr "流量卸载启用时无法测量：该模式下路由器只按地址统计字节，无法按协议拆分。见「设置 → 流量卸载」。"
+
+msgid "Offloads routing to the hardware engine (PPE/NPU). Requires software offload. "
+msgstr "将路由卸载到硬件引擎（PPE/NPU）。需先启用软件卸载。"
+
+msgid "On"
+msgstr "开"
+
+msgid "On the WiFi deny list but still connected — the block is NOT in effect on the running radio. Install hostapd-utils so blocks apply immediately, or restart WiFi (disconnects every client)."
+msgstr "位于 WiFi 拒绝列表但仍处于连接状态 —— 该阻断在当前运行的射频上未生效。安装 hostapd-utils 可让阻断立即生效，或重启 WiFi（会断开所有客户端）。"
+
+msgid "One bucket for the whole subnet"
+msgstr "整个子网共用一个限速桶"
+
+msgid "One bucket per device inside the subnet"
+msgstr "子网内每台设备各用一个限速桶"
+
+msgid "Operation failed"
+msgstr "操作失败"
+
+msgid "Other interfaces"
+msgstr "其它接口"
+
+msgid "Out"
+msgstr "出站"
+
+msgid "Overrides the DHCP lease or DNS name. Leave empty to clear the custom name."
+msgstr "覆盖 DHCP 租约名或 DNS 名称。留空即清除自定义名称。"
+
+msgid "Overview"
+msgstr "总览"
+
+msgid "Pause"
+msgstr "暂停"
+
+msgid "Pick a rate to apply it to this target, or Off to remove its limit."
+msgstr "选择一个速率应用到该目标，或选「关」移除其限制。"
+
+msgid "Polling is off — set the Poll interval to see throughput."
+msgstr "轮询已关闭 —— 请设置「轮询」间隔以查看吞吐量。"
+
+msgid "Port Forwards & Open Ports"
+msgstr "端口转发与开放端口"
+
+msgid "Rate"
+msgstr "速率"
+
+msgid "Received by this interface"
+msgstr "本接口接收"
+
+msgid "Remote access that reaches the router through a LAN host (Tailscale, a tunnel, a jump host) stops working while this is on."
+msgstr "开启期间，经由 LAN 主机访问路由器的方式（Tailscale、隧道、跳板机）将失效。"
+
+msgid "Remove"
+msgstr "移除"
+
+msgid "Remove limit"
+msgstr "移除限制"
+
+msgid "Removing limit on"
+msgstr "正在移除以下目标的限制："
+
+msgid "Rename device"
+msgstr "重命名设备"
+
+msgid "Rename failed"
+msgstr "重命名失败"
+
+msgid "Resets when the router reboots."
+msgstr "路由器重启后重置。"
+
+msgid "Restore internet"
+msgstr "恢复互联网"
+
+msgid "Restores by itself in"
+msgstr "将自动恢复，剩余"
+
+msgid "Restoring…"
+msgstr "正在恢复…"
+
+msgid "Resume"
+msgstr "继续"
+
+msgid "Routed via"
+msgstr "路由经由"
+
+msgid "Save"
+msgstr "保存"
+
+msgid "Save as router default"
+msgstr "保存为路由器默认值"
+
+msgid "Sent by this interface"
+msgstr "本接口发送"
+
+msgid "Set a rate above 0 — with no rate this does nothing."
+msgstr "请设置大于 0 的速率 —— 速率为 0 时此设置不起作用。"
+
+msgid "Share:"
+msgstr "共享："
+
+msgid "Speed is measured via nftables counters installed at a higher priority "
+msgstr "速率通过安装在更高优先级处的 nftables 计数器测量，"
+
+msgid "Split up/down"
+msgstr "上下行分别设置"
+
+msgid "Stays off until you switch it back."
+msgstr "保持关闭，直到你重新开启。"
+
+msgid "Store the current Poll and Window as this router\\'s defaults, for browsers that have not set their own"
+msgstr "把当前「轮询」与「窗口」保存为本路由器的默认值，供尚未自行设置的浏览器使用"
+
+msgid "Switch it off"
+msgstr "将其关闭"
+
+msgid "TCP bytes transferred, accumulated on the router. Not measurable while flow offload is active"
+msgstr "已传输的 TCP 字节，在路由器上累计。流量卸载启用时无法测量"
+
+msgid "Target:"
+msgstr "目标："
+
+msgid "The auto-revert helper is not running; this page re-checks the deadline while it is open."
+msgstr "自动恢复辅助进程未运行；本页面在打开期间会重新检查截止时间。"
+
+msgid "The internet cut is switched on, but its firewall rule is missing."
+msgstr "断网已开启，但其防火墙规则缺失。"
+
+msgid "The kernel fast-paths established connections through a flowtable, "
+msgstr "内核通过 flowtable 为已建立的连接启用快速路径，"
+
+msgid "The router offloads established connections from the CPU to the hardware (NIC/SoC), "
+msgstr "路由器把已建立的连接从 CPU 卸载到硬件（网卡/SoC），"
+
+msgid "Top application by traffic"
+msgstr "流量最大的应用"
+
+msgid "Top application by traffic (needs the netifyd DPI agent)"
+msgstr "流量最大的应用（需要 netifyd DPI 代理）"
+
+msgid "Top talkers"
+msgstr "流量排行"
+
+msgid "Total bytes transferred (download + upload), accumulated on the router. Resets on reboot; hover a cell for the start time"
+msgstr "已传输的总字节（下行 + 上行），在路由器上累计。重启后重置；将鼠标悬停在单元格上可查看起始时间"
+
+msgid "Total since boot (RX / TX)"
+msgstr "自启动以来的总量（收 / 发）"
+
+msgid "Traffic is flowing right now. It is normally re-asserted within seconds — if this persists, switch it off and on again."
+msgstr "当前有流量通过。通常在数秒内会重新生效 —— 若持续如此，请先关闭再重新开启。"
+
+msgid "UDP bytes transferred, accumulated on the router. Not measurable while flow offload is active"
+msgstr "已传输的 UDP 字节，在路由器上累计。流量卸载启用时无法测量"
+
+msgid "Until I switch it back"
+msgstr "直到我重新开启"
+
+msgid "Upload"
+msgstr "上行"
+
+msgid "Waiting for a second sample…"
+msgstr "正在等待第二次采样…"
+
+msgid "Waiting for the first byte sample."
+msgstr "正在等待首次字节采样。"
+
+msgid "Whole network"
+msgstr "整个网络"
+
+msgid "WiFi block NOT in effect"
+msgstr "WiFi 阻断未生效"
+
+msgid "You will need LAN or physical access to undo this — a reboot will not clear it."
+msgstr "撤销此设置需要 LAN 或物理接触 —— 重启无法清除。"
+
+msgid "between them — one bucket for the whole subnet."
+msgstr "之间共享 —— 整个子网共用一个限速桶。"
+
+msgid "between them — one bucket per direction for the whole subnet."
+msgstr "之间共享 —— 整个子网每个方向各用一个限速桶。"
+
+msgid "disabled"
+msgstr "已禁用"
+
+msgid "down"
+msgstr "下行"
+
+msgid "each"
+msgstr "每台"
+
+msgid "every device"
+msgstr "每台设备"
+
+msgid "failed"
+msgstr "失败"
+
+msgid "h"
+msgstr "小时"
+
+msgid "is not one of the subnets this router monitors, so a limit on it would be accepted but never enforced. A firewall zone other than \"lan\" with masq=1 (the usual guest-VLAN setup) is excluded. Check with: uci show firewall | grep -E \"name=|masq=\""
+msgstr "不属于本路由器监控的任何子网，因此对其设置的限制会被接受但永不生效。name 非 \"lan\" 且 masq=1 的防火墙区域（常见的访客 VLAN 配置）会被排除。可用以下命令检查：uci show firewall | grep -E \"name=|masq=\""
+
+msgid "kbit/s"
+msgstr "kbit/s"
+
+msgid "may use"
+msgstr "最多可使用"
+
+msgid "min"
+msgstr "分钟"
+
+msgid "not applied"
+msgstr "未应用"
+
+msgid "nothing dropped yet"
+msgstr "尚未丢弃任何数据"
+
+msgid "of its own."
+msgstr "自身。"
+
+msgid "on the deny list but still connected; install hostapd-utils or restart WiFi"
+msgstr "位于拒绝列表但仍处于连接状态；请安装 hostapd-utils 或重启 WiFi"
+
+msgid "open port"
+msgstr "开放端口"
+
+msgid "packets dropped"
+msgstr "已丢弃的包"
+
+msgid "paused"
+msgstr "已暂停"
+
+msgid "per device"
+msgstr "每台设备"
+
+msgid "port"
+msgstr "端口"
+
+msgid "port forward"
+msgstr "端口转发"
+
+msgid "routed"
+msgstr "路由"
+
+msgid "router"
+msgstr "路由器"
+
+msgid "s"
+msgstr "秒"
+
+msgid "sending or receiving now"
+msgstr "当前正在收发"
+
+msgid "share"
+msgstr "共享"
+
+msgid "shared"
+msgstr "共享"
+
+msgid "shared between them"
+msgstr "在它们之间共享"
+
+msgid "these are never limited by this setting."
+msgstr "这些永远不会受此设置限制。"
+
+msgid "total"
+msgstr "合计"
+
+msgid "under a minute"
+msgstr "不足一分钟"
+
+msgid "↑ Upload"
+msgstr "↑ 上行"
+
+msgid "↓ / ↑ are relative to the interface: on the WAN ↓ is your download, on a LAN bridge ↓ is what the LAN sent upstream."
+msgstr "↓ / ↑ 是相对接口而言：在 WAN 上 ↓ 是你的下载量；在 LAN 网桥上 ↓ 是 LAN 发往上行的量。"
+
+
+msgid " flag (Linux 5.7+, set automatically by fw4/nftables) periodically syncs hardware byte counts back to conntrack — trafficctl detects this and all features work normally."
+msgstr " 标志（Linux 5.7+，由 fw4/nftables 自动设置）会周期性把硬件字节数同步回 conntrack —— trafficctl 能检测到这一点，所有功能均正常工作。"
+
+msgid " flag should sync hardware byte counts back to conntrack, but on many platforms (e.g. Mediatek Filogic) the driver does not implement the stats callback, so conntrack counters remain frozen for active flows."
+msgstr " 标志本应将硬件字节数同步回 conntrack，但在许多平台上（如 Mediatek Filogic）驱动未实现统计回调，因此活跃流的 conntrack 计数器保持不变。"
+
+msgid "Devices keep talking to each other and to the router — only the way out is closed. Traffic is stopped on the way in, so a transparent proxy on the router (podkop, passwall) cannot carry it out either. Remote access that reaches the router through a LAN host (Tailscale, a tunnel, a jump host) stops working while this is on."
+msgstr "设备之间以及与路由器之间的通信不受影响 —— 只关闭出口。流量在入口处即被拦截，因此路由器上的透明代理（podkop、passwall）也无法将其送出。开启期间，经由 LAN 主机访问路由器的方式（Tailscale、隧道、跳板机）将失效。"
+
+msgid "Forwarded traffic only — this kernel cannot install the prerouting rule, so traffic handled by a transparent proxy on the router would not be caught."
+msgstr "仅统计转发流量 —— 本内核无法安装 prerouting 规则，因此由路由器上的透明代理处理的流量无法被捕获。"
+
+msgid "If your current firmware uses fw3 (iptables) or ships a kernel older than 5.7, a router with modern OpenWrt and fw4 support will have this working out of the box."
+msgstr "若当前固件使用 fw3（iptables）或内核低于 5.7，则换用支持 fw4 的新版 OpenWrt 路由器即可开箱可用。"
+
+msgid "In this mode the kernel's conntrack, firewall, and tc are bypassed for offloaded flows:"
+msgstr "此模式下，已卸载的流会绕过内核的 conntrack、防火墙与 tc："
+
+msgid "Offloads routing to the hardware engine (PPE/NPU). Requires software offload. ⚠ On many platforms (e.g. Mediatek Filogic) the driver does not report byte counters back to the kernel — real-time speed monitoring will show zero."
+msgstr "将路由卸载到硬件引擎（PPE/NPU）。需先启用软件卸载。⚠ 在许多平台上（如 Mediatek Filogic）驱动不会把字节计数器回报给内核 —— 实时速率监控将显示为 0。"
+
+msgid "Speed is measured via nftables counters installed at a higher priority (before the flowtable), so graphs are accurate."
+msgstr "速率通过安装在更高优先级处（flowtable 之前）的 nftables 计数器测量，因此图表是准确的。"
+
+msgid "Store the current Poll and Window as this router's defaults, for browsers that have not set their own"
+msgstr "把当前「轮询」与「窗口」保存为本路由器的默认值，供尚未自行设置的浏览器使用"
+
+msgid "The kernel fast-paths established connections through a flowtable, bypassing conntrack byte updates for higher throughput."
+msgstr "内核通过 flowtable 为已建立的连接启用快速路径，绕过 conntrack 的字节更新以获得更高吞吐。"
+
+msgid "The router offloads established connections from the CPU to the hardware (NIC/SoC), achieving 2–3× higher throughput and lower CPU usage."
+msgstr "路由器把已建立的连接从 CPU 卸载到硬件（网卡/SoC），可获得 2–3 倍的吞吐提升并降低 CPU 占用。"
+
+
+msgid " flag (Linux 5.7+, set automatically by fw4/nftables) periodically syncs hardware byte counts back to conntrack — trafficctl detects this and all features work normally."
+msgstr " 标志（Linux 5.7+，由 fw4/nftables 自动设置）会周期性把硬件字节数同步回 conntrack —— trafficctl 能检测到这一点，所有功能均正常工作。"
+
+
+msgid "If your current firmware uses fw3 (iptables) or ships a kernel older than 5.7, a router with modern OpenWrt and fw4 support will have this working out of the box."
+msgstr "若当前固件使用 fw3（iptables）或内核低于 5.7，则换用支持 fw4 的新版 OpenWrt 路由器即可开箱可用。"

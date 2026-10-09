@@ -18,42 +18,33 @@ if ! tc qdisc show dev "$LAN_DEV" 2>/dev/null | grep -q "htb 1:"; then
     echo '[]'; exit 0
 fi
 
-# Get LAN subnet prefix (first 2 octets)
-SUBNET=$(ip -4 addr show dev "$LAN_DEV" 2>/dev/null | grep -oE 'inet [0-9.]+' | head -1 | awk '{print $2}')
-if [ -n "$SUBNET" ]; then
-    PREFIX=$(echo "$SUBNET" | cut -d. -f1-2)
-else
-    PREFIX="192.168"
-fi
+# Map classid → real IP from persisted shapes. Minors are allocated, not derived
+# from the address, so this map is the only way back to an IP; classes missing
+# from it belong to another tc user and are skipped rather than mislabelled.
+CLASSMAP=$(grep -oE '\{"ip":"[^"]+","rate_kbit":[0-9]+,"classid":"1:[0-9a-f]+"\}' \
+    /etc/trafficctl/shapes.json 2>/dev/null | \
+    sed -n 's/{"ip":"\([^"]*\)","rate_kbit":[0-9]*,"classid":"\(1:[0-9a-f]*\)"}/\2 \1/p')
 
 # Collect class stats into a temp file so we can merge with qdisc stats
 CLASS_DATA=$(tc -s class show dev "$LAN_DEV" 2>/dev/null)
 QDISC_DATA=$(tc -s qdisc show dev "$LAN_DEV" 2>/dev/null)
 
 # Parse class stats: emit lines "classid ip rate bytes pkts backlog drops overlimits requeues lended borrowed"
-CLASS_PARSED=$(echo "$CLASS_DATA" | awk -v prefix="$PREFIX" '
-function hex2dec(hex,    i, c, dec, len) {
-    dec = 0
-    len = length(hex)
-    for (i = 1; i <= len; i++) {
-        c = substr(hex, i, 1)
-        if (c ~ /[0-9]/) dec = dec * 16 + (c + 0)
-        else if (c == "a" || c == "A") dec = dec * 16 + 10
-        else if (c == "b" || c == "B") dec = dec * 16 + 11
-        else if (c == "c" || c == "C") dec = dec * 16 + 12
-        else if (c == "d" || c == "D") dec = dec * 16 + 13
-        else if (c == "e" || c == "E") dec = dec * 16 + 14
-        else if (c == "f" || c == "F") dec = dec * 16 + 15
+CLASS_PARSED=$(echo "$CLASS_DATA" | awk -v classmap="$CLASSMAP" '
+BEGIN {
+    n = split(classmap, cml, "\n")
+    for (ci = 1; ci <= n; ci++) {
+        split(cml[ci], cmf, " ")
+        if (cmf[1] != "" && cmf[2] != "") ipmap[cmf[1]] = cmf[2]
     }
-    return dec
 }
 
 /class fq_codel/ { skip = 1; next }
 /^class htb 1:/ {
     # emit previous record if valid
-    if (have_record && current_rate > 0 && current_rate < 1000000) {
-        printf "%s %s.%d.%d %d %d %d %d %d %d %d %d %d\n", \
-            classid, prefix, current_o3, current_o4, current_rate, \
+    if (have_record && current_rate > 0 && current_rate < 1000000 && (classid in ipmap)) {
+        printf "%s %s %d %d %d %d %d %d %d %d %d\n", \
+            classid, ipmap[classid], current_rate, \
             bytes, pkts, backlog, drops, overlimits, requeues, lended, borrowed
     }
     minor = $3
@@ -61,9 +52,6 @@ function hex2dec(hex,    i, c, dec, len) {
     if (minor == "1" || minor == "fffe") { skip = 1; next }
     skip = 0
     classid = "1:" minor
-    dec_val = hex2dec(minor)
-    current_o3 = int(dec_val / 256)
-    current_o4 = dec_val % 256
     current_rate = 0
     for (i = 1; i <= NF; i++) {
         if ($i == "rate") {
@@ -111,9 +99,9 @@ function hex2dec(hex,    i, c, dec, len) {
     }
 }
 END {
-    if (have_record && current_rate > 0 && current_rate < 1000000) {
-        printf "%s %s.%d.%d %d %d %d %d %d %d %d %d %d\n", \
-            classid, prefix, current_o3, current_o4, current_rate, \
+    if (have_record && current_rate > 0 && current_rate < 1000000 && (classid in ipmap)) {
+        printf "%s %s %d %d %d %d %d %d %d %d %d\n", \
+            classid, ipmap[classid], current_rate, \
             bytes, pkts, backlog, drops, overlimits, requeues, lended, borrowed
     }
 }
@@ -220,7 +208,7 @@ NR == FNR {
     if (classid in qd_mem) mem = qd_mem[classid]
 
     if (first) printf ","
-    printf "{\"ip\":\"%s\",\"rate_kbit\":%d,\"bytes\":%d,\"packets\":%d,\"backlog\":%d,\"drops\":%d,\"overlimits\":%d,\"requeues\":%d,\"lended\":%d,\"borrowed\":%d,\"ecn_mark\":%d,\"new_flows\":%d,\"old_flows\":%d,\"target_us\":%d,\"memory_used\":%d}", \
+    printf "{\"ip\":\"%s\",\"rate_kbit\":%d,\"bytes\":%.0f,\"packets\":%.0f,\"backlog\":%d,\"drops\":%.0f,\"overlimits\":%.0f,\"requeues\":%.0f,\"lended\":%.0f,\"borrowed\":%.0f,\"ecn_mark\":%.0f,\"new_flows\":%d,\"old_flows\":%d,\"target_us\":%d,\"memory_used\":%d}", \
         ip, rate, bytes, pkts, backlog, drops, overlimits, requeues, lended, borrowed, ecn, nf, of, tgt, mem
     first = 1
 }

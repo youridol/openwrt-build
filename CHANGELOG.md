@@ -2,6 +2,123 @@
 
 本仓库所有功能/配置改动均记录于此。版本判型遵循全局规范（PATCH / MINOR / MAJOR）。
 
+## [v0.4.7] - 2026-10-10
+
+### 新增 — trafficctl 升级到上游 1.21.4 并建立「可跟进上游」的维护机制
+
+**背景**：本地包此前是上游 `YusDyr/luci-app-trafficctl` **v1.8.0** 的 vendored 副本，
+版本落后很多（`status.js` 3077 → 4677 行），且上游更新不会自动进入本仓库。
+本次拉到上游最新 **1.21.4**，把本地改动重新落地，并把差分固化成 patch，
+使「日后跟进上游」成为可验证的流程而不是靠人工记忆。
+
+**1. 全量 vendor 上游 1.21.4**
+
+- 包内文件 30 → **43**（上游新增 13 个文件：`portfw.js`、`trafficctl-cut.sh`、
+  `trafficctl-ifaces.sh`、`trafficctl-metrics.sh`、`trafficctl-names.sh`、
+  `trafficctl-netify.sh`、`trafficctl-portfw.sh`、`trafficctl-rdns-refresh.sh`、
+  `trafficctl-subnets.sh`、`trafficctl-totals.sh`、`www/cgi-bin/trafficctl-metrics`、
+  `init.d/trafficctl-cut`、`lib/upgrade/keep.d/luci-app-trafficctl`）。
+- `LUCI_DEPENDS` 新增 `+tc +iw +hostapd-utils`；`config/trafficctl` 新增
+  `shape_ifb`、`netify_endpoint`、`netify_interval` 等项。
+- 上游 Windows checkout 为 CRLF（实测 39/40 文件）→ 全部转 LF（红线 1）；
+  执行位按上游 git 索引恢复为 **29 × 100755 + 14 × 100644**
+  （Windows 上 `Copy-Item` 会丢失该信息，必须用 `git update-index --chmod`）。
+
+**2. 保留并重新落地本地改动（三项）**
+
+- **（关键）重写 `trafficctl-bytes-nft.sh`**：上游**至今未修**该缺陷，
+  仍用本内核不支持的语法且只挂 forward 单钩子。
+  - `nft add map … '{ type ipv4_addr : counter; flags dynamic; }'` 与
+    `'update @bytes_in { ip daddr counter }'` 在内核 6.18.55 / nftables 1.1.6 上
+    均报 `Error: Could not process rule: Not supported`，错误被 `2>/dev/null` 吞掉
+    → 集合从不建立、脚本永远返回 `[]` → **速率列恒为 `—`**。
+    上游 1.21.4 仅新增了「失败时回退 conntrack」，但 **conntrack 看不到被
+    REDIRECT 到本机的代理流量**，速率仍不准。
+  - 改为受支持的 `set { type ipv4_addr; size 65535; flags dynamic; }` +
+    `add @set { ip saddr counter }`。
+  - **三钩子并用**（上游只有 forward）：SSR-Plus 用 REDIRECT 把客户端连接引到
+    本机 v2ray(:1234)，数据包走 **INPUT/OUTPUT 而非 forward**。
+  - 用 `@lan` 集合限定地址归属，避免 `output` 钩子把路由器自身对 WAN 的连接
+    （`1.2.4.8`、`10.x` 等）写进集合污染数据。
+  - 保留单事务原子重建 + `nft -c -f` 预校验（红线 8）。
+  - 保留上游 JSON 契约字段 `bytes_tcp` / `bytes_udp` / `src` / `degraded`
+    （`trafficctl-totals.sh` 会消费，缺失会导致重基线判定与信任标记失真）。
+- **设置区 tab 分页 + 默认自动刷新 + 1s/2s 档位**：
+  - Telegram Bot 表单极长（实测单卡片 1270px），改为独立 tab
+    （`Display & Table` / `Devices` / `Telegram Bot`），tab 选择持久化。
+  - 上游刷新默认值是「**关**」（`loadOpts().refresh || 0`），冷启动不刷新；
+    改为经 `optRefresh()` 取默认 5 秒，并新增 UCI
+    `trafficctl.main.refresh_interval`（默认 `5`）实现**路由端可下发**。
+  - 刷新档位新增 **1s / 2s**（上游最短 5s）。
+  - 设置区由「默认折叠隐藏」改为**常显标题栏 + 内容始终可见**。
+  - 新增 `refreshSpeedViews()`：改「窗口」「方法」后立即重算重绘。
+- **中文翻译**：新增 `po/zh-cn/luci-app-trafficctl.po`，覆盖 **403/403** 条界面
+  字符串、0 条空译文；`.pot` 模板一并重生成（上游只带 121 条，实际需要 403 条）。
+
+**3. 建立「可跟进上游」的维护机制**
+
+- `patches/luci-app-trafficctl/`（4 个 patch + `UPSTREAM` + `README.md`）：
+  记录相对上游的全部差分。`UPSTREAM` 记录基线 tag（`v1.21.4`）。
+- `tools/sync-trafficctl.sh`：一条命令升级上游 —— 克隆指定 tag、覆盖包目录
+  （保留本地专有文件）、重算 patch、在干净基线上回放校验。
+- `tools/regen-trafficctl-patches.py`：改完 `package/` 下的文件后重算 patch，
+  并**验证「干净上游基线 + 全部 patch」与工作树逐字节一致**。
+- `tools/check-trafficctl-i18n.py`：校验中文覆盖率；
+  `--write-pot` 可直接重生成模板。
+- **CI 新增守卫** `Verify luci-app-trafficctl local invariants`：
+  断言 nft 后端不含禁用语法、三钩子与 `@lan` 齐备、JSON 契约字段完整、
+  po/zh-cn 存在且翻译完整、`optRefresh` 与 `1s` 档位存在、设置区 tab 存在、
+  无 `td[data-…]` 前缀选择器；并从 `UPSTREAM` 记录的 tag **真实克隆上游、
+  重放全部 patch、要求结果与 vendored 包逐字节一致**。
+  上游发新版而 patch 未跟上时 CI 显式失败，不再静默。
+- CI 显式启用 `iw`、`hostapd-utils`、`conntrack` 并断言（1.21.4 的功能依赖；
+  缺 `hostapd_cli` 时界面会提示「WiFi 阻断未生效」）。
+
+**4. 顺带修复**
+
+- 设备表底部提示文案由 "Download speed updates…" 改为
+  "Download **and upload** speeds update…"（表格已有上下行两列）。
+
+### 验证
+
+**静态**
+
+- `node --check status.js / portfw.js` 通过；全部 shell 脚本 `sh -n` 通过。
+- `msgfmt --check` 编译通过，**443 条已翻译**；`msgfmt` 反解确认
+  `Display & Table → 显示与表格` 确实在产物中。
+- `tools/check-trafficctl-i18n.py`：界面字符串 403 条、po 443 条、
+  缺失 0、空译文 0。
+- `tools/regen-trafficctl-patches.py`：patch 可 `git apply -p1` 套用、
+  结果与工作树逐字节一致、可 `-R` 干净回退。
+- 全仓库跟踪文件 CRLF = **0**。
+- CI YAML 解析合法（26 个步骤）。
+
+**路由器实测（192.168.3.254，固件 24.10.5 x86/64）**
+
+- nft 后端：从零重建后 `nft list table inet trafficctl_mon` 显示集合与三钩子
+  全部正确（`mon_forward` 2 条规则 / `mon_input` 1 条 / `mon_output` 1 条），
+  `@lan` 正确解析为 `192.168.3.0/24`，建表耗时 0.43s。
+- 计数器实测增长：持续下载 60 MB 文件时本机 `bytes_in` 从
+  `395776761` 稳步增至 `911225010`（每 2 秒约 +115 MB）。
+- UI 端到端：本机下行 2.3–3.4 Mbit/s、上行 4.1–6.1 Mbit/s，
+  12 次采样 **10 个不同值**（修复前恒为 `—`）。
+- 1 秒刷新精确验证：10 秒内 10 次 ubus 调用，时间戳间隔**精确 1000ms**
+  （`callsPerSec: 1.00`）。
+- 默认刷新：冷启动（已清 `localStorage`）后自动进入
+  `扫描所有设备中…` ↔ `✓ 完成` 循环，无需任何手动操作。
+- tab：渲染出 `Display & Table` / `设备` / `Telegram机器人` 三个 tab，
+  默认打开第一个，Telegram 为独立页。
+- rpcd：`ubus call luci.trafficctl config_get` 返回
+  `"refresh_interval": 5`，端到端接线打通。
+
+**已知限制（非缺陷）**
+
+- 路由器上的 `luci-app-trafficctl.zh-cn.lmo` 是 **10 月 9 日刷机**时从 1.8.0
+  编译的旧文件，故新增字符串（如 `Display & Table`）在**当前路由器**上仍显示
+  英文。`.lmo` 由构建主机的 `po2lmo` 在打包时生成（路由器上没有该工具），
+  下一次固件构建会从本仓库 `.po` 重新编译 —— 已用 `msgfmt` 编译出 444 条
+  译文证明该串在产物中。
+
 ## [v0.4.6] - 2026-10-10
 
 ### 修复 — trafficctl 三处交互缺陷（设置未展开 / 布局凌乱 / 不自动刷新）

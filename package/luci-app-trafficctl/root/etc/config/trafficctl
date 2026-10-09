@@ -2,6 +2,84 @@ config trafficctl 'main'
 	option enabled '1'
 	option default_mode 'limiter'
 	option persist_rules '0'
+	# Extra subnets to monitor (space-separated CIDRs), for downstream-router
+	# clients that have no kernel route on this router. Subnets with a
+	# "via" route over a LAN interface are picked up automatically.
+	option extra_subnets ''
+	# Resolve names for devices with no DHCP lease here (routed/downstream
+	# clients) via reverse DNS. rdns_server is a space-separated list of
+	# resolvers tried in order before the system resolver — point it at the
+	# downstream router (e.g. a MikroTik) so its lease names get used.
+	option resolve_names '1'
+	option rdns_server ''
+	option rdns_ttl '300'
+	# Optional netifyd (DPI) integration — adds application labels per device.
+	# Inactive unless the agent is installed and its socket exists.
+	option netify_enabled '1'
+	option netify_socket '/var/run/netifyd/netifyd.sock'
+	# Where flow telemetry is published. Agent v5's unix socket is a
+	# request/response API that never pushes flows — the socket SINK does,
+	# usually tcp://127.0.0.1:1780. Empty = auto-detect from
+	# /etc/netifyd/netify-sink-socket.json.
+	option netify_endpoint ''
+	option netify_interval '45'
+	# IFB device used to shape upload pre-NAT (needs kmod-ifb).
+	option shape_ifb 'tctl-ifb0'
+	# Dashboard defaults for a browser that has not chosen its own. The Poll
+	# and Window chips still override per-browser — these only decide what a
+	# fresh session starts with, which is the part an admin can usefully set
+	# once for a router rather than per person (#12).
+	#
+	# poll_interval: seconds between live samples; 0 disables polling.
+	#   A smaller number costs a conntrack read per tick on the router, which
+	#   is the overhead the request was about.
+	# avg_window: seconds of history the displayed speed is averaged over.
+	#   Samples kept per device are avg_window/poll_interval, so a long window
+	#   with a short poll is the expensive combination.
+	option poll_interval '2'
+	option avg_window '15'
+	#
+	# 【本仓库补丁】refresh_interval: 整张设备表的自动刷新间隔（秒），
+	#   0 = 关闭。这是「浏览器自己还没选过」时的起始值，保存在 localStorage
+	#   里的用户选择优先。
+	#   上游的默认是「关」（冷启动不刷新），而「所有设备」页的核心用途就是
+	#   实时监看，故本仓库设为 5 秒。本仓库的刷新档位支持到 1 秒。
+	#   注意：1 秒会让 rpcd 每秒处理一次 summary+bytes，低性能设备有负担，
+	#   故默认仍为 5；需要实时监看时在界面上选 1s。
+	option refresh_interval '5'
+
+config newdevice 'newdevice'
+	# Apply a limit automatically the first time a device is seen. Off by
+	# default: it is the only setting here that restricts a device nobody
+	# has looked at yet. limit_kbit 0 means "no limit" and makes enabled
+	# a no-op. An existing limit is never overwritten.
+	option enabled '0'
+	option limit_kbit '0'
+	option limit_mode 'limiter'
+
+config cut 'cut'
+	# Global internet cut (all devices at once). Only PREFERENCES live here —
+	# whether the cut is currently engaged never does, because /etc/config
+	# survives a reboot and this control must not. It is the one control that
+	# can lock out its own operator: anyone administering the router through a
+	# LAN host (Tailscale on a NAS, a tunnel from a LAN box, a jump host) loses
+	# that path while it is on, and a reboot has to be able to undo it.
+	#
+	# persist is its own opt-in and deliberately NOT the global persist_rules
+	# flag: somebody who turned that on so their rate limits survive a reboot
+	# must not inherit a persistent internet kill as a side effect.
+	option persist '0'
+	# Duration offered by default, in seconds; 0 means indefinite — the cut
+	# stays on until it is switched off.
+	#
+	# Indefinite is the default because it is what the feature is FOR: the
+	# requester's case (#55) is holding a new device off the internet until it
+	# has been configured, which has no predictable duration, and a cut that
+	# auto-released halfway through would silently let the device out. The
+	# safety net is that the engaged state lives in tmpfs, so a reboot always
+	# restores the internet — a timer is a convenience on top of that, not the
+	# thing standing between the operator and a permanent lockout.
+	option default_duration '0'
 
 config logging 'logging'
 	option enabled '1'
@@ -27,3 +105,18 @@ config telegram 'telegram'
 	option btn_block_wifi '1'
 	option btn_limiter '1'
 	option btn_shaper '1'
+
+config metrics 'metrics'
+	# Prometheus/OpenMetrics exporter. Off by default: it exposes device
+	# names, addresses and traffic volumes without a LuCI session.
+	option enabled '0'
+	# Shared token for the CGI endpoint (empty = no token check).
+	option token ''
+	# Per-device gauges (connections, blocked, limits, name/mac). Costs a
+	# full summary run per scrape — set 0 for byte counters only.
+	option state '1'
+	# Port-forward metrics.
+	option portfw '1'
+	# DPI application metrics. Off by default: device x application is a
+	# cardinality trap on a busy network.
+	option apps '0'

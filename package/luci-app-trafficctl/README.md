@@ -1,9 +1,7 @@
 # luci-app-trafficctl
 
-[![ShellCheck](https://github.com/YusDyr/luci-app-trafficctl/actions/workflows/shellcheck.yml/badge.svg)](https://github.com/YusDyr/luci-app-trafficctl/actions/workflows/shellcheck.yml)
-[![ESLint](https://github.com/YusDyr/luci-app-trafficctl/actions/workflows/eslint.yml/badge.svg)](https://github.com/YusDyr/luci-app-trafficctl/actions/workflows/eslint.yml)
-[![Tests](https://github.com/YusDyr/luci-app-trafficctl/actions/workflows/tests.yml/badge.svg)](https://github.com/YusDyr/luci-app-trafficctl/actions/workflows/tests.yml)
-[![Release](https://github.com/YusDyr/luci-app-trafficctl/actions/workflows/release.yml/badge.svg)](https://github.com/YusDyr/luci-app-trafficctl/actions/workflows/release.yml)
+[![CI](https://github.com/YusDyr/luci-app-trafficctl/actions/workflows/ci.yml/badge.svg)](https://github.com/YusDyr/luci-app-trafficctl/actions/workflows/ci.yml)
+[![Release](https://github.com/YusDyr/luci-app-trafficctl/actions/workflows/auto-release.yml/badge.svg)](https://github.com/YusDyr/luci-app-trafficctl/actions/workflows/auto-release.yml)
 [![CodeQL](https://github.com/YusDyr/luci-app-trafficctl/actions/workflows/github-code-scanning/codeql/badge.svg)](https://github.com/YusDyr/luci-app-trafficctl/security/code-scanning)
 [![Latest Release](https://img.shields.io/github/v/release/YusDyr/luci-app-trafficctl)](https://github.com/YusDyr/luci-app-trafficctl/releases/latest)
 [![License](https://img.shields.io/github/license/YusDyr/luci-app-trafficctl)](LICENSE)
@@ -44,6 +42,7 @@ I hope it turns out as useful for you as it has been for me.
 - [Features](#features)
 - [System Requirements](#system-requirements)
 - [Compatibility](#compatibility)
+- [IPv6 coverage](#ipv6-coverage)
 - [Installation](#installation)
 - [Quick Start](#quick-start)
 - [Configuration](#configuration)
@@ -154,19 +153,25 @@ I hope it turns out as useful for you as it has been for me.
 ## Features
 
 - **Real-time Per-device Monitoring** -- View active connections per device with TCP/UDP counts, TCP state breakdown, destination IPs, and live bandwidth speed (sparkline graphs with rate limit overlay).
+- **Global Overview** -- Optional whole-router panel (the **Overview** toggle in Settings > Display): uplink throughput graph, per-interface breakdown with WAN/LAN/VPN roles and sparklines, and a live top-talkers list. Reads per-interface kernel counters and the speed map the device table already computes, and polls on the existing Poll interval rather than a timer of its own.
 - **Interactive Speed Graphs** -- Hover any sparkline for a full-size popup graph with: download + upload dual lines, gradient area fill, min/max band, crosshair with precise values, rate limit line, nice-value Y axis (multiples of 100/500 Kbit/s). Full history from page load.
 - **Traffic Shaping (Queue)** -- tc/HTB classes on the LAN bridge with fq_codel leaf qdiscs. Queues excess traffic instead of dropping, providing smoother throughput.
-- **Rate Limiting (Policer)** -- nftables or iptables-based packet dropping when a device exceeds the configured rate. Instant enforcement, no queuing.
+- **Rate Limiting (Policer)** -- nftables or iptables-based packet dropping when a device exceeds the configured rate. Instant enforcement, no queuing. Unlike the shaper it owns no qdisc, so it works on a router already running SQM/cake — where the shaper deliberately declines rather than tear down somebody else's QoS, and says so.
+- **Subnet / VLAN Limits** -- A limit can target a whole subnet (`192.168.20.0/24`) or the entire network, not only one device. Two readings of "20 Mbit for the IoT VLAN" are both available and are chosen explicitly: **each** gives every device its own 20 Mbit bucket, **shared** gives the whole VLAN one 20 Mbit bucket *between them* — the aggregate cap. Pick a monitored subnet from the target chips in the Speed Limit panel (select "All active devices" first); active subnet limits are listed there with their drop counters and a Remove button. Subnets the router does not monitor are flagged rather than silently accepted: a firewall zone other than `lan` with `masq=1` — the usual way to isolate a guest VLAN — is excluded from monitoring, and a limit on it would never match a packet. From the CLI: `trafficctl-ratelimit.sh 192.168.20.0/24 20000 "iot-cap" shared`.
 - **Internet Blocking** -- Layer 3 drop rules per device. Connections are killed immediately and counter stats are tracked.
+- **Global Internet Cut** -- One control that takes every device off the internet while the LAN keeps working, for plugging in a new device and configuring it locally before it is allowed out. Timed by default (15 min / 1 h / 4 h, or until you switch it back), so it reverts by itself. Devices keep reaching each other and the router, so LuCI stays available from the LAN; remote access that lands on a LAN host first (Tailscale on a NAS, a tunnel from a LAN box) stops while it is on. Traffic is stopped on the way in, at prerouting, so a transparent proxy running on the router (podkop/sing-box, passwall) cannot carry it out either — and the router's own traffic, including that proxy's outbound path, is untouched. It does **not** survive a reboot unless you tick "Keep after reboot".
 - **WiFi MAC Filtering** -- Block any device from associating with WiFi via hostapd_cli deny ACL. Only the target client is deauthenticated -- no wifi reload, other clients stay connected. Works across all radio interfaces (2.4 GHz, 5 GHz, 6 GHz) automatically.
-- **Interface Detection** -- Shows actual connection interface: WiFi band (2.4G/5G/6G) or LAN port name (lan2/lan3/lan4).
-- **Live Speed Polling** -- Optional polling with configurable interval (default 2s); shows sparkline per device with spike filtering.
+- **Interface Detection** -- Shows actual connection interface: WiFi band (2.4G/5G/6G), LAN port name (lan2/lan3/lan4), or `routed` for clients behind a downstream router.
+- **Downstream Routers** -- Devices on subnets behind a second router are monitored too: subnets with a route via a LAN next-hop are detected automatically, any flow this router NATs is attributed to its original source, and additional CIDRs can be listed in `trafficctl.main.extra_subnets`.
+- **Port Forwards tab** -- Inbound traffic control for DNAT port forwards and router-local open ports: live connection/client/byte stats per forward, instant pause/resume (drop rule, no firewall reload) and inbound rate limiting.
+- **Live Speed Polling** -- Optional polling with configurable interval (Off/1/2/5/10/30s) and averaging window (5s-5min); shows sparkline per device with spike filtering. Both can be stored as router-wide defaults via UCI (`poll_interval`, `avg_window`) for browsers that have not chosen their own.
 - **Reverse DNS** -- Optional hostname resolution for external destination IPs with in-memory cache (no repeated lookups).
 - **Searchable Device Picker** -- Command palette (search by name, IP, or MAC) with recent devices quick-access bar stored in localStorage.
 - **Telegram Bot** -- Optional bot for remote control: device list, block/unblock, rate limit, shape traffic, new device notifications. Runs on the router via long polling, no external server needed.
 - **New Device Detection** -- Discovers new devices via three sources: ARP table, DHCP leases, Wi-Fi station list. Instant DHCP hotplug trigger for near-realtime alerts.
 - **Activity Logging** -- Configurable logging of all actions (blocks, ratelimits, shapes, config changes) to a local file and/or syslog. Includes source IP, username, and trigger (LuCI/Telegram/CLI).
-- **Reboot Persistence** -- Shaping, block, and rate-limit rules optionally survive reboot via hotplug restore. Configurable per UCI option `persist_rules`.
+- **Default Limit for New Devices** -- Optionally rate-limit or shape a device the first time it appears on the network (Settings > New Device Defaults). Off by default. Switching it on records the devices already present, so only genuinely new ones are affected, and a device that already carries a limit is never overridden.
+- **Reboot Persistence** -- Shaping, block, and rate-limit rules optionally survive reboot via hotplug restore. Configurable per UCI option `persist_rules`. A rate limit keeps its bucket layout across the restore, so a subnet limited "5 Mbit each" does not come back as 5 Mbit for the whole subnet.
 
 ---
 
@@ -188,6 +193,7 @@ I hope it turns out as useful for you as it has been for me.
 | `luci-base` | Web interface | Always required |
 | `rpcd` | Backend RPC | Always required |
 | `tc-full` + `kmod-sched-core` + `kmod-sched-htb` | Traffic shaping | For HTB/fq_codel queues |
+| `kmod-ifb` | Upload shaping | Without it the shaper applies to download only, and reports that |
 | `iw-full` | Interface detection | WiFi band identification |
 | `bridge-utils` | Interface detection | LAN port identification (brctl) |
 | `curl` + `jsonfilter` | Telegram bot | jsonfilter is part of base OpenWrt |
@@ -195,7 +201,7 @@ I hope it turns out as useful for you as it has been for me.
 
 ## Compatibility
 
-[![OpenWrt Compatibility](https://github.com/YusDyr/luci-app-trafficctl/actions/workflows/compat.yml/badge.svg)](https://github.com/YusDyr/luci-app-trafficctl/actions/workflows/compat.yml)
+[![OpenWrt Compatibility](https://github.com/YusDyr/luci-app-trafficctl/actions/workflows/compat.yml/badge.svg?event=pull_request)](https://github.com/YusDyr/luci-app-trafficctl/actions/workflows/compat.yml)
 
 Runs on all architectures (no compiled code, pure shell + LuCI JavaScript).
 
@@ -221,6 +227,54 @@ Runs on all architectures (no compiled code, pure shell + LuCI JavaScript).
 | **snapshot** | ✓ | | ✓ | ✓ | | | ✓ | | |
 
 Each test builds the `.ipk`, runs `opkg install --force-depends` inside the real OpenWrt rootfs container for that version/arch, then verifies all files are present and all scripts pass `ash -n` syntax check.
+
+---
+
+## IPv6 coverage
+
+Everything here is keyed on a device's IPv4 address, so **IPv6 coverage is
+partial and this table is the whole of it.** Read it before relying on any of
+these controls on a dual-stack network.
+
+| Control | IPv4 | IPv6 | Keyed on |
+|---|:---:|:---:|---|
+| Global internet cut (all devices) | ✅ | ✅ | interface (`oifname`/`fib`) — family-independent |
+| WiFi block (MAC deny) | ✅ | ✅ | MAC — the client cannot associate at all |
+| Block internet (per device) | ✅ | ✅ | address for v4, **MAC** for v6 |
+| Rate limit — **upload** | ✅ | ✅ | address for v4, **MAC** for v6 |
+| Rate limit — **download** | ✅ | ❌ | address only |
+| Traffic shaping (tc/HTB), both directions | ✅ | ❌ | address only |
+| Port-forward pause / limit | ✅ | ❌ | address only |
+| Byte counters, speed graphs, totals, Prometheus | ✅ | ❌ | address only |
+
+**Why not simply match `ip6 saddr` as well?** Because a client's IPv6 addresses
+are not stable. With SLAAC and privacy extensions a device holds several at
+once and rotates them on a timer, so a rule written against the address seen
+today stops matching tomorrow — silently, which is worse than not having the
+rule. The MAC does not rotate, so the rules that *can* be keyed on it are.
+
+**Where a MAC cannot be used, and what happens then:**
+
+- **Download** cannot be. By the time a reply is on its way to the client the
+  destination MAC is the next hop's, and the rule sits on an address-matching
+  hook. Doing this properly needs a named nft set per device, populated from
+  `ip -6 neigh`/DHCPv6 and refreshed as addresses rotate — a data-model change,
+  not a one-line match. A stale set is a silent bypass, so it is being done
+  separately rather than quickly.
+- **A device with no DHCP lease and no neighbour entry** — a client behind a
+  downstream router, reached through `extra_subnets` or a static route — has no
+  MAC this router can see. Its IPv4 rules are applied as before and the reply
+  says **"IPv4 only"** in the message, in the LuCI status line and in the
+  Telegram bot's answer, rather than reporting an unqualified success.
+- **A downstream router itself** is excluded on purpose. Its MAC is the source
+  address of every packet it forwards, so a MAC-keyed rule aimed at it would
+  black-hole or throttle every client behind it. It too is reported as
+  "IPv4 only", naming the reason.
+- **fw3 / iptables (OpenWrt 21.02)** stays IPv4-only throughout.
+
+If a device must be cut off completely and its IPv6 cannot be covered, the
+**WiFi block** (for wireless clients) and the **global internet cut** (for all
+devices) are family-independent and work regardless.
 
 ---
 
@@ -251,21 +305,22 @@ The "stable URL" links below always download from the latest release — the fil
 2. In LuCI: **System → Software → Upload Package...**
 3. Select the downloaded file and click **OK**
 
-**Option B — SSH (with signature verification):**
+**Option B — SSH (recommended):**
 
 ```sh
-# Add the signing key (one-time):
-wget -O /etc/apk/keys/luci-app-trafficctl.pub https://raw.githubusercontent.com/YusDyr/luci-app-trafficctl/main/keys/apk-signing.pub
-# Install:
-cd /tmp && wget https://github.com/YusDyr/luci-app-trafficctl/releases/latest/download/luci-app-trafficctl.apk && apk add luci-app-trafficctl.apk
+cd /tmp && wget -O luci-app-trafficctl.apk https://github.com/YusDyr/luci-app-trafficctl/releases/latest/download/luci-app-trafficctl.apk && apk add --allow-untrusted luci-app-trafficctl.apk
 # If you get "modified conffile" on upgrade, add `--force-maintainer` to override
 ```
 
-**Option C — SSH (without key, quick install):**
-
-```sh
-cd /tmp && wget https://github.com/YusDyr/luci-app-trafficctl/releases/latest/download/luci-app-trafficctl.apk && apk add --allow-untrusted luci-app-trafficctl.apk
-```
+> **Why `--allow-untrusted`?** OpenWrt does not sign individual `.apk` files —
+> package signatures apply to a repository *index*, not to a standalone file
+> downloaded from a GitHub release. Upstream removed per-package apk signing
+> outright in October 2025. `--allow-untrusted` is therefore the normal way to
+> install a single package file, not a security workaround being suggested
+> lightly. If you want to pin what you install, download the version-stamped
+> asset (`luci-app-trafficctl_X.Y.Z-r1_noarch.apk`) rather than the floating
+> `latest` URL, so the file cannot change under you between download and
+> install.
 
 ### OpenWrt 21.02 — 24.10 (.ipk)
 
@@ -284,6 +339,39 @@ opkg install https://github.com/YusDyr/luci-app-trafficctl/releases/latest/downl
 
 ```sh
 ssh root@router 'opkg install https://github.com/YusDyr/luci-app-trafficctl/releases/latest/download/luci-app-trafficctl.ipk'
+```
+
+### Uninstalling
+
+```sh
+# OpenWrt 25.12+ (apk)
+apk del luci-app-trafficctl
+
+# OpenWrt 21.02 - 24.10 (opkg)
+opkg remove luci-app-trafficctl
+
+# either way, reload the LuCI backend afterwards
+/etc/init.d/rpcd restart
+```
+
+Removing the package deletes its scripts and the LuCI page but leaves
+`/etc/config/trafficctl` in place, so your settings survive a reinstall. Delete
+it yourself if you want a clean slate:
+
+```sh
+rm -f /etc/config/trafficctl
+```
+
+Any blocks, rate limits or shapers that were active are **not** persistent
+firewall/tc state — they disappear on the next reboot. To clear them
+immediately before removing the package, unblock/unlimit the affected devices
+from the dashboard first, or reboot the router after uninstalling.
+
+If you also enabled the Telegram bot, stop it before removing:
+
+```sh
+/etc/init.d/trafficctl-telegram stop
+/etc/init.d/trafficctl-telegram disable
 ```
 
 ### From source (OpenWrt build system)
@@ -325,8 +413,16 @@ apk add conntrack luci-base rpcd
 # For traffic shaping
 apk add tc-full kmod-sched-core kmod-sched-htb
 
+# For upload shaping — without it the shaper applies download only and says so
+# (upload is redirected into an IFB device via act_mirred, which ships with the
+# sched core package above)
+apk add kmod-ifb
+
 # For interface detection (WiFi band + LAN port)
 apk add iw-full bridge-utils
+
+# For WiFi MAC deny / deauthenticate
+apk add hostapd-utils
 
 # rpcd-mod-rrdns is included with rpcd (no extra install needed)
 
@@ -346,8 +442,16 @@ opkg install conntrack luci-base rpcd
 # For traffic shaping
 opkg install tc-full kmod-sched-core kmod-sched-htb
 
+# For upload shaping — without it the shaper applies download only and says so
+# (upload is redirected into an IFB device via act_mirred, which ships with the
+# sched core package above)
+opkg install kmod-ifb
+
 # For interface detection (WiFi band + LAN port)
 opkg install iw-full bridge-utils
+
+# For WiFi MAC deny / deauthenticate
+opkg install hostapd-utils
 
 # rpcd-mod-rrdns is included with rpcd (no extra install needed)
 
@@ -405,8 +509,14 @@ opkg install curl
 
 When a device is WiFi-blocked:
 - Its MAC is added to the deny list on **all** wifi-iface sections via UCI.
-- `macfilter=deny` is set on each interface.
+- `macfilter=deny` is set on each interface that has no ACL policy yet. An interface already using `allow` (whitelist) keeps it, and blocking there means removing the MAC from the accept list.
 - At runtime, `hostapd_cli deny_acl ADD_MAC` adds the MAC to the deny ACL and `deauthenticate` disconnects only that client. No wifi reload -- other clients stay connected.
+- The ACL is then **read back** to confirm the entry landed. The UCI entry is durable but only applies at the next wifi restart, so a runtime step that did not happen is reported as a failure rather than as a block -- see `enforcement` in [docs/API.md](docs/API.md).
+
+This needs the `hostapd-utils` package (pulled in by `LUCI_DEPENDS`). If it is
+missing, trafficctl falls back to a temporary hostapd ban over ubus, says so,
+and tells you to install it -- a device on the deny list that is still
+connected is shown in the table as **not applied** rather than as blocked.
 
 ---
 

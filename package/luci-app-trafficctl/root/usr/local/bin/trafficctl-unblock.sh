@@ -18,7 +18,11 @@ if ! tctl_validate_ip "$IP"; then
     exit 1
 fi
 
-COMMENT="tctl_block_${LABEL}"
+COMMENT=$(tctl_block_comment "$IP")
+
+# Rules written before comments were derived from the address carry the caller's
+# label, so a block placed from LuCI could not be removed from Telegram.
+tctl_block_remove "$IP" "tctl_block_${LABEL}" 2>/dev/null
 
 if tctl_block_remove "$IP" "$COMMENT"; then
     tctl_persist_enabled && tctl_persist_remove "block" "$IP"

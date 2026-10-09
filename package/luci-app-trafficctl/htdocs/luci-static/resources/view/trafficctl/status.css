@@ -12,6 +12,17 @@
     --tc-bg:      var(--background-color-high,#ffffff);
     --tc-bg-alt:  var(--background-color-low, #f7fafc);
     --tc-hover:   var(--background-color-low, #ebf8ff);
+    /* Text drawn ON TOP of an accent fill (chips, primary buttons). Themes
+       whose accent is pale need dark text here, so it must be a variable
+       rather than a hardcoded white. */
+    --tc-on-accent: #ffffff;
+    /* Tooltips need a surface that CONTRASTS with the page, not one that
+       matches it — so these flip in the dark blocks below. */
+    --tc-tip-bg:  #2d3748;
+    --tc-tip-fg:  #ffffff;
+    --tc-shadow:  rgba(0,0,0,.15);
+    /* Telegram brand colour, kept deliberately brand-accurate. */
+    --tg-primary: #0088cc;
 }
 
 /* Bootstrap explicit dark mode */
@@ -26,6 +37,11 @@
     --tc-bg:      #1e1e1e;
     --tc-bg-alt:  #262626;
     --tc-hover:   #2d3748;
+    --tc-on-accent: #1a202c;
+    --tc-tip-bg:  #e2e8f0;
+    --tc-tip-fg:  #1a202c;
+    --tc-shadow:  rgba(0,0,0,.5);
+    --tg-primary: #3390ec;
 }
 
 /* OS dark preference (Argon auto mode, other themes) */
@@ -41,6 +57,11 @@
         --tc-bg:      #1e1e1e;
         --tc-bg-alt:  #262626;
         --tc-hover:   #2d3748;
+        --tc-on-accent: #1a202c;
+        --tc-tip-bg:  #e2e8f0;
+        --tc-tip-fg:  #1a202c;
+        --tc-shadow:  rgba(0,0,0,.5);
+        --tg-primary: #3390ec;
     }
 }
 
@@ -65,7 +86,7 @@
 .table.tc-table .th { cursor: pointer; user-select: none; white-space: nowrap; font-size: 12px; }
 .table.tc-table .th:hover { opacity: 0.75; }
 .table.tc-table .td { font-size: 12px; vertical-align: middle; }
-.table.tc-table .tr:not(.cbi-section-table-titles):hover .td {
+.table.tc-table--rows-clickable .tr:not(.cbi-section-table-titles):hover .td {
     background: var(--tc-hover);
     cursor: pointer;
 }
@@ -73,8 +94,6 @@
 /* ── Speed indicator in table ────────────────────────────────────── */
 .tc-speed-active { color: var(--tc-speed); font-weight: 600; }
 .tc-speed-idle   { color: var(--tc-faint); }
-/* 上行速率：复用弹窗图表中上行曲线所用的 --tc-ok，保持色义一致 */
-.tc-upspeed-active { color: var(--tc-ok); font-weight: 600; }
 
 /* ── Inline badge (block/limit/shape status in cell) ─────────────── */
 .tc-badge {
@@ -119,6 +138,60 @@
 .tc-offload-ul {
     margin: 4px 0 4px 18px;
     padding: 0;
+}
+
+/* ── Global internet cut ──────────────────────────────────────────── */
+/* Sits above everything, outside the collapsible settings: the one control
+   here that can lock out its own operator has to be readable at a glance. */
+.tc-cut {
+    padding: 10px 14px;
+    margin-bottom: 8px;
+    border: 1px solid var(--tc-border);
+    border-radius: 6px;
+    background: var(--tc-bg-alt);
+    font-size: 13px;
+    line-height: 1.5;
+}
+.tc-cut--on {
+    border-color: var(--tc-err);
+    background: var(--tc-bg);
+}
+.tc-cut--broken {
+    border-color: var(--tc-warn);
+    background: var(--tc-bg);
+}
+.tc-cut__row {
+    display: flex;
+    align-items: flex-start;
+    gap: 8px;
+    flex-wrap: wrap;
+}
+.tc-cut__icon {
+    font-size: 16px;
+    line-height: 1.4;
+}
+.tc-cut__body { flex: 1; min-width: 240px; }
+.tc-cut__controls {
+    display: flex;
+    align-items: center;
+    gap: 10px;
+    flex-wrap: wrap;
+}
+.tc-cut__hint {
+    font-size: 11px;
+    color: var(--tc-muted);
+    margin-top: 4px;
+}
+.tc-cut__warn {
+    font-size: 11px;
+    color: var(--tc-warn);
+    margin-top: 4px;
+}
+/* The armed half of the two-click confirm: visibly different, so nobody
+   double-clicks their way into a cut without noticing the second click. */
+.tc-cut__btn--armed {
+    outline: 2px solid var(--tc-err);
+    outline-offset: 1px;
 }
 
 /* ── Action row (block / wifi buttons) ───────────────────────────── */
@@ -179,6 +252,75 @@
     overflow: hidden;
     border: 1px solid var(--tc-border);
 }
+/* Unit picker inside .tc-custom-unit-btns. The download row's pair still
+   carries these as inline styles; new controls use the class so the active
+   state is not another inline override to hunt down. */
+.tc-unit-btn {
+    padding: 4px 8px;
+    font-size: 11px;
+    cursor: pointer;
+    background: var(--tc-bg);
+    color: currentColor;
+    user-select: none;
+}
+.tc-unit-btn--on {
+    background: var(--tc-speed);
+    color: var(--tc-on-accent);
+}
+
+/* ── Subnet target: the each/shared explanation and its warning ──── */
+.tc-scope-row {
+    margin-bottom: 6px;
+}
+/* Full sentences rather than a tooltip: "5 Mbit each" and "5 Mbit between
+   them" are the two halves of this feature and are easy to read backwards. */
+.tc-scope-explain {
+    font-size: 11px;
+    color: var(--tc-muted);
+    margin-top: 4px;
+}
+.tc-scope-warn {
+    font-size: 11px;
+    color: var(--tc-warn);
+    margin-top: 4px;
+    line-height: 1.4;
+}
+
+/* ── Active subnet limits ────────────────────────────────────────── */
+.tc-subnet-limits {
+    margin-top: 10px;
+    padding-top: 8px;
+    border-top: 1px solid var(--tc-border);
+}
+.tc-subnet-limits__title {
+    font-size: 11px;
+    font-weight: 600;
+    color: var(--tc-muted);
+    margin-bottom: 4px;
+}
+.tc-subnet-limits__row {
+    display: flex;
+    flex-wrap: wrap;
+    align-items: center;
+    gap: 10px;
+    padding: 4px 0;
+    font-size: 12px;
+}
+.tc-subnet-limits__target {
+    font-weight: 600;
+    min-width: 130px;
+}
+.tc-subnet-limits__mode {
+    font-size: 11px;
+    padding: 1px 8px;
+    border-radius: 10px;
+    border: 1px solid var(--tc-border);
+    color: var(--tc-muted);
+}
+.tc-subnet-limits__drops {
+    font-size: 11px;
+    flex: 1 1 auto;
+}
 
 /* ── Chips (rate preset pills) ───────────────────────────────────── */
 .tc-chip {
@@ -198,7 +340,7 @@
 .tc-chip--active {
     border-color: var(--tc-speed);
     background: var(--tc-speed);
-    color: #fff;
+    color: var(--tc-on-accent);
     font-weight: 600;
 }
 .tc-chips-row {
@@ -209,42 +351,26 @@
 }
 
 /* ── Column visibility chips ─────────────────────────────────────── */
-/* chips 容器：必须有 flex-wrap，否则在窄卡片里会横向溢出。
-   （2026-10-10 修复：此前完全没有为 .tc-chips-wrap 定义样式，
-   一长串「可见列」chips 在卡片内不能换行，右侧被裁掉。） */
-.tc-chips-wrap {
-    display: flex;
-    flex-wrap: wrap;
-    align-items: center;
-    gap: 2px;
-    margin-bottom: 2px;
-    max-width: 100%;
-}
 .tc-col-chip {
     display: inline-block;
     padding: 2px 8px;
     border-radius: 10px;
     font-size: 11px;
-    line-height: 16px;
     cursor: pointer;
     user-select: none;
-    margin: 0;
+    margin: 2px;
     transition: all .15s;
     font-weight: 500;
-    flex: 0 0 auto;
 }
-.tc-col-chip--on  { background: var(--tc-speed); color: #fff; border: 1px solid var(--tc-speed); }
+.tc-col-chip--on  { background: var(--tc-speed); color: var(--tc-on-accent); border: 1px solid var(--tc-speed); }
 .tc-col-chip--off { background: var(--tc-bg); color: var(--tc-muted); border: 1px solid var(--tc-border); }
 
-/* ── Settings panel ──────────────────────────────────────────────────
-   2026-10-10 改版：设置区**默认展开、不再整体收起**。
-   旧版把整个设置区包在可折叠容器里（初始隐藏），用户看不到任何设置项。
-   新版结构：
-     .tc-settings-panel  → 常显标题栏 .tc-settings-head
-                         → 内容 .tc-settings-body（始终可见）
-                         → 卡片网格 .tc-settings-grid（自适应列数）
-                         → 卡片 .tc-card（标题 .tc-collapsible-head + 内容）
-   只有**单个卡片内部**可折收，标题恒常显，故「一眼可见有哪些设置」。
+/* ── Settings panel (tabbed) ──────────────────────────────────────────
+   【本仓库补丁（相对上游 1.21.4）】
+   上游把整个设置区包在可折叠容器内且初始隐藏（.tc-settings-toggle +
+   .tc-settings-body.tc-hidden），用户必须点标题才能看到设置项。
+   本仓库改为：常显标题栏 + 内容始终可见 + **tab 分页**（Telegram 独立成页，
+   因为其表单极长，实测单卡片可达 1270px，会把整页撑到 2600px 以上）。
    ─────────────────────────────────────────────────────────────────── */
 .tc-settings-panel {
     border-radius: 6px;
@@ -274,27 +400,53 @@
 .tc-settings-body {
     padding: 12px 14px 14px;
 }
-/* 设置区容器：**CSS 多列瀑布流**，卡片在列间自动分配，列高自然均衡。
-   历史教训（两次）：
-     - 旧版 repeat(auto-fit, minmax(320px,1fr)) 网格：行高由该行最高卡片决定，
-       邻列矮卡片下方留大片空白，视觉参差；
-     - 中间版按语义手工分两列（flex）：当某列含 Telegram 这类超长卡片时，
-       另一列会出现数百像素空白（实测左 340px vs 右 1692px）。
-   多列布局（column-count）让浏览器按内容高度自动平衡，是这类「不等高卡片流」
-   的标准解法。窄屏自动降为单列。 */
-.tc-settings-grid {
+
+/* ── Settings tabs ─────────────────────────────────────────────────── */
+.tc-settings-tabs {
+    display: flex;
+    flex-wrap: wrap;
+    gap: 4px;
+    margin-bottom: 12px;
+    border-bottom: 1px solid var(--tc-border);
+}
+.tc-stab {
+    padding: 6px 14px;
+    cursor: pointer;
+    user-select: none;
+    font-size: 12px;
+    font-weight: 600;
+    color: var(--tc-muted);
+    border: 1px solid transparent;
+    border-bottom: 2px solid transparent;
+    border-radius: 4px 4px 0 0;
+    margin-bottom: -1px;
+    transition: color .12s ease, background .12s ease;
+}
+.tc-stab:hover {
+    color: var(--tc-text, inherit);
+    background: var(--tc-bg);
+}
+.tc-stab--active {
+    color: var(--tc-speed);
+    border-bottom-color: var(--tc-speed);
+    background: var(--tc-bg);
+}
+
+/* ── Settings cards：多列瀑布流 ──────────────────────────────────────
+   卡片高度不一（Telegram 1.2k px、显示 ~100 px），用 CSS 多列让浏览器
+   自动均衡分列，避免网格「按行取最高卡片」留下的大片空白。 */
+.tc-settings-pane {
     column-count: 2;
     column-gap: 12px;
 }
 @media (max-width: 760px) {
-    .tc-settings-grid { column-count: 1; }
+    .tc-settings-pane { column-count: 1; }
 }
 .tc-card {
-    /* 卡片不跨列断裂，且与下一张保持间距 */
     break-inside: avoid;
     -webkit-column-break-inside: avoid;
     page-break-inside: avoid;
-    display: inline-block;   /* 配合 column 布局，避免外边距塌陷 */
+    display: inline-block;
     width: 100%;
     margin: 0 0 12px;
     border: 1px solid var(--tc-border);
@@ -335,6 +487,16 @@
 }
 .tc-card .tc-collapsible-body {
     padding: 10px 12px;
+}
+/* chips 容器：上游**完全没有**为 .tc-chips-wrap 定义样式，导致「可见列」
+   一长串 chips 不换行、右侧被卡片 overflow:hidden 裁掉。 */
+.tc-chips-wrap {
+    display: flex;
+    flex-wrap: wrap;
+    align-items: center;
+    gap: 2px;
+    margin-bottom: 2px;
+    max-width: 100%;
 }
 .tc-settings-section-row {
     display: flex;
@@ -428,7 +590,7 @@
     border: 1px solid var(--tc-border);
     border-top: none;
     border-radius: 0 0 4px 4px;
-    box-shadow: 0 4px 8px rgba(0,0,0,.15);
+    box-shadow: 0 4px 8px var(--tc-shadow);
     z-index: 100;
 }
 .tc-dropdown-item {
@@ -464,7 +626,7 @@
     border-radius: 6px;
     background: var(--tc-bg);
     border: 1px solid var(--tc-border);
-    box-shadow: 0 4px 16px rgba(0,0,0,.2);
+    box-shadow: 0 4px 16px var(--tc-shadow);
 }
 .tc-graph-popup__note {
     font-size: 10px;
@@ -576,8 +738,8 @@
     content: ""; position: absolute;
     top: 2px; left: 2px;
     width: 14px; height: 14px;
-    background: #fff; border-radius: 50%;
-    transition: transform .2s; box-shadow: 0 1px 2px rgba(0,0,0,.2);
+    background: var(--tc-bg); border-radius: 50%;
+    transition: transform .2s; box-shadow: 0 1px 2px var(--tc-shadow);
 }
 .tc-toggle-input:checked + .tc-toggle { background: var(--tc-speed); }
 .tc-toggle-input:checked + .tc-toggle::after { transform: translateX(16px); }
@@ -590,7 +752,7 @@
     transform: translateX(-50%);
     padding: 4px 8px; border-radius: 4px;
     font-size: 11px; font-weight: 400; white-space: nowrap;
-    background: #2d3748; color: #fff;
+    background: var(--tc-tip-bg); color: var(--tc-tip-fg);
     pointer-events: none; opacity: 0; transition: opacity .1s; z-index: 999;
 }
 [data-tip]:hover::after { opacity: 1; }
@@ -625,12 +787,12 @@
     background: var(--tc-bg);
     border: 1px solid var(--tc-border);
     border-radius: 4px;
-    box-shadow: 0 4px 12px rgba(0,0,0,.15);
+    box-shadow: 0 4px 12px var(--tc-shadow);
     z-index: 200; padding: 4px 0; white-space: nowrap;
 }
 
 /* ── Telegram settings section ───────────────────────────────────── */
-.tg-section  { border-left: 3px solid #0088cc; padding-left: 12px; margin-top: 4px; }
+.tg-section  { border-left: 3px solid var(--tg-primary); padding-left: 12px; margin-top: 4px; }
 .tg-row      { display: flex; flex-wrap: wrap; align-items: center; gap: 8px; }
 .tg-row + .tg-row { margin-top: 8px; }
 .tg-input {
@@ -639,7 +801,7 @@
     border: 1px solid var(--tc-border); border-radius: 4px;
     outline: none; transition: border-color .2s;
 }
-.tg-input:focus { border-color: #0088cc; }
+.tg-input:focus { border-color: var(--tg-primary); }
 .tg-input--token    { width: 240px; }
 .tg-input--chat     { width: 120px; }
 .tg-input--template { width: 100%; min-height: 60px; resize: vertical; font-family: monospace; font-size: 11px; }
@@ -650,7 +812,7 @@
     cursor: pointer; transition: background .15s;
 }
 .tg-btn:hover { background: var(--tc-hover); }
-.tg-btn--primary { background: #0088cc; color: #fff; border-color: #0088cc; }
+.tg-btn--primary { background: var(--tg-primary); color: var(--tc-on-accent); border-color: var(--tg-primary); }
 .tg-btn--primary:hover { background: #006fa3; }
 .tg-label      { font-size: 11px; color: var(--tc-muted); font-weight: 500; }
 .tg-status-dot { display: inline-block; width: 8px; height: 8px; border-radius: 50%; margin-left: 6px; vertical-align: middle; }
@@ -666,12 +828,12 @@
     font-family: inherit; font-size: inherit; line-height: inherit; outline: none;
 }
 .tg-segmented__item:last-child { border-right: none; }
-.tg-segmented__item--active { background: #0088cc; color: #fff; }
+.tg-segmented__item--active { background: var(--tg-primary); color: var(--tc-on-accent); }
 .tg-divider { font-size: 11px; font-weight: 600; color: var(--tc-muted); margin-top: 12px; margin-bottom: 6px; padding-bottom: 4px; border-bottom: 1px solid var(--tc-border); }
-.tg-bubble { background: var(--tc-bg-alt); border: 1px solid var(--tc-border); border-radius: 12px 12px 12px 4px; padding: 10px 14px; max-width: 280px; font-size: 12px; line-height: 1.5; box-shadow: 0 1px 2px rgba(0,0,0,0.06); }
+.tg-bubble { background: var(--tc-bg-alt); border: 1px solid var(--tc-border); border-radius: 12px 12px 12px 4px; padding: 10px 14px; max-width: 280px; font-size: 12px; line-height: 1.5; box-shadow: 0 1px 2px var(--tc-shadow); }
 .tg-bubble--kbd { text-align: center; border-radius: 12px; }
 .tg-kbd-row { display: flex; gap: 2px; justify-content: center; margin-top: 4px; }
-.tg-kbd-btn { background: #3390ec; color: #fff; border-radius: 6px; padding: 5px 10px; font-size: 11px; flex: 1; text-align: center; min-width: 0; }
+.tg-kbd-btn { background: var(--tg-primary); color: var(--tc-on-accent); border-radius: 6px; padding: 5px 10px; font-size: 11px; flex: 1; text-align: center; min-width: 0; }
 .tg-commands { background: var(--tc-bg-alt); border: 1px solid var(--tc-border); border-radius: 4px; padding: 8px 12px; font-family: monospace; font-size: 11px; line-height: 1.8; }
 .tg-eye { cursor: pointer; font-size: 14px; user-select: none; line-height: 1; }
 .tg-template-hint { font-size: 10px; color: var(--tc-faint); margin-top: 2px; }
@@ -704,4 +866,166 @@
 .tc-log-row {
     display: flex; flex-wrap: wrap; align-items: center;
     gap: 6px; padding-top: 4px;
+}
+
+/* Device rename affordance — the pencil only appears on row hover so the
+   name column stays clean, and it must sit above the row's click handler. */
+.tc-name-cell { display: flex; align-items: center; gap: 6px; }
+.tc-rename {
+	opacity: 0;
+	cursor: pointer;
+	font-size: 11px;
+	color: var(--tc-muted);
+	transition: opacity .15s ease, color .15s ease;
+}
+.table.tc-table--rows-clickable .tr:hover .tc-rename { opacity: .6; }
+.tc-rename:hover { opacity: 1 !important; color: var(--tc-speed); }
+
+/* DPI application label (netifyd). Muted pill so it reads as metadata rather
+   than a control. */
+.tc-app-badge {
+	font-size: 11px;
+	padding: 1px 6px;
+	border-radius: 8px;
+	background: var(--tc-chip-bg, rgba(127,127,127,.12));
+	color: var(--tc-muted);
+	cursor: help;
+	white-space: nowrap;
+}
+
+/* Split down/up speed cell */
+
+/* ── Global overview (bmon-style) ─────────────────────────────────────
+   A whole-router panel above the per-device table. Every colour comes from
+   the --tc-* bridge at the top of this file, so it follows the theme (and
+   Argon's auto dark mode) without a second set of rules down here. */
+.tc-overview {
+	border: 1px solid var(--tc-border);
+	border-radius: 8px;
+	background: var(--tc-bg-alt);
+	padding: 12px;
+	margin: 8px 0;
+}
+
+.tc-ov-tiles {
+	display: flex;
+	flex-wrap: wrap;
+	gap: 18px;
+	margin-bottom: 10px;
+}
+.tc-ov-tile { min-width: 150px; }
+.tc-ov-tile-cap {
+	font-size: 11px;
+	text-transform: uppercase;
+	letter-spacing: .04em;
+	color: var(--tc-muted);
+}
+.tc-ov-tile-val { font-size: 20px; font-weight: 600; line-height: 1.3; }
+.tc-ov-tile-sub { font-size: 11px; }
+
+.tc-ov-graph { margin: 4px 0 12px; }
+.tc-ov-graph svg { max-width: 100%; }
+
+/* Two columns on a desktop, stacked on a phone — the router dashboard is
+   opened from a phone often enough that this must not need a sideways
+   scroll. */
+.tc-ov-cols {
+	display: flex;
+	flex-wrap: wrap;
+	gap: 18px;
+}
+.tc-ov-col { flex: 1 1 280px; min-width: 0; }
+.tc-ov-subtitle {
+	font-size: 11px;
+	text-transform: uppercase;
+	letter-spacing: .04em;
+	color: var(--tc-muted);
+	margin-bottom: 4px;
+}
+
+.tc-ov-row {
+	display: flex;
+	align-items: center;
+	gap: 8px;
+	padding: 3px 0;
+	border-bottom: 1px solid var(--tc-border);
+	font-size: 12px;
+}
+.tc-ov-row:last-child { border-bottom: none; }
+/* A down interface keeps its counters — they are history, not live traffic —
+   so it is dimmed rather than hidden. */
+.tc-ov-row--down { opacity: .55; }
+
+.tc-ov-badge {
+	font-size: 10px;
+	font-weight: 600;
+	padding: 1px 5px;
+	border-radius: 4px;
+	color: var(--tc-on-accent);
+	flex: 0 0 auto;
+	min-width: 34px;
+	text-align: center;
+}
+.tc-ov-badge--wan   { background: var(--tc-speed); }
+.tc-ov-badge--vpn   { background: var(--tc-warn); }
+.tc-ov-badge--lan   { background: var(--tc-ok); }
+.tc-ov-badge--other { background: var(--tc-muted); }
+
+.tc-ov-ifname {
+	display: flex;
+	align-items: baseline;
+	gap: 5px;
+	flex: 1 1 auto;
+	min-width: 0;
+	overflow: hidden;
+	white-space: nowrap;
+	text-overflow: ellipsis;
+}
+.tc-ov-ifdev { font-size: 10px; }
+.tc-ov-defroute { font-size: 11px; color: var(--tc-speed); cursor: help; }
+
+.tc-ov-spark { flex: 0 0 auto; width: 74px; }
+.tc-ov-rate  { flex: 0 0 auto; width: 92px; text-align: right; font-size: 11px; cursor: help; }
+.tc-ov-total { flex: 0 0 auto; width: 132px; text-align: right; font-size: 11px; cursor: help; }
+
+.tc-ov-more {
+	font-size: 11px;
+	color: var(--tc-muted);
+	cursor: pointer;
+	padding: 4px 0 0;
+}
+.tc-ov-more:hover { color: var(--tc-speed); }
+.tc-ov-note { font-size: 10px; margin-top: 6px; line-height: 1.4; }
+.tc-ov-empty { font-size: 12px; padding: 8px 0; }
+
+/* Top talkers — a bar per device, scaled to the busiest one, so the shape of
+   "one device is saturating the line" is visible without reading numbers. */
+.tc-ov-talkers { display: flex; flex-direction: column; gap: 6px; }
+.tc-ov-talker-head {
+	display: flex;
+	justify-content: space-between;
+	align-items: baseline;
+	gap: 8px;
+	font-size: 12px;
+}
+.tc-ov-talker-name {
+	overflow: hidden;
+	white-space: nowrap;
+	text-overflow: ellipsis;
+	min-width: 0;
+}
+.tc-ov-talker-rate { font-size: 11px; white-space: nowrap; flex: 0 0 auto; }
+.tc-ov-talker-up { margin-left: 8px; }
+.tc-ov-bar {
+	height: 5px;
+	border-radius: 3px;
+	background: var(--tc-border);
+	overflow: hidden;
+	margin-top: 2px;
+}
+.tc-ov-bar-fill { height: 100%; background: var(--tc-speed); }
+
+@media (max-width: 560px) {
+	.tc-ov-total { display: none; }
+	.tc-ov-rate  { width: 78px; }
 }

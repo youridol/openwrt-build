@@ -16,7 +16,10 @@
 |---|---|---|
 | `.github/workflows/build-openwrt.yml` | 主编译流水线（拉 lede → 装包 → 编译 → 传产物） | 本项目自有 |
 | `.github/workflows/release.yml` | 推 `v*` tag 时建 Release，notes 自动取自 `CHANGELOG.md` | 本项目自有 |
-| `package/luci-app-trafficctl/` | **本地包**（源自 `YusDyr/luci-app-trafficctl` v1.8.0），整包 vendored 进仓库 | 直接改本仓库副本 |
+| `package/luci-app-trafficctl/` | **本地包**（源自 `YusDyr/luci-app-trafficctl` **v1.21.4**），整包 vendored 进仓库；改动以 `patches/luci-app-trafficctl/*.patch` 记录 | 直接改本仓库副本，改完跑 `tools/regen-trafficctl-patches.py` |
+| `patches/luci-app-trafficctl/*.patch` | trafficctl 相对上游的差分记录（**不参与构建**，供跟进上游 + CI 一致性校验） | 由 `tools/regen-trafficctl-patches.py` 生成，勿手改 |
+| `tools/sync-trafficctl.sh` | 升级 trafficctl 到指定上游 tag（覆盖包目录 + 重算 patch + 回放校验） | 直接用 |
+| `tools/check-trafficctl-i18n.py` | 校验中文翻译覆盖率；`--write-pot` 重生成 pot 模板 | 直接用 |
 | `patches/luci-app-dnsproxy/*.patch` | 上游 `adm1n5ky/luci-app-dnsproxy` 的**改动以 patch 形式**维护 | **禁止**改上游；只改 patch |
 | `files/` | rootfs overlay（`files/etc/...` 合并进固件），**不是**上游源码 | 直接改 |
 | `CHANGELOG.md` | 变更的唯一权威记录；版本判型 PATCH/MINOR/MAJOR | 每次功能改动必须追加 |
@@ -76,6 +79,23 @@
    正确做法是把 `delete table` + 重建写在**同一个 `nft -f` 文件**里，
    并在提交前先 `nft -c -f` 只校验。
 
+9. **`package/luci-app-trafficctl/` 是 vendored 副本，改它必须同步 patch。**
+   这项包**不靠 patch 构建**（CI 直接 `cp -r` 整个目录），但它的改动必须固化：
+   - 改完 `package/` 下的任何文件后，**必须**跑
+     `python3 tools/regen-trafficctl-patches.py <上游包目录>` 重算 patch，
+     否则 CI 的 `Verify luci-app-trafficctl local invariants` 会因
+     「patch 重放结果 ≠ vendored 包」而 `exit 1`。
+   - 升级上游用 `sh tools/sync-trafficctl.sh <tag>`（会覆盖包目录并重算 patch）。
+   - **三项本地改动必须保留**（被覆盖会静默失效，界面不报错、构建也成功）：
+     1. `root/usr/local/bin/trafficctl-bytes-nft.sh` 的重写 —— 上游至今用本内核
+        不支持的 `flags dynamic` map + `update @bytes_in`，且只挂 forward 单钩子；
+        丢掉它 → **速率列恒为 `—`**。详见红线 7/8 与第 4 节。
+     2. `status.js`/`status.css`/`config`/`rpcd` 的刷新与 tab 改动 ——
+        丢掉它 → **冷启动不再自动刷新**、Telegram 变回超长折叠小节。
+     3. `po/zh-cn/luci-app-trafficctl.po` —— 丢掉它 → **中文界面变英文**。
+   新增/修改该包的中文字符串后，跑 `python3 tools/check-trafficctl-i18n.py`
+     （缺失会失败；用 `--write-pot` 同步模板）。
+
 ---
 
 ## 3. 构建链路关键点（改 CI 前必读）
@@ -94,6 +114,9 @@
 - 启用的关键 CONFIG：`luci-app-ssr-plus`（含 Iptables 透明代理、Xray、ChinaDNS-NG、MosDNS 等）、
   `luci-app-trafficctl` + `luci-i18n-...-zh-cn`、`dnsproxy` + `luci-app-dnsproxy` + CA 证书、
   `kmod-tcp-bbr`、`iptables-mod-fullconenat`。
+- **trafficctl 1.21.4 的额外依赖**：`iw`（读 WiFi 频段/信号）、`hostapd-utils`
+  （`hostapd_cli` 把 MAC 拒绝列表立即应用到运行中的射频；缺它时界面提示
+  「WiFi 阻断未生效」）、`conntrack`。CI 已显式 `=y` 并断言。
 
 ---
 
@@ -200,6 +223,8 @@ dnsmasq 把哪些域名指向 mosdns:5335**。当前仓库值 **`'1'`**（v0.4.0
 1. **先读** `CHANGELOG.md` 尾部与相关 `files/`、`patches/` 的注释——大量约束写在注释里。
 2. 判断改动归属：
    - dnsproxy 的 LuCI 改动 → 新增 `patches/luci-app-dnsproxy/000N-*.patch`（单一职责、递增编号）。
+   - trafficctl 的改动 → **直接改** `package/luci-app-trafficctl/`（vendored 整包），
+     改完**必须**跑 `python3 tools/regen-trafficctl-patches.py <上游包目录>`（见红线 9）。
    - 固件运行时配置 → 改 `files/` overlay；**首次开机默认值**改 `files/etc/uci-defaults/99-gaming-optimize`。
    - 编译流程/依赖 → 改 `.github/workflows/build-openwrt.yml`。
 3. 本地**无法**完整编译（需 lede 全量环境）；至少做静态检查：
@@ -251,11 +276,24 @@ dnsmasq 把哪些域名指向 mosdns:5335**。当前仓库值 **`'1'`**（v0.4.0
   `dnsmasq` 的 `log-facility=/dev/null` 三者都需先定位生成路径再决定用 overlay
   还是 UCI，否则会被 `ssrplusupdate.sh`（每日 02:00）或服务重启覆盖。
   **这是当前最优先的后续项。**
-- **[风险] `package/luci-app-trafficctl` 为 vendored 副本**（v1.8.0）：
-  上游更新不会自动进入本仓库，需手动同步；改本地副本不会回流上游。
-  **本仓库已对副本做本地改动**（v0.4.5）：重写 `root/usr/local/bin/trafficctl-bytes-nft.sh`
-  （见红线 7/8）、新增设备表「上行速率」列、设置区改卡片网格。
-  日后同步上游时**必须保留**这些改动，否则速率监控会再次失效。
+- **[已解决] `package/luci-app-trafficctl` 的 vendored 副本维护**（v0.4.7，升级到 1.21.4）：
+  改为「**vendored 包 + patch 差分 + 同步脚本 + CI 断言**」四件套，不再依赖人工记忆。
+  - `patches/luci-app-trafficctl/` 记录相对上游的全部差分，`UPSTREAM` 记录基线 tag。
+  - 改功能就改 `package/` 下的文件，改完跑
+    `python3 tools/regen-trafficctl-patches.py <上游包目录>` 让 patch 跟上；
+    升级上游跑 `sh tools/sync-trafficctl.sh <tag>`。
+  - CI 步骤 `Verify luci-app-trafficctl local invariants` 会从 `UPSTREAM` 记录的 tag
+    **真实克隆上游、重放全部 patch、要求与 vendored 包逐字节一致**，
+    并断言本地三项改动仍在（nft 后端语法/三钩子/`@lan`、`optRefresh` 与 `1s` 档位、
+    设置区 tab、中文翻译完整性）。
+  **必须保留的本地改动**（被覆盖会静默失效，不会报错）：
+  1. 重写 `root/usr/local/bin/trafficctl-bytes-nft.sh` —— 上游**至今未修**，
+     仍用本内核不支持的 `flags dynamic` map + `update @bytes_in` 且只挂 forward 单钩子
+     （见红线 7/8 与第 4 节的「代理流量走 INPUT/OUTPUT」）。丢掉它 → **速率列恒为 `—`**。
+  2. `status.js` / `status.css` / `config` / `rpcd` 的刷新改动 —— 默认 5 秒自动刷新、
+     1s/2s 档位、`refresh_interval` 端到端接线、设置区 tab 分页。
+     丢掉它 → **冷启动不再自动刷新**、Telegram 又变回超长折叠小节。
+  3. `po/zh-cn/luci-app-trafficctl.po` —— 丢掉它 → **中文界面变英文**。
 - **[已修复] trafficctl 速率恒为 `—`**（v0.4.5）：原 `trafficctl-bytes-nft.sh` 用了
   本内核不支持的 nftables 语法且错误被 `2>/dev/null` 吞掉，只剩空链；
   且只挂 forward 链、看不到 REDIRECT 后的代理流量。

@@ -1,0 +1,219 @@
+diff --git a/root/usr/local/bin/trafficctl-bytes-nft.sh b/root/usr/local/bin/trafficctl-bytes-nft.sh
+index 3e7f0f3..4aaa86f 100755
+--- a/root/usr/local/bin/trafficctl-bytes-nft.sh
++++ b/root/usr/local/bin/trafficctl-bytes-nft.sh
+@@ -1,7 +1,6 @@
+ #!/bin/sh
+ # shellcheck shell=dash
+-# Per-device byte counters using nftables maps.
+-# Works with software flow offload (hook priority -200, before flowtable at -150).
++# Per-device byte counters using nftables sets with per-element counters.
+ # Output: JSON array
+ #   [{"ip":"…","bytes_in":N,"bytes_out":N,"bytes_tcp":-1,"bytes_udp":-1,
+ #     "src":"nft","degraded":false}]
+@@ -19,64 +18,162 @@
+ # The protocol split is -1, i.e. "unknown", not 0: a `type ipv4_addr : counter`
+ # map is keyed by address alone, so there is nothing here to split TCP from UDP
+ # with. Reporting 0 would render as a device that sent no TCP at all.
++#
++# ═══════════════════════════════════════════════════════════════════════════
++# 本仓库补丁（相对上游 1.21.4）—— 三处修正，见 patches/luci-app-trafficctl/
++# ═══════════════════════════════════════════════════════════════════════════
++#
++# 【补丁 1 — 语法在内核 6.18.55 上不被支持，必须换用 set + add】
++#   上游用的是：
++#     nft add map ... '{ type ipv4_addr : counter; flags dynamic; }'
++#       -> Error: Could not process rule: Not supported
++#     nft add rule ... 'update @bytes_in { ip daddr counter }'
++#       -> Error: Could not process rule: Not supported
++#   实测内核 6.18.55 / nftables 1.1.6 均报 Not supported。上游虽有
++#   `TCTL_FORCE_CONNTRACK` 降级（比静默返回 [] 好），但降级到 conntrack
++#   后**看不到被 REDIRECT 到本机的代理流量**（见补丁 2），速率仍然不准。
++#   本内核**可用**的等价语法：
++#     nft add set  ... '{ type ipv4_addr; size 65535; flags dynamic; }'
++#     nft add rule ... 'add @set { ip saddr counter }'
++#
++# 【补丁 2 — 必须同时挂 forward / input / output 三个钩子】
++#   只挂 forward **看不到代理流量**：SSR-Plus 用 REDIRECT 把客户端连接引到
++#   路由器本机的 v2ray(:1234)，REDIRECT 改写目的地址为本机，数据包因此走
++#   INPUT/OUTPUT，不经 forward。实测对照（客户端下载 150 MB）：
++#     output daddr=客户端 -> 157548502 B（完整捕获）
++#     input  saddr=客户端 ->   1360391 B（客户端小请求）
++#     forward saddr=客户端 ->      5932 B（几乎为零）
++#   故三钩子并用；三者对同一数据包互斥，不会重复计数：
++#     下行(→设备) = forward daddr=设备 + output  daddr=设备
++#     上行(设备→) = forward saddr=设备 + input   saddr=设备
++#
++# 【补丁 3 — 用 @lan 集合限定地址归属，避免集合被非 LAN 地址污染】
++#   output 钩子会看到路由器自身对 WAN 的连接（旁路由场景尤甚）。实测若只用
++#   `oifname br-lan` 限定，仍会写入 1.2.4.8、10.x、14.x 等公网/异网地址，
++#   把集合填满并让前端出现无关行。必须同时限定地址属于 LAN 网段。
++#   @lan 由 tctl_lan_subnets 动态生成（支持多网桥/多 VLAN），不硬编码。
++#
++# 【补丁 4 — 单事务原子重建，消除竞态导致的重复计数】
++#   上游的 gate 是「链里是否存在某条规则」，然后逐条 `nft add`。前端每 2 秒
++#   轮询与手工调用并发时会**同时通过检查各建一套规则**，规则重复 → 同一数据
++#   包被累加两次 → 速率翻倍（实证：180 MB 下载被记成 380 MB）。
++#   本版把 `delete table` + 重建写在**同一个 nft -f 文件**里（原子提交），
++#   并在提交前 `nft -c -f` 只校验，避免写坏运行中的防火墙。
++#
++# 【补丁 5 — 结构自检后才重建，避免每次轮询清零计数】
++#   单纯按「集合是否存在」为判据会让升级路径漏掉方向反转的旧规则；
++#   单纯按规则内容为判据又会在规则被外部清掉时永久失修。本版同时检查
++#   集合存在 + 各链规则条数（forward 2 / input 1 / output 1），任一不符才重建。
++# ═══════════════════════════════════════════════════════════════════════════
+ 
+ . /usr/local/bin/trafficctl-fw.sh
+ 
+ command -v nft >/dev/null 2>&1 || { echo '[]'; exit 0; }
+ 
+-# Create table/maps/chain/rules if not already present (idempotent).
+-#
+-# The gate matches the CURRENT rule orientation, not merely "some rule exists".
+-# Until 1.13.x the maps were keyed the other way round (bytes_in by saddr), so
+-# a router upgrading from that version already has the chain: a looser check
+-# would leave the old, inverted rules in place forever and the fix would only
+-# ever reach fresh installs.
+-#
+-# Direction convention, matching trafficctl-bytes.sh and docs/API.md:
+-#   bytes_in  = traffic toward the device  (download) -> keyed by ip daddr
+-#   bytes_out = traffic from the device    (upload)   -> keyed by ip saddr
+-if ! nft list chain inet trafficctl_mon mon_forward 2>/dev/null | grep -q "bytes_in.*daddr"; then
+-    # Drop the old table wholesale rather than appending to it — leaving the
+-    # previous pair of rules in place would double-count every packet. This
+-    # resets the counters once, on upgrade; they are only used for speed
+-    # deltas, so a single discarded sample is the whole cost.
+-    nft delete table inet trafficctl_mon 2>/dev/null
++T="trafficctl_mon"
++LAN=$(tctl_get_lan_device)
++[ -z "$LAN" ] && LAN="br-lan"
+ 
+-    nft add table inet trafficctl_mon 2>/dev/null
+-    nft add map inet trafficctl_mon bytes_in \
+-        '{ type ipv4_addr : counter; flags dynamic; }' 2>/dev/null
+-    nft add map inet trafficctl_mon bytes_out \
+-        '{ type ipv4_addr : counter; flags dynamic; }' 2>/dev/null
+-    nft add chain inet trafficctl_mon mon_forward \
+-        '{ type filter hook forward priority -200; policy accept; }' 2>/dev/null
+-    nft add rule inet trafficctl_mon mon_forward \
+-        'update @bytes_in { ip daddr counter }' 2>/dev/null
+-    nft add rule inet trafficctl_mon mon_forward \
+-        'update @bytes_out { ip saddr counter }' 2>/dev/null
++# 由 LAN 网段列表构造 nft 集合元素，例如 " 192.168.3.0/24, 192.168.10.0/24"
++# tctl_lan_subnets 输出每行：l3_device netbase block router_int
++LAN_ELEMS=$(tctl_lan_subnets 2>/dev/null | awk '
++{
++    base = $2 + 0; block = $3 + 0
++    if (block <= 0) next
++    n = 0; b = block
++    while (b > 1) { b = int(b / 2); n++ }
++    o1 = int(base / 16777216) % 256
++    o2 = int(base / 65536) % 256
++    o3 = int(base / 256) % 256
++    o4 = base % 256
++    printf "%s%s.%s.%s.%s/%d", (cnt++ ? ", " : ""), o1, o2, o3, o4, (32 - n)
++}')
++
++# 无 LAN 网段时退回上游行为（交由 conntrack 路径），不返回空数组骗人
++[ -z "$LAN_ELEMS" ] && { TCTL_FORCE_CONNTRACK=1 exec /usr/local/bin/trafficctl-bytes.sh; }
++
++# 结构完整性判据：集合存在 + 各链规则条数正确
++need_build=0
++if ! nft list set inet "$T" bytes_in >/dev/null 2>&1; then
++    need_build=1
++elif [ "$(nft list chain inet "$T" mon_forward 2>/dev/null | grep -c 'add @bytes')" -ne 2 ]; then
++    need_build=1
++elif [ "$(nft list chain inet "$T" mon_input 2>/dev/null | grep -c 'add @bytes')" -ne 1 ]; then
++    need_build=1
++elif [ "$(nft list chain inet "$T" mon_output 2>/dev/null | grep -c 'add @bytes')" -ne 1 ]; then
++    need_build=1
+ fi
+ 
+-# Dynamic counter maps are unsupported on some kernels ("Not supported").
+-# Without this check the maps silently never exist, every rule fails, and the
+-# script returns [] forever — per-device speed just stops working.
+-if ! nft list map inet trafficctl_mon bytes_in >/dev/null 2>&1; then
++if [ "$need_build" = "1" ]; then
++    NFT_SNIPPET="/tmp/.trafficctl-mon.nft"
++    # 整个 ruleset 在一个事务内提交（delete + 重建），保证原子且结构唯一
++    cat > "$NFT_SNIPPET" <<EOF
++table inet $T
++delete table inet $T
++table inet $T {
++	set lan {
++		type ipv4_addr
++		flags interval
++		auto-merge
++		elements = { $LAN_ELEMS }
++	}
++	set bytes_in {
++		type ipv4_addr
++		size 65535
++		flags dynamic
++	}
++	set bytes_out {
++		type ipv4_addr
++		size 65535
++		flags dynamic
++	}
++	chain mon_forward {
++		type filter hook forward priority -200; policy accept;
++		iifname "$LAN" ip daddr @lan add @bytes_in  { ip daddr counter }
++		iifname "$LAN" ip saddr @lan add @bytes_out { ip saddr counter }
++	}
++	chain mon_input {
++		type filter hook input priority -200; policy accept;
++		iifname "$LAN" ip saddr @lan add @bytes_out { ip saddr counter }
++	}
++	chain mon_output {
++		type filter hook output priority -200; policy accept;
++		oifname "$LAN" ip daddr @lan add @bytes_in { ip daddr counter }
++	}
++}
++EOF
++    # 先校验（nft -c 不提交），通过才真正加载
++    if nft -c -f "$NFT_SNIPPET" 2>/dev/null; then
++        nft -f "$NFT_SNIPPET" 2>/dev/null
++    fi
++    rm -f "$NFT_SNIPPET"
++fi
++
++# 动态 counter set 在某些内核上不受支持。若建不起来，退回 conntrack 路径
++# （由它上报 degraded:true），而不是静默返回 [] 让速率永久停在 —
++if ! nft list set inet "$T" bytes_in >/dev/null 2>&1; then
+     TCTL_FORCE_CONNTRACK=1 exec /usr/local/bin/trafficctl-bytes.sh
+ fi
+ 
+-IN=$(nft list map inet trafficctl_mon bytes_in 2>/dev/null)
+-OUT=$(nft list map inet trafficctl_mon bytes_out 2>/dev/null)
++IN=$(nft list set inet "$T" bytes_in 2>/dev/null)
++OUT=$(nft list set inet "$T" bytes_out 2>/dev/null)
+ 
+-# Parse: lines look like "192.168.0.100 : counter packets 584 bytes 892341[,]"
++# 元素形如：`192.168.3.238 counter packets 204 bytes 17949,`
++# 注意 nft list set 的格式与 nft list map 不同（无冒号），且元素会跨行折行，
++# 故按空白切分并跟踪「最近一个 IP」。
+ printf '%s\n__SEP__\n%s\n' "$IN" "$OUT" | awk '
+ /^__SEP__$/ { phase = 1; next }
+-/[0-9]+\.[0-9]+\.[0-9]+\.[0-9]+ : counter/ {
+-    ip = ""; val = 0
++{
++    cur = ""
+     for (i = 1; i <= NF; i++) {
+-        if ($i ~ /^[0-9]+\.[0-9]+\.[0-9]+\.[0-9]+$/) ip = $i
+-        if ($i == "bytes") val = $(i+1) + 0
+-    }
+-    if (ip != "") {
+-        if (phase == 0) in_b[ip]  += val
+-        else            out_b[ip] += val
++        if ($i ~ /^[0-9]+\.[0-9]+\.[0-9]+\.[0-9]+$/) {
++            cur = $i
++        } else if ($i == "bytes" && cur != "") {
++            val = $(i+1) + 0
++            if (phase == 0) in_b[cur]  += val
++            else            out_b[cur] += val
++            cur = ""
++        }
+     }
+ }
+ END {
