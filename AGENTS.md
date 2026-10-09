@@ -55,6 +55,27 @@
 6. **CHANGELOG 是发版依据。** `release.yml` 用 `grep -nF "## [$VER]"` 定位版本段；
    找不到即**中止发版**。改功能却不写 CHANGELOG → tag 发版会失败。
 
+7. **`/etc/nftables.d/*.nft` 里禁止出现 `table` 声明 —— 只能写裸 chain。**
+   fw4 的 ruleset 模板 `/usr/share/firewall4/templates/ruleset.uc` 第 15 行
+   `table inet fw4 {` 开表，第 104 行 `include "/etc/nftables.d/*.nft"` ——
+   **include 在该 table 内部**。写入 `table inet xxx { ... }` 会形成嵌套 table，
+   nft 报 `syntax error, unexpected table`；而 fw4 的加载路径是
+   `print | nft -c -f $STDIN || die "..."`，**校验失败即整个 ruleset 不加载**，
+   input/forward/dstnat/srcnat、DNS 拦截、透明代理全部规则消失 → **断网**。
+
+   v0.4.4 正是栽在这里（MSS clamp 片段写成完整 table，导致国内域名大面积
+   无法解析）。该错误**无法被任何 YAML/shell 语法检查发现**。CI 已有守卫
+   步骤 `Verify no nested-table nft fragments` 会显式断言并 `exit 1`。
+   写片段前先对照既有的正确样例 `files/etc/init.d/dnsproxy`（裸 chain）。
+
+8. **`/etc/nftables.d` 片段的建立必须用单事务 `nft -f`（原子）。**
+   若用「先 `nft list set` 检查、再逐条 `nft add`」的写法，
+   前端轮询（默认 2s）与手工调用并发时会**同时通过检查各建一套规则**，
+   导致规则重复 → 同一数据包被累加两次 → 速率翻倍
+   （实证：trafficctl 里 180 MB 下载被记成 380 MB）。
+   正确做法是把 `delete table` + 重建写在**同一个 `nft -f` 文件**里，
+   并在提交前先 `nft -c -f` 只校验。
+
 ---
 
 ## 3. 构建链路关键点（改 CI 前必读）
@@ -92,13 +113,35 @@ LAN 客户端
 **分流是分裂的**：只有 `gfw_list.conf` 与 `black.list` 里的域名走 mosdns，
 其余（含大多数境外域名）走 dnsproxy 的国内 DoH。这一点是理解 §5 的前提。
 
-- **SSR-Plus 透明代理只代理 IPv4。** `iptables -t nat` 有 `REDIRECT --to-ports 1234`；
-  **`ip6tables` 中只有 DNS 重定向，没有任何 TPROXY/REDIRECT** —— 国外 IPv6 是**直连**。
+- **SSR-Plus 透明代理只代理 IPv4。** 在 fw4/nftables 固件上体现为
+  `table inet ss_spec` 的 `redirect to :1234`（**不是** iptables 的
+  `REDIRECT --to-ports 1234` —— v0.4.x 起已全面切到 fw4，见下方「fw4 现状」）；
+  **IPv6 侧只有 DNS 重定向，没有任何 TPROXY/REDIRECT** —— 国外 IPv6 是**直连**。
+- **代理流量走 INPUT/OUTPUT，不经 forward。** REDIRECT 把目的地址改写为本机，
+  故客户端流量「上升」为本机 INPUT、「下降」为本机 OUTPUT。
+  任何「统计每设备流量」的实现挂在 forward 链上都会**几乎看不到流量**
+  （实测客户端下载 150 MB，forward 仅 5932 B，output 为 157548502 B）。
 - 进程：`v2ray`（dokodemo-door, port 1234, retcp 模式）、`mosdns`(:5335)、
   `dnsproxy`(127.0.0.1:5353)、`dnsmasq`(:53)、`ssr-switch`。
 - SSR-Plus 强制代理：`/etc/ssrplus/black.list` → dnsmasq `ipset=/<域名>/blacklist`
   → 解析结果自动入 `blacklist` ipset → `SS_SPEC_WAN_AC` 命中即 REDIRECT 到 1234。
 - 访问控制 `lan_ac_mode='0'` + `SS_SPEC_WAN_FW` 末尾兜底 → **所有非国内 IPv4 流量走代理**。
+
+### fw4 现状（2026-10-10 核查，结论：已全面切换）
+
+| 判据 | 实测 |
+|---|---|
+| 主 ruleset | `table inet fw4` 在跑，34 条 chain |
+| DNS 拦截 | nftables：`chain dns_intercept_lan`（`iifname br-lan … redirect`） |
+| 透明代理 | nftables：`table inet ss_spec` / `table ip ss_spec_mangle` |
+| fullcone | nftables：`nft_fullcone` 模块 + `meta nfproto ipv4 fullcone` |
+| `/etc/firewall.user` | include 计数 = **0**（死代码，fw4 不加载） |
+| `iptables` 各表 | 仅剩 `-P` 默认策略行，**无任何规则** |
+| `ip_tables` 内核模块 | **未加载** |
+
+残留的 `iptables`/`ip6tables` 二进制与 `kmod-ipt-*` 是 SSR-Plus 等包的依赖项，
+属正常共存，**不表示仍在用 fw3**。判定「是否还在用 fw3」应看
+**规则实际落在哪个后端**，而不是看二进制是否存在。
 
 ---
 
@@ -135,7 +178,7 @@ dnsmasq 把哪些域名指向 mosdns:5335**。当前仓库值 **`'1'`**（v0.4.0
 | 路由器 | OpenWrt 24.10.5 x86/64（SSH: `root@192.168.3.254`） |
 | 本机 | Windows，`192.168.3.238`，网关/DNS = `192.168.3.254` |
 | 双栈 | 本机持有运营商公网 IPv6 `240e:355:7f2b:8900::/64`（**原生可用**） |
-| 路由器 SSH | dropbear，老 KEX；Windows 自带 `ssh.exe` 无密钥会 `Permission denied`。**可用通道**：`Y:\openwrt\rt.ps1` 内的 `plink.exe`（PuTTY，固定 hostkey `SHA256:0rLDon8UFR9NpWfDbLO75PhFq38LrCEOHipFeYAoNN0`，端口 22）。`rsh.py` 当前不在磁盘上（见附录）。 |
+| 路由器 SSH | dropbear，老 KEX；Windows 自带 `ssh.exe` 无密钥会 `Permission denied`。**可用通道**：`plink.exe`（PuTTY，端口 22）+ `-pw password`。**hostkey 每次刷机都会变**（已观测 `0rLD…` → `riiL…` → `Z+v8…` → `B1pg…`），故不要照抄旧值：先用 `plink -batch`（不带 `-hostkey`）试探，它会把当前指纹打印出来，再拿该指纹重试。传文件用 `pscp -scp`（**不能**用默认 SFTP：固件无 `sftp-server`）；`-hostkey` 值含 `+`/`/`，**必须加引号**，否则被 shell 误解析。`rsh.py` 当前不在磁盘上（见附录）。 |
 
 **验证纪律**（本项目历史上多次因「只看进程在跑」而误判）：
 
@@ -210,6 +253,13 @@ dnsmasq 把哪些域名指向 mosdns:5335**。当前仓库值 **`'1'`**（v0.4.0
   **这是当前最优先的后续项。**
 - **[风险] `package/luci-app-trafficctl` 为 vendored 副本**（v1.8.0）：
   上游更新不会自动进入本仓库，需手动同步；改本地副本不会回流上游。
+  **本仓库已对副本做本地改动**（v0.4.5）：重写 `root/usr/local/bin/trafficctl-bytes-nft.sh`
+  （见红线 7/8）、新增设备表「上行速率」列、设置区改卡片网格。
+  日后同步上游时**必须保留**这些改动，否则速率监控会再次失效。
+- **[已修复] trafficctl 速率恒为 `—`**（v0.4.5）：原 `trafficctl-bytes-nft.sh` 用了
+  本内核不支持的 nftables 语法且错误被 `2>/dev/null` 吞掉，只剩空链；
+  且只挂 forward 链、看不到 REDIRECT 后的代理流量。
+  详见 CHANGELOG v0.4.5 与红线 7/8。
 - **[风险] 上行吞吐无法测量**：本机无可用上传端点（公共镜像 PUT 返回 405，
   且未安装测速工具）。SQM 的上行效果目前只能通过「上行饱和时 ping 抬升」间接验证。
 - **[风险] NAT1（fullcone）与软件 flow offloading 的交互无一手来源**：本机实测二者

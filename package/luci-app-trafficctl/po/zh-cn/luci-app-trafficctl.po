@@ -97,8 +97,8 @@ msgstr "聊天ID"
 msgid "Chat ID:"
 msgstr "聊天ID："
 
-msgid "Click a row to inspect that device. Download speed updates every 2 seconds."
-msgstr "点击行查看设备详情。下载速率每2秒更新。"
+msgid "Click a row to inspect that device. Download and upload speeds update every 2 seconds."
+msgstr "点击行以查看该设备。下载与上传速率每 2 秒更新一次。"
 
 msgid "Click header to sort."
 msgstr "点击表头排序。"
@@ -108,6 +108,9 @@ msgstr "点击查看"
 
 msgid "Click to toggle column visibility"
 msgstr "点击切换列可见性"
+
+msgid "changes are saved automatically"
+msgstr "更改会自动保存"
 
 msgid "Config"
 msgstr "配置"
@@ -126,6 +129,9 @@ msgstr "控制"
 
 msgid "Current download speed (bytes/sec from router to device)"
 msgstr "当前下载速率（路由器到设备字节/秒）"
+
+msgid "Current upload speed (bytes/sec from device to router)"
+msgstr "当前上传速率（设备到路由器字节/秒）"
 
 msgid "Current mode: "
 msgstr "当前模式："
@@ -567,6 +573,9 @@ msgstr "流量整形和阻断不受影响。"
 
 msgid "UDP bytes transferred"
 msgstr "UDP传输字节"
+
+msgid "UL Speed"
+msgstr "上行速率"
 
 msgid "Unblock Internet"
 msgstr "解除互联网阻断"

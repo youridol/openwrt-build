@@ -375,6 +375,56 @@ jobs:
           echo "OK   DNS_MODE / DNS_PORT 占位符存在"
           echo "mosdns 模板契约校验通过。"
 
+      - name: Verify no nested-table nft fragments (fw4 include contract)
+        working-directory: lede
+        run: |
+          # ── 硬约束：/etc/nftables.d/*.nft 里**不得出现 table 声明** ──────────
+          #
+          # 背景（v0.4.4 的真实故障，已造成国内域名大面积无法解析与联网）：
+          #   firewall4 的 ruleset 模板 /usr/share/firewall4/templates/ruleset.uc
+          #   第 15 行 `table inet fw4 {` 开表，第 104 行
+          #     include "/etc/nftables.d/*.nft"
+          #   —— include 在**该 table 内部**。因此该目录下的文件只能是**裸 chain**。
+          #   若写入 `table inet xxx { ... }`，会被嵌进 `table inet fw4` 内部形成
+          #   **嵌套 table**，nft 报 `syntax error, unexpected table`。
+          #   而 fw4 的加载路径是
+          #     print | nft -c -f $STDIN || die "The rendered ruleset contains errors"
+          #   —— 校验失败则**整个 ruleset 不加载**，input/forward/dstnat/srcnat、
+          #   DNS 拦截、透明代理全部规则消失 → 断网。
+          #
+          # 该错误无法被任何 YAML/shell 语法检查发现，故在此显式断言。
+          fail=0
+          # 1) 仓库内直接存放的该目录片段文件
+          if [ -d files/etc/nftables.d ]; then
+            for f in files/etc/nftables.d/*.nft; do
+              [ -f "$f" ] || continue
+              if grep -qE '^[[:space:]]*table[[:space:]]' "$f"; then
+                echo "FAIL $f 含 table 声明 —— 它会被 include 进 table inet fw4 内部，"
+                echo "     形成嵌套 table 导致 fw4 整个 ruleset 加载失败（v0.4.4 故障根因）。"
+                grep -nE '^[[:space:]]*table[[:space:]]' "$f" | head -3
+                fail=1
+              fi
+            done
+          fi
+          # 2) 生成该目录片段的脚本（如 uci-defaults / init 脚本）里的 table 声明。
+          #    只检查确实提到 nftables.d 的文件，避免误报 fw4 自身的 table 用法。
+          for f in $(grep -rl 'nftables\.d' files/ 2>/dev/null); do
+            [ -f "$f" ] || continue
+            case "$f" in *.md) continue ;; esac
+            if grep -qE '^[[:space:]]*table[[:space:]]' "$f"; then
+              echo "FAIL $f 提到 /etc/nftables.d 且含 table 声明；"
+              echo "     写入该目录的片段会被 include 进 table inet fw4 内部 → 嵌套 table → 断网。"
+              grep -nE '^[[:space:]]*table[[:space:]]' "$f" | head -3
+              fail=1
+            fi
+          done
+          if [ "$fail" = "1" ]; then
+            echo "!!! nftables 片段契约校验失败，构建中止。"
+            exit 1
+          fi
+          echo "OK   /etc/nftables.d 片段均为裸 chain（无 table 声明）"
+          echo "nftables 片段契约校验通过。"
+
       - name: Verify SSR-Plus uci-defaults ordering contract
         working-directory: lede
         run: |

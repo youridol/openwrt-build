@@ -78,54 +78,41 @@ uci set firewall.@rule[-1].target='ACCEPT'
 
 log "firewall: flow_offloading fullcone drop_invalid mtu_fix icmpv6"
 
-# IPv6 TCP MSS clamping for PPPoE MTU 1492
-# 防止 IPv6 大包超过 PPPoE 有效 MTU 导致丢包
+# ─────────────────────────────────────────────
+# IPv6 TCP MSS clamping：**已移除**（2026-10-10）
+# ─────────────────────────────────────────────
+# 历史上这里向 /etc/firewall.user 追加 ip6tables 规则（fw3 时代），后来改为写
+# /etc/nftables.d/10-mss-clamp.nft（fw4 时代）。**两个版本都已删除**，原因：
 #
-# 【2026-10-09 修正 — 双后端】
-#   本固件内核升到 6.18.55 后，防火墙后端由 fw3(iptables) 变为 fw4(nftables)：
-#   `iptables -V` 仍是 legacy、`nft` 存在、`table inet fw4` 在跑。
-#   fw4 **不加载** /etc/firewall.user（`uci show firewall` 中无该 include），
-#   故原先写入 firewall.user 的 ip6tables 行在 fw4 上是**死代码**。
+# 1) 功能本就冗余。上面第 25 行的 `firewall.@zone[0].mtu_fix='1'`（配合 wan zone
+#    默认的 mtu_fix=1）会让 fw4 原生生成 4 条 MSS clamp 规则 ——
+#    实测 `nft list table inet fw4` 中：
+#       oifname "br-lan"    ... maxseg size set rt mtu  (!fw4: Zone lan egress)
+#       oifname "pppoe-wan" ... maxseg size set rt mtu  (!fw4: Zone wan egress)
+#       iifname "br-lan"    ... maxseg size set rt mtu  (!fw4: Zone lan ingress)
+#       iifname "pppoe-wan" ... maxseg size set rt mtu  (!fw4: Zone wan ingress)
+#    它们用 `rt mtu`，在 PPPoE（1492）场景下与显式 clamp 等价，且同时覆盖
+#    IPv4 与 IPv6。删掉本段不损失任何功能。
+# 2) fw3 路径是死代码。fw4 **不加载** /etc/firewall.user
+#    （`uci show firewall` 中 firewall.user include 计数 = 0），
+#    故那段 ip6tables 规则从未生效。
+# 3) fw4 路径曾造成**严重故障**。要点在于 include 的语义：
+#      /usr/share/firewall4/templates/ruleset.uc 第 15 行 `table inet fw4 {` 开表，
+#      第 104 行 `include "/etc/nftables.d/*.nft"` —— include 在**该 table 内部**。
+#    所以 /etc/nftables.d/ 下的文件只能是**裸 chain**；写成
+#      `table inet mssclamp { chain ... }`
+#    会形成嵌套 table → nft 语法错误。而 fw4 的加载路径是
+#      `print | nft -c -f $STDIN || die "The rendered ruleset contains errors"`
+#    —— 校验失败则**整个 ruleset 不加载**，input/forward/dstnat/srcnat、DNS 拦截、
+#    透明代理全部规则消失，表现为国内域名大面积无法解析与联网。
+#    已在路由器上复现：含该文件时 `fw4 check` 报
+#      `Error: syntax error, unexpected table`
+#    改为裸 chain 后恢复 `Ruleset passes nftables check.`。
+#    同目录既有文件 10-dnsproxy-lan-intercept.nft 用的是正确的裸 chain 写法。
 #
-#   功能本身并未缺失：fw4 的 `mtu_fix=1`（本脚本第 25 行设置）会为 lan/wan
-#   两族各生成 ingress/egress 共 4 条 `maxseg size set rt mtu` 规则，已覆盖
-#   IPv4 与 IPv6。但该 Pmtu 依赖 `rt mtu`（路由 MTU），在 PPPoE 1492 场景下
-#   与显式 clamp 等价，故保留显式规则作为冗余，并按后端分派：
-#     · fw4(nftables): 写 /etc/nftables.d/10-mss-clamp.nft（fw4 自动 include）
-#     · fw3(iptables): 写 /etc/firewall.user（fw3 reload 自动重放）
-#   与 files/etc/init.d/dnsproxy 采用的双后端策略保持一致。
-#
-# 幂等：两条路径各自按标记判重，重复执行不会累积规则。
-NFT_MSS="/etc/nftables.d/10-mss-clamp.nft"
-FW_USER="/etc/firewall.user"
-MSS_MARK="MSS clamping (PPPoE MTU 1492)"
-
-if command -v nft >/dev/null 2>&1 && [ -x /sbin/fw4 ]; then
-	# ---- fw4 / nftables 后端 ----
-	mkdir -p /etc/nftables.d
-	cat > "$NFT_MSS" << 'NFTEOF'
-## MSS clamping (PPPoE MTU 1492) — 由 99-gaming-optimize 生成，请勿手工编辑。
-## fw4 自动 include /etc/nftables.d/*.nft，reload 时整表重建（幂等）。
-table inet mssclamp {
-	chain mssclamp_forward {
-		type filter hook forward priority mangle; policy accept;
-		oifname "pppoe-wan" tcp flags & (syn | rst) == syn tcp option maxseg size set rt mtu
-	}
-}
-NFTEOF
-	log "firewall: IPv6 MSS clamp written to $NFT_MSS (fw4/nftables)"
-else
-	# ---- fw3 / iptables 后端 ----
-	if ! grep -q "$MSS_MARK" "$FW_USER" 2>/dev/null; then
-		cat >> "$FW_USER" << 'FWEOF'
-# IPv6 TCP MSS clamping (PPPoE MTU 1492)
-ip6tables -t mangle -A FORWARD -p tcp --tcp-flags SYN,RST SYN -o pppoe-wan -j TCPMSS --clamp-mss-to-pmtu
-FWEOF
-		log "firewall: ip6tables MSS clamp for PPPoE (added, fw3/iptables)"
-	else
-		log "firewall: ip6tables MSS clamp already present, skip"
-	fi
-fi
+# 结论：既然功能冗余、fw3 路径无效、fw4 路径有风险，直接删除是最优解。
+# 若日后确需显式 clamp，必须写成**裸 chain**，并在写入后调用
+# `fw4 check` 自检（失败即删除该文件），切勿再写 table 声明。
 
 # ─────────────────────────────────────────────
 # 2. IPv6 双栈: DHCPv6-PD over PPPoE

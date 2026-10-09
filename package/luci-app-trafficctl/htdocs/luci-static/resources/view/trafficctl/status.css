@@ -73,6 +73,8 @@
 /* ── Speed indicator in table ────────────────────────────────────── */
 .tc-speed-active { color: var(--tc-speed); font-weight: 600; }
 .tc-speed-idle   { color: var(--tc-faint); }
+/* 上行速率：复用弹窗图表中上行曲线所用的 --tc-ok，保持色义一致 */
+.tc-upspeed-active { color: var(--tc-ok); font-weight: 600; }
 
 /* ── Inline badge (block/limit/shape status in cell) ─────────────── */
 .tc-badge {
@@ -221,26 +223,87 @@
 .tc-col-chip--on  { background: var(--tc-speed); color: #fff; border: 1px solid var(--tc-speed); }
 .tc-col-chip--off { background: var(--tc-bg); color: var(--tc-muted); border: 1px solid var(--tc-border); }
 
-/* ── Settings panel (collapsible) ────────────────────────────────── */
+/* ── Settings panel ──────────────────────────────────────────────────
+   2026-10-10 改版：设置区**默认展开、不再整体收起**。
+   旧版把整个设置区包在可折叠容器里（初始隐藏），用户看不到任何设置项。
+   新版结构：
+     .tc-settings-panel  → 常显标题栏 .tc-settings-head
+                         → 内容 .tc-settings-body（始终可见）
+                         → 卡片网格 .tc-settings-grid（自适应列数）
+                         → 卡片 .tc-card（标题 .tc-collapsible-head + 内容）
+   只有**单个卡片内部**可折收，标题恒常显，故「一眼可见有哪些设置」。
+   ─────────────────────────────────────────────────────────────────── */
 .tc-settings-panel {
-    border-radius: 4px;
-    margin-bottom: 10px;
+    border-radius: 6px;
+    margin-bottom: 12px;
     background: var(--tc-bg-alt);
     border: 1px solid var(--tc-border);
+    overflow: hidden;
 }
-.tc-settings-toggle {
-    padding: 8px 14px;
-    cursor: pointer;
-    user-select: none;
+.tc-settings-head {
+    display: flex;
+    align-items: baseline;
+    gap: 10px;
+    padding: 10px 14px;
+    border-bottom: 1px solid var(--tc-border);
+    background: var(--tc-bg);
+}
+.tc-settings-title {
+    font-size: 13px;
+    font-weight: 700;
+    color: var(--tc-text, inherit);
+    letter-spacing: .2px;
+}
+.tc-settings-hint {
+    font-size: 11px;
+    color: var(--tc-faint, var(--tc-muted));
+}
+.tc-settings-body {
+    padding: 12px 14px 14px;
+}
+/* 卡片网格：窄屏单列，宽屏自动多列 */
+.tc-settings-grid {
+    display: grid;
+    grid-template-columns: repeat(auto-fit, minmax(320px, 1fr));
+    gap: 10px;
+    align-items: start;
+}
+.tc-card {
+    border: 1px solid var(--tc-border);
+    border-radius: 5px;
+    background: var(--tc-bg);
+    overflow: hidden;
+}
+.tc-card--open {
+    border-color: var(--tc-speed, var(--tc-border));
+}
+.tc-collapsible-head {
     display: flex;
     align-items: center;
     gap: 6px;
-    font-size: 12px;
+    cursor: pointer;
+    user-select: none;
+    padding: 8px 12px !important;
+    margin: 0 !important;
+    border-bottom: 1px solid transparent;
     font-weight: 600;
-    color: var(--tc-muted);
+    transition: background .12s ease;
 }
-.tc-settings-body {
-    padding: 0 14px 10px;
+.tc-collapsible-head:hover {
+    background: var(--tc-bg-alt);
+}
+.tc-card--open .tc-collapsible-head {
+    border-bottom-color: var(--tc-border);
+}
+.tc-collapse-arrow {
+    font-size: 11px;
+    color: var(--tc-muted);
+    width: 12px;
+    display: inline-block;
+    text-align: center;
+}
+.tc-card .tc-collapsible-body {
+    padding: 10px 12px;
 }
 .tc-settings-section-row {
     display: flex;

@@ -726,12 +726,13 @@ function buildTable(conns, sortCol, sortDir, rdnsMode, hiddenCols) {
 	return E('div', { 'class': 'table tc-table' }, [titleRow].concat(rows));
 }
 
-function buildSummaryTable(rows, sortCol, sortDir, onSort, onSelect, speedMap, dropMap, shapeMap, speedHistory, hiddenCols) {
+function buildSummaryTable(rows, sortCol, sortDir, onSort, onSelect, speedMap, dropMap, shapeMap, speedHistory, hiddenCols, upSpeedMap, upSpeedHistory) {
 	var cols = [
 		{ key:'name',             label: _('Device'),   num:false, tip: _('Device hostname from DHCP lease') },
 		{ key:'ip',               label:'IP',           num:false, tip: _('Local IP address') },
 		{ key:'mac',              label:'MAC',          num:false, tip: _('Hardware MAC address'), hide:true },
 		{ key:'_speed',           label: _('DL Speed'), num:true,  tip: _('Current download speed (bytes/sec from router to device)') },
+		{ key:'_upspeed',         label: _('UL Speed'), num:true,  tip: _('Current upload speed (bytes/sec from device to router)') },
 		{ key:'_spark',           label: '',            num:false, tip: _('Speed graph. Window = avg time. Orange dashed line = speed limit') },
 		{ key:'conns',            label: _('Conns'),    num:true,  tip: _('Active connections in conntrack') },
 		{ key:'total',            label: _('Bytes'),    num:true,  tip: _('Total bytes transferred (conntrack)'), hide:true },
@@ -754,6 +755,7 @@ function buildSummaryTable(rows, sortCol, sortDir, onSort, onSelect, speedMap, d
 	}
 
 	speedMap = speedMap || {};
+	upSpeedMap = upSpeedMap || {};
 	dropMap  = dropMap  || {};
 	shapeMap = shapeMap || {};
 	speedHistory = speedHistory || {};
@@ -769,6 +771,8 @@ function buildSummaryTable(rows, sortCol, sortDir, onSort, onSelect, speedMap, d
 	rows.forEach(function(r) {
 		var s = speedMap[r.ip];
 		r._speed = s ? s.current : 0;
+		var su = upSpeedMap[r.ip];
+		r._upspeed = su ? su.current : 0;
 		var d = dropMap[r.ip];
 		r._drop_packets = d ? d.packets : 0;
 		r._drop_bytes   = d ? d.bytes   : 0;
@@ -802,15 +806,19 @@ function buildSummaryTable(rows, sortCol, sortDir, onSort, onSelect, speedMap, d
 		var attrs = { 'class': 'th', 'style': style || undefined, 'data-col': c.key, 'data-num': c.num ? '1' : '0' };
 		if (c.tip) attrs['data-tip'] = c.tip;
 		var label = c.label + arrow;
-		if (c.key === '_speed' && !hasSpeedData) label = c.label + ' ';
+		if ((c.key === '_speed' || c.key === '_upspeed') && !hasSpeedData) label = c.label + ' ';
 		var th = E('div', attrs);
-		th.innerHTML = label + ((c.key === '_speed' && !hasSpeedData) ? '<span class="tc-spinner"></span>' : '');
+		th.innerHTML = label + (((c.key === '_speed' || c.key === '_upspeed') && !hasSpeedData) ? '<span class="tc-spinner"></span>' : '');
 		if (c.key !== '_spark') th.addEventListener('click', function() { onSort(c.key, c.num); });
 		return th;
 	}));
 
 	var tableRows = sorted.map(function(r) {
 		var sd = speedMap[r.ip];
+		// 注意：上行速率必须在**本回调内**重新取，不能复用
+		// 上面 rows.forEach 里的 su（那是另一个作用域，会抛
+		// "su is not defined"）。
+		var su = upSpeedMap[r.ip];
 		var cellMap = {};
 
 		cellMap.name = E('div', { 'class': 'td tc-fw-bold tc-c-speed' }, escHtml(r.name));
@@ -821,6 +829,13 @@ function buildSummaryTable(rows, sortCol, sortDir, onSort, onSelect, speedMap, d
 		cellMap._speed = E('div', { 'class': 'td tc-right tc-mono', 'data-speed-ip': r.ip, 'title': sd ? (_('Avg')+': '+fmtSpeed(sd.avg)+' / '+_('Max')+': '+fmtSpeed(sd.max)) : _('Calculating…') });
 		if (sd && sd.current > 1024) { cellMap._speed.className = 'td tc-right tc-mono tc-speed-active'; cellMap._speed.textContent = fmtSpeed(sd.current); }
 		else { cellMap._speed.className = 'td tc-right tc-mono tc-speed-idle'; cellMap._speed.textContent = sd ? fmtSpeed(sd.current) : '—'; }
+
+		// 上行速率（设备→路由器）。数据来自同一次采样里的 bytes_out 差分，
+		// 与下行共用 _fullHistory[].up；此处按对称逻辑单独呈现为独立列。
+		var upTip = su ? (_('Avg')+': '+fmtSpeed(su.avg)+' / '+_('Max')+': '+fmtSpeed(su.max)) : _('Calculating…');
+		cellMap._upspeed = E('div', { 'class': 'td tc-right tc-mono', 'data-upspeed-ip': r.ip, 'title': upTip });
+		if (su && su.current > 1024) { cellMap._upspeed.className = 'td tc-right tc-mono tc-upspeed-active'; cellMap._upspeed.textContent = fmtSpeed(su.current); }
+		else { cellMap._upspeed.className = 'td tc-right tc-mono tc-speed-idle'; cellMap._upspeed.textContent = su ? fmtSpeed(su.current) : '—'; }
 
 		var sparkTip = r._throttle_kbit > 0 ? (_('Limit') + ': ' + fmtRate(r._throttle_kbit)) : '';
 		cellMap._spark = E('div', { 'class': 'td tc-center', 'style': 'padding:2px 4px', 'data-spark-ip': r.ip, 'data-tip': sparkTip || undefined });
@@ -1250,11 +1265,14 @@ return view.extend({
 	_shapeTimer:   null,
 	_bytesHistory: {},
 	_speedHistory: {},
+	_upSpeedHistory: {},
 	_fullHistory:  {},
 	_speedMap:     {},
+	_upSpeedMap:   {},
 	_dropMap:      {},
 	_shapeMap:     {},
 	_speedEwma:    {},
+	_upSpeedEwma:  {},
 	_rdnsCache:    {},
 	_sortCol:    'bytes',
 	_sortDir:    'desc',
@@ -1776,6 +1794,19 @@ return view.extend({
 				cell.textContent = fmtSpeed(s.current);
 				cell.title = _('Avg')+': '+fmtSpeed(s.avg)+' / '+_('Max')+': '+fmtSpeed(s.max);
 
+				// 上行速率列（与下行对称刷新）
+				var su = self._upSpeedMap[ip];
+				var upCell = connsDiv.querySelector('td[data-upspeed-ip="'+ip+'"]');
+				if (upCell && su) {
+					if (su.current > 1024) {
+						upCell.className = 'tc-upspeed-active';
+					} else {
+						upCell.className = 'tc-speed-idle';
+					}
+					upCell.textContent = fmtSpeed(su.current);
+					upCell.title = _('Avg')+': '+fmtSpeed(su.avg)+' / '+_('Max')+': '+fmtSpeed(su.max);
+				}
+
 				var sparkCell = connsDiv.querySelector('td[data-spark-ip="'+ip+'"]');
 				if (sparkCell) {
 					while (sparkCell.firstChild) sparkCell.removeChild(sparkCell.firstChild);
@@ -1863,9 +1894,12 @@ return view.extend({
 				Object.keys(self._speedHistory).forEach(function(ip) {
 					if (!activeIps[ip]) {
 						delete self._speedHistory[ip];
+						delete self._upSpeedHistory[ip];
 						delete self._fullHistory[ip];
 						delete self._speedMap[ip];
+						delete self._upSpeedMap[ip];
 						delete self._speedEwma[ip];
+						delete self._upSpeedEwma[ip];
 						delete self._bytesHistory[ip];
 					}
 				});
@@ -1906,6 +1940,20 @@ return view.extend({
 								avg: ewma,
 								max: max
 							};
+							// 上行速率（设备→路由器）：与下行同法计算
+							var prevEwmaUp = self._upSpeedEwma[d.ip] || 0;
+							var ewmaUp = alpha * speedUp + (1 - alpha) * prevEwmaUp;
+							self._upSpeedEwma[d.ip] = ewmaUp;
+							if (!self._upSpeedHistory[d.ip]) self._upSpeedHistory[d.ip] = [];
+							self._upSpeedHistory[d.ip].push({speed: speedUp, time: now});
+							if (self._upSpeedHistory[d.ip].length > maxSamples) self._upSpeedHistory[d.ip].shift();
+							var maxUp = 0;
+							self._upSpeedHistory[d.ip].forEach(function(h){ if (h.speed > maxUp) maxUp = h.speed; });
+							self._upSpeedMap[d.ip] = {
+								current: speedUp,
+								avg: ewmaUp,
+								max: maxUp
+							};
 						} else {
 							if (!self._speedHistory[d.ip]) self._speedHistory[d.ip] = [];
 							self._speedHistory[d.ip].push({speed: speed, time: now});
@@ -1917,6 +1965,18 @@ return view.extend({
 								current: speed,
 								avg: sum / hist.length,
 								max: sMax
+							};
+							// 上行速率（设备→路由器）
+							if (!self._upSpeedHistory[d.ip]) self._upSpeedHistory[d.ip] = [];
+							self._upSpeedHistory[d.ip].push({speed: speedUp, time: now});
+							if (self._upSpeedHistory[d.ip].length > maxSamples) self._upSpeedHistory[d.ip].shift();
+							var histUp = self._upSpeedHistory[d.ip];
+							var sumUp = 0, sMaxUp = 0;
+							histUp.forEach(function(h){ sumUp += h.speed; if (h.speed > sMaxUp) sMaxUp = h.speed; });
+							self._upSpeedMap[d.ip] = {
+								current: speedUp,
+								avg: sumUp / histUp.length,
+								max: sMaxUp
 							};
 						}
 					}
@@ -2187,11 +2247,13 @@ return view.extend({
 					self._dropMap,
 					self._shapeMap,
 					self._speedHistory,
-					self._hiddenCols
+					self._hiddenCols,
+					self._upSpeedMap,
+					self._upSpeedHistory
 				);
 				connsDiv.appendChild(E('div',{'style':'overflow-x:auto'},[tbl]));
 				connsDiv.appendChild(E('p',{'style':'color:var(--tc-faint);font-size:11px;margin-top:6px'},
-					_('Click a row to inspect that device. Download speed updates every 2 seconds.')));
+					_('Click a row to inspect that device. Download and upload speeds update every 2 seconds.')));
 			}
 		}
 
@@ -2351,41 +2413,56 @@ return view.extend({
 		var sep = function() { return E('span', {'class':'tc-sep'}); };
 		var sectionLabel = function(t) { return E('div', {'class':'tc-section-label'}, t); };
 
-		var settingsBody = E('div', {'class':'tc-settings-body tc-hidden'});
-		var settingsCollapsed = true;
-		var settingsToggle = E('div', {'class':'tc-settings-toggle'}, [E('span', {}, '▸'), E('span', {}, _('Settings'))]);
+		// ── 设置面板 ───────────────────────────────────────────────────────
+		// 2026-10-10 起：**默认展开，不再整体收起**。
+		// 旧实现把整个设置区包在一个可折叠容器里（初始 tc-hidden），
+		// 用户必须点击标题才能看到任何设置项，且收起后完全看不出里面有什么。
+		// 现改为：常显标题栏（不可折）+ 内容始终可见；
+		// 内部 6 个小节改为**并排卡片网格**，以标题+摘要常显，各自可独立展收。
+		var settingsBody = E('div', {'class':'tc-settings-body'});
+		var settingsHeader = E('div', {'class':'tc-settings-head'}, [
+			E('span', {'class':'tc-settings-title'}, _('Settings')),
+			E('span', {'class':'tc-settings-hint'}, _('changes are saved automatically'))
+		]);
 
-		settingsToggle.addEventListener('click', function() {
-			settingsCollapsed = !settingsCollapsed;
-			settingsBody.classList.toggle('tc-hidden', settingsCollapsed);
-			settingsToggle.firstChild.textContent = settingsCollapsed ? '▸' : '▾';
-		});
-
-		// ── Collapsible subsection helper ──────────────────────────────────
+		// ── 可展开小节（内容懒加载；默认收起但**标题常显**）──────────────
+		// startOpen 语义保留：调用方可要求某节初始展开。
+		// onFirstOpen: 首次展开时回调，用于懒加载内容（避免一次性打满 RPC）。
 		function mkCollapsible(title, content, startOpen) {
 			var body = E('div', {'class': 'tc-collapsible-body' + (startOpen ? '' : ' tc-hidden')});
 			if (content) body.appendChild(content);
-			var arrow = E('span', {'class':'tc-c-muted', 'style':'font-size:11px'}, startOpen ? ' ▾' : ' ▸');
+			var arrow = E('span', {'class':'tc-collapse-arrow'}, startOpen ? '▾' : '▸');
 			var label = sectionLabel(title);
-			label.style.cursor = 'pointer';
+			label.classList.add('tc-collapsible-head');
 			label.appendChild(arrow);
+			var el = E('div', {'class':'tc-card' + (startOpen ? ' tc-card--open' : '')}, [label, body]);
+			var api = {label: label, body: body, el: el, _opened: !!startOpen};
+			function setOpen(open) {
+				body.classList.toggle('tc-hidden', !open);
+				el.classList.toggle('tc-card--open', open);
+				arrow.textContent = open ? '▾' : '▸';
+				if (open && !api._opened) { api._opened = true; if (api.onFirstOpen) api.onFirstOpen(); }
+			}
+			// 展开状态本身也持久化，刷新后保持用户的布局选择
+			var key = 'tc.set.' + title;
+			var saved = null;
+			try { saved = window.localStorage.getItem(key); } catch (e) {}
+			if (saved === '1') setOpen(true);
+			else if (saved === '0') setOpen(false);
+
 			label.addEventListener('click', function() {
-				var open = !body.classList.contains('tc-hidden');
-				body.classList.toggle('tc-hidden');
-				arrow.textContent = open ? ' ▸' : ' ▾';
+				var willOpen = body.classList.contains('tc-hidden');
+				setOpen(willOpen);
+				try { window.localStorage.setItem(key, willOpen ? '1' : '0'); } catch (e) {}
 			});
-			return {label: label, body: body, el: E('div', {}, [label, body])};
+			// 供懒加载逻辑复用（保持原有调用点语义）
+			label._tcSetOpen = setOpen;
+			return api;
 		}
 
 		// ── Telegram Bot section (lazy-loaded) ─────────────────────────────
 		var tgSection = mkCollapsible(_('Telegram Bot'), null, false);
-		var tgLoaded = false;
-		tgSection.label.addEventListener('click', function() {
-			if (!tgLoaded && !tgSection.body.classList.contains('tc-hidden')) {
-				tgLoaded = true;
-				loadTelegramUI(tgSection.body);
-			}
-		});
+		tgSection.onFirstOpen = function() { loadTelegramUI(tgSection.body); };
 
 		function loadTelegramUI(container) {
 			var statusSpan = E('span', {'style':'font-size:12px;margin-left:8px;color:var(--tc-muted)'}, _('Loading…'));
@@ -2693,24 +2770,18 @@ return view.extend({
 		}
 
 		// ── Assemble settings sections ─────────────────────────────────────
-		settingsBody.appendChild(tgSection.el);
-
+		// 卡片网格：Display / Table & Speed 属常用项，默认展开；
+		// Telegram / Logging / Flow Offload 内容较重，默认收起但标题常显、一键展开。
 		var displaySection = mkCollapsible(_('Display'), E('div', {'class':'tc-settings-section-row'}, [
 			showStats, showConns, extStatsCheck, rdnsCheck, activityCheck,
 			sep(),
 			E('span', {'data-tip':_('Auto-refresh interval for summary table')}, [mkLabel(_('Refresh')+':'), refreshPick.el])
-		]), false);
+		]), true);
 		settingsBody.appendChild(displaySection.el);
 
 		// ── Logging & Persistence section (lazy-loaded) ────────────────────
 		var loggingSection = mkCollapsible(_('Logging & Persistence'), null, false);
-		var loggingLoaded = false;
-		loggingSection.label.addEventListener('click', function() {
-			if (!loggingLoaded && !loggingSection.body.classList.contains('tc-hidden')) {
-				loggingLoaded = true;
-				loadLoggingUI(loggingSection.body);
-			}
-		});
+		loggingSection.onFirstOpen = function() { loadLoggingUI(loggingSection.body); };
 
 		function loadLoggingUI(container) {
 			var statusSpan = E('span', {'style':'font-size:12px;color:var(--tc-muted)'}, _('Loading…'));
@@ -2770,13 +2841,7 @@ return view.extend({
 
 		// ── Flow Offload section (lazy-loaded) ─────────────────────────────
 		var offloadSection = mkCollapsible(_('Flow Offload'), null, false);
-		var offloadLoaded = false;
-		offloadSection.label.addEventListener('click', function() {
-			if (!offloadLoaded && !offloadSection.body.classList.contains('tc-hidden')) {
-				offloadLoaded = true;
-				loadOffloadUI(offloadSection.body);
-			}
-		});
+		offloadSection.onFirstOpen = function() { loadOffloadUI(offloadSection.body); };
 
 		function loadOffloadUI(container) {
 			var statusSpan = E('span', {'style':'font-size:12px;color:var(--tc-muted)'}, _('Loading…'));
@@ -2865,8 +2930,17 @@ return view.extend({
 			colChipsContainer,
 			connColChipsContainer,
 			connFiltersRow
-		]), false);
-		settingsBody.appendChild(tableSection.el);
+		]), true);
+
+		// 全部小节统一放入卡片网格（顺序即视觉顺序）
+		var settingsGrid = E('div', {'class':'tc-settings-grid'}, [
+			tgSection.el,
+			displaySection.el,
+			loggingSection.el,
+			offloadSection.el,
+			tableSection.el
+		]);
+		settingsBody.appendChild(settingsGrid);
 
 		function updateTableSectionMode() {
 			var all = isAllMode();
@@ -2876,7 +2950,7 @@ return view.extend({
 		}
 		updateTableSectionMode();
 
-		var settingsPanel = E('div', {'class':'tc-settings-panel'}, [settingsToggle, settingsBody]);
+		var settingsPanel = E('div', {'class':'tc-settings-panel'}, [settingsHeader, settingsBody]);
 
 		function loadActivityPanel(container) {
 			container.className = 'tc-activity-panel';

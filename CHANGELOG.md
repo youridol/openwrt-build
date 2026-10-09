@@ -2,6 +2,155 @@
 
 本仓库所有功能/配置改动均记录于此。版本判型遵循全局规范（PATCH / MINOR / MAJOR）。
 
+## [v0.4.5] - 2026-10-10
+
+### 修复（严重）— v0.4.4 导致 fw4 整体加载失败、国内域名大面积无法解析
+
+**症状**：刷入 v0.4.4 后，多个国内域名/服务/软件无法解析与联网。
+
+**根因（已在路由器上复现并定位到源码行）**：
+
+1. fw4 的 ruleset 模板 `/usr/share/firewall4/templates/ruleset.uc` 中，
+   第 15 行 `table inet fw4 {` 开表，第 104 行
+   `include "/etc/nftables.d/*.nft"` —— **include 位于该 table 内部**。
+   因此 `/etc/nftables.d/` 下的文件**只能是裸 chain**，不得含 table 声明。
+2. v0.4.4 写入的是完整 `table inet mssclamp { chain ... }`，被嵌进
+   `table inet fw4` 内部 → **嵌套 table** → nft 语法错误。
+3. `fw4 check` 实测报错：
+   ```
+   /etc/nftables.d/10-mss-clamp.nft:1:1-5: Error: syntax error, unexpected table
+   table inet mssclamp {
+   ^^^^^
+   ```
+   而 fw4 的加载路径是
+   `print | nft -c -f $STDIN || die "The rendered ruleset contains errors"`
+   —— 校验失败则**整个 ruleset 不加载**，于是 input/forward/dstnat/srcnat、
+   DNS 拦截、透明代理等全部规则消失，表现为国内解析与联网大面积异常。
+4. 对照证据：同目录既有的 `10-dnsproxy-lan-intercept.nft` 用的是正确的
+   **裸 chain** 写法，且实测该 chain 出现在 `table inet fw4` 内部
+   （`nft list chain inet fw4 dns_intercept_lan` 成功）。
+
+**处置**：**整段删除** `/etc/nftables.d/10-mss-clamp.nft` 的生成逻辑
+（`files/etc/uci-defaults/99-gaming-optimize`），并在原处写明原因与硬约束。
+删除而非改写的理由：
+
+- **功能冗余**：上述 `firewall.@zone[0].mtu_fix='1'`（配合 wan zone 默认值）
+  会让 fw4 原生生成 4 条 MSS clamp 规则（实测 `nft list table inet fw4`）：
+  `oifname br-lan` / `oifname pppoe-wan` / `iifname br-lan` / `iifname pppoe-wan`
+  各一条 `maxseg size set rt mtu`，用 `rt mtu` 在 PPPoE(1492) 场景下与显式
+  clamp 等价，且同时覆盖 IPv4 与 IPv6。删掉不损失任何功能。
+- **fw3 路径是死代码**：fw4 不加载 `/etc/firewall.user`
+  （`uci show firewall` 中 firewall.user include 计数 = 0），原 ip6tables
+  规则从未生效。
+- **fw4 路径有风险**：即本次故障。
+- 另删除了 `/etc/firewall.user` 中同源的历史遗留行（死代码）。
+
+### 修复（严重）— trafficctl 速率监控完全失效（上下行都是 `—`）
+
+**症状**：流量控制页面的「下行速率」列恒为 `—`；且没有任何上行速率列。
+
+**根因（三层，均已实测确证）**：
+
+1. **nftables 语法在本内核不被支持，且错误被静默吞掉**。
+   `trafficctl-bytes-nft.sh` 用：
+   ```
+   nft add map ... '{ type ipv4_addr : counter; flags dynamic; }'
+     -> Error: Could not process rule: Not supported
+   nft add rule ... 'update @map { ip saddr counter }'
+     -> Error: Could not process rule: Not supported
+   ```
+   本机内核 `6.18.55` / nftables `1.1.6`。两条错误都被 `2>/dev/null`
+   吞掉，结果只留下一个**空的 forward 链**，ubus 的 `bytes` 方法
+   永远返回 `[]`，前端两列速率恒为 `—`。
+   实测本内核**可用**的等价语法为：
+   `nft add set ... '{ type ipv4_addr; size 65535; flags dynamic; }'`
+   配合 `nft add rule ... 'add @set { ip saddr counter }'`。
+2. **挂钩点选错，看不到代理流量**。SSR-Plus 用 REDIRECT 把客户端连接引到
+   路由器本机的 v2ray(:1234)，REDIRECT 把目的地址改写为本机，数据包因此走
+   **INPUT/OUTPUT，不经 forward**。实测对照（客户端下载 150 MB）：
+   | 挂钩点 | 增量 |
+   |---|---|
+   | `output daddr=客户端` | 157548502 B（完整捕获） |
+   | `input saddr=客户端` | 1360391 B（客户端小请求） |
+   | `forward saddr=客户端` | 5932 B（几乎为零） |
+   原实现只挂 forward，故完全看不到。
+3. **集合会被非 LAN 地址污染**。output 钩子会看到路由器自身对 WAN 的连接，
+   仅用 `oifname br-lan` 限定仍会写入 `1.2.4.8`、`10.x`、`14.x` 等地址。
+   实测必须同时限定**地址属于 LAN 网段**（自动生成的 `@lan` 集合）才能收敛。
+
+**处置**：重写 `trafficctl-bytes-nft.sh`：
+
+- 改用内核支持的 `set` + `add @set { ... counter }` 语法。
+- 同时挂 **forward / input / output** 三个钩子（三者对同一数据包互斥，
+  不重复计数）：
+  - 下行 = `forward daddr=设备` + `output daddr=设备`
+  - 上行 = `forward saddr=设备` + `input saddr=设备`
+- 三个钩子均用 `@lan` 集合限定地址归属；`@lan` 由 `tctl_lan_subnets`
+  **动态生成**（支持多网桥/多 VLAN），不硬编码。
+- 建立逻辑改为**单事务原子重建**（`nft -f` 内 `delete table` + 重建）。
+  原「先检查后逐条 add」的写法存在竞态：前端每 2 秒轮询与手工调用并发时，
+  两个进程会同时通过检查各建一套规则 → 规则重复 → 速率翻倍
+  （实测 180 MB 下载被记成 380 MB）。原子事务下并发调用只会整体覆盖，
+  结构始终唯一。
+- 结构自检（集合存在 + 各链规则条数正确）后才重建，避免每次轮询清零计数。
+- 解析器适配 `nft list set` 的 `IP counter packets N bytes M` 格式
+  （旧实现按 `nft list map` 的 `IP : counter ...` 解析，格式已不匹配）。
+- 重建前先 `nft -c -f` 只校验不提交，避免写坏运行中的防火墙。
+
+### 新增 — trafficctl 设备表「上行速率」列
+
+- 新增 `_upspeed` 列（`UL Speed`），紧邻「下行速率」。
+- 上行数据其实**早已存在**（`packets_out` 差分算出的 `speedUp`），
+  但此前只用于弹窗图表，未进入设备表；本次将其并行接入新状态
+  `_upSpeedMap` / `_upSpeedHistory` / `_upSpeedEwma`，与下行完全对称。
+- 上下行**色义区分**：下行用 `--tc-speed`（蓝），上行用 `--tc-ok`（绿，
+  与弹窗图表中上行曲线一致），新增 `.tc-upspeed-active` 样式。
+- `updateSpeedCells` 实时刷新上行单元格；设备下线时同步清理三份上行状态。
+- 底部提示改为「下载与上传速率每 2 秒更新一次」。
+- 补充 4 条翻译：`UL Speed` / `Current upload speed (bytes/sec from device to router)`
+  / `changes are saved automatically` / 提示串（旧串同步替换），
+  `.po` 与 `.pot` 均已更新。
+
+### 变更 — trafficctl 设置区改为常显卡片网格（不再整体收起）
+
+- 旧实现把整个设置区包在可折叠容器内且**初始隐藏**，用户必须点击标题才能
+  看到任何设置项，收起后完全看不出里面有什么。
+- 现改为：常显标题栏（不可折）+ 内容始终可见；内部各小节改为
+  **自适应卡片网格**（`repeat(auto-fit, minmax(320px, 1fr))`，
+  窄屏单列、宽屏多列），每节标题恒常显，仅**单节内容**可独立折收。
+- 「显示」「表格与速率」默认展开；「Telegram机器人」「日志与持久化」
+  「流量卸载」内容较重，默认收起但标题可见、一键展开。
+- 各节展开状态持久化到 `localStorage`，刷新后保持用户的布局选择。
+- 懒加载改为 `onFirstOpen` 回调（首次展开才发起 RPC），避免一次性打满请求。
+
+### 验证（路由器 192.168.3.254，OpenWrt 24.10.5 / 内核 6.18.55）
+
+- **fw4 修复**：`fw4 check` 由报 `unexpected table` 变为
+  `Ruleset passes nftables check.`；`table inet fw4` 内 chain 数 34、
+  DNS 拦截规则 2 条、`ss_spec` 表在、fullcone 规则 2 条；
+  baidu/taobao/jd/bilibili 均 200，google 302，github 200，出口 `203.27.106.146`。
+- **速率后端**：并发 8 实例后 `forward=2 / input=1 / output=1`（无重复）；
+  180 MB 下载实测 `bytes_in` 增量 190296934（不翻倍）；
+  `bytes` RPC 由 `[]` 变为含真实数据（本机 993 MB）；
+  集合内非 LAN 地址数 = 0。
+- **速率前端**：设备表新增「UL Speed」列；
+  实测 `192.168.3.238` 下=35.7 Kbit/s、上=23.7 Kbit/s，
+  下行 class `tc-speed-active`（蓝）、上行 class `tc-upspeed-active`（绿），
+  21 个 sparkline 全部渲染，提示为中文「平均 / 最大」。
+- **设置区**：默认展开；3 列卡片网格；5 个小节标题全部可见。
+
+### 说明
+
+- 本次同时完成了「是否已全面切到 fw4」的核查，结论：**已全面切换**。
+  判据：`table inet fw4` 在跑且承载全部规则（34 条链）；DNS 拦截与透明代理
+  均在 nftables（`iifname br-lan ... redirect`、`table inet ss_spec`）；
+  fw3 专属的 `/etc/firewall.user` include 计数为 0（死代码）；
+  `iptables filter/nat/mangle` 与 `ip6tables mangle` 只剩默认策略行
+  （无任何规则）；`ip_tables` 内核模块**未加载**。
+  残留的 `iptables`/`ip6tables` 二进制与 `kmod-ipt-*` 是 SSR-Plus 等包的
+  依赖项，属正常共存，不表示仍在用 fw3。
+- 本版本**修复了 v0.4.4 的严重故障**，建议刷入替换。
+
 ## [v0.4.4] - 2026-10-09
 
 ### 变更（构建产物加版本号）

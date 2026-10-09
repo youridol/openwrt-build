@@ -40,7 +40,7 @@ msgstr ""
 msgid "Calculating…"
 msgstr ""
 
-msgid "Click a row to inspect that device. Download speed updates every 2 seconds."
+msgid "Click a row to inspect that device. Download and upload speeds update every 2 seconds."
 msgstr ""
 
 msgid "Click header to sort."
@@ -49,10 +49,16 @@ msgstr ""
 msgid "Click to inspect"
 msgstr ""
 
+msgid "changes are saved automatically"
+msgstr ""
+
 msgid "Connections"
 msgstr ""
 
 msgid "Conns"
+msgstr ""
+
+msgid "Current upload speed (bytes/sec from device to router)"
 msgstr ""
 
 msgid "Custom…"
@@ -191,6 +197,9 @@ msgid "Throttle removed"
 msgstr ""
 
 msgid "Traffic Control"
+msgstr ""
+
+msgid "UL Speed"
 msgstr ""
 
 msgid "Unblock"
