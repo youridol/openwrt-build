@@ -25,6 +25,47 @@ jobs:
         with:
           path: openwrt-build
 
+      # ------------------------------------------------------------------
+      # 版本号提取（唯一来源：CHANGELOG.md 顶部的 `## [vX.Y.Z] - YYYY-MM-DD`）。
+      # 与 release.yml 的版本来源保持一致，避免两处版本号漂移。
+      # 产物命名与 artifact 名均带该版本号，便于区分每次构建。
+      # 输出的 VERSION（含 v 前缀）/ VERSION_NOV（不含 v）/ SHORT_SHA
+      # 写入 $GITHUB_ENV，供后续所有步骤使用。
+      # 必须放在 checkout 之后 —— 需要读取 openwrt-build/CHANGELOG.md。
+      # ------------------------------------------------------------------
+      - name: Resolve version from CHANGELOG
+        working-directory: openwrt-build
+        run: |
+          # 取 CHANGELOG 中第一个版本标题行
+          VER_LINE="$(grep -m1 '^## \[v' CHANGELOG.md || true)"
+          if [ -z "$VER_LINE" ]; then
+            echo "!!! CHANGELOG.md 顶部找不到 '## [vX.Y.Z]' 版本标题，构建中止" >&2
+            echo "    （产物需要版本号，无版本号不允许出包）" >&2
+            exit 1
+          fi
+          # 从 `## [v0.4.3] - 2026-10-09` 中提取 v0.4.3
+          VERSION="$(printf '%s\n' "$VER_LINE" | sed -n 's/^## \[\(v[^]]*\)\].*/\1/p')"
+          if [ -z "$VERSION" ]; then
+            echo "!!! 无法从版本标题解析版本号: [$VER_LINE]" >&2
+            exit 1
+          fi
+          case "$VERSION" in
+            v[0-9]*.[0-9]*.[0-9]*) : ;;   # 形如 v1.2.3，接受
+            *)
+              echo "!!! 版本号格式异常（应为 vMAJOR.MINOR.PATCH）: [$VERSION]" >&2
+              exit 1
+              ;;
+          esac
+          VERSION_NOV="${VERSION#v}"
+          # 构建号：短 SHA，便于同一版本多次构建时区分
+          SHORT_SHA="$(printf '%s' "${GITHUB_SHA}" | cut -c1-7)"
+          echo "CHANGELOG 顶部版本: $VERSION (构建号 $SHORT_SHA)"
+          {
+            echo "VERSION=$VERSION"
+            echo "VERSION_NOV=$VERSION_NOV"
+            echo "SHORT_SHA=$SHORT_SHA"
+          } >> "$GITHUB_ENV"
+
       - name: Checkout lede source
         uses: actions/checkout@v4
         with:
@@ -445,11 +486,74 @@ jobs:
           # files/ will be merged into rootfs during image generation
           make -j${{ env.JOBS }} V=s
 
+      # ------------------------------------------------------------------
+      # 产物重命名：给固件文件名加上版本号，便于区分不同构建。
+      # 原始名（OpenWrt 生成）:
+      #   openwrt-x86-64-generic-ext4-combined-efi.img.gz
+      # 重命名为:
+      #   openwrt-x86-64-ssrplus-<VERSION>-<SHORT_SHA>-ext4-combined-efi.img.gz
+      # 即把 openwrt-x86-64 之后的 "generic" 替换为 "ssrplus-vX.Y.Z-<sha>"，
+      # 保留后缀（ext4-combined-efi / squashfs-combined 等），
+      # 这样刷机工具与用户仍能从文件名辨认镜像类型。
+      # 同时生成 .sha256 校验文件。
+      # ------------------------------------------------------------------
+      - name: Rename firmware with version
+        working-directory: lede
+        run: |
+          set -e
+          TAG="ssrplus-${VERSION}-${SHORT_SHA}"
+          echo ">>> 版本标签: $TAG"
+          ls -l bin/targets/x86/64/*.img.gz
+
+          found=0
+          for f in bin/targets/x86/64/*.img.gz; do
+            [ -e "$f" ] || { echo "!!! 未找到任何 .img.gz 产物" >&2; exit 1; }
+            base="$(basename "$f")"
+            # openwrt-x86-64-generic-ext4-combined-efi.img.gz
+            #   -> 前缀 openwrt-x86-64-
+            #   -> 其余 generic-ext4-combined-efi.img.gz
+            rest="${base#openwrt-x86-64-}"
+            # 把开头的目标名（generic）换成版本标签，保留镜像类型后缀
+            suffix="${rest#*-}"                     # ext4-combined-efi.img.gz
+            case "$rest" in
+              *-*) : ;;                             # 含 '-'，可安全切分
+              *) echo "!!! 产物名不符合预期（缺目标名与类型分隔）: $base" >&2; exit 1 ;;
+            esac
+            new="openwrt-x86-64-${TAG}-${suffix}"
+            mv "$f" "bin/targets/x86/64/$new"
+            echo ">>> $base"
+            echo "    -> $new"
+            (cd bin/targets/x86/64 && sha256sum "$new" > "$new.sha256")
+            cat "bin/targets/x86/64/$new.sha256"
+            found=$((found+1))
+          done
+          [ "$found" -ge 1 ] || { echo "!!! 未重命名任何产物" >&2; exit 1; }
+          echo ">>> 共重命名 $found 个产物"
+          ls -l bin/targets/x86/64/
+
+          # 断言：重命名结果必须真的带版本号，且仍以 .img.gz 结尾
+          # （防止将来改坏命名逻辑却默默出包）
+          for f in bin/targets/x86/64/*.img.gz; do
+            b="$(basename "$f")"
+            case "$b" in
+              *"${VERSION}"*) : ;;
+              *) echo "!!! 产物名不含版本号 ${VERSION}: $b" >&2; exit 1 ;;
+            esac
+            case "$b" in
+              *.img.gz) : ;;
+              *) echo "!!! 产物名未以 .img.gz 结尾: $b" >&2; exit 1 ;;
+            esac
+          done
+          echo ">>> 产物命名校验通过（均含版本号 ${VERSION} 且以 .img.gz 结尾）"
+
       - name: Upload artifacts
         uses: actions/upload-artifact@v4
         with:
-          name: openwrt-x86-64-ssrplus
-          path: lede/bin/targets/x86/64/*.img.gz
+          # artifact 名带版本号，便于在 Actions 页区分每次构建
+          name: openwrt-x86-64-ssrplus-${{ env.VERSION }}-${{ env.SHORT_SHA }}
+          path: |
+            lede/bin/targets/x86/64/*.img.gz
+            lede/bin/targets/x86/64/*.img.gz.sha256
 
       # ------------------------------------------------------------------
       # 发版（tag v* push）时：把编译产物上传到 GitHub Release。
@@ -476,13 +580,18 @@ jobs:
             gh release create "$VER" --title "$VER" --notes "自动生成的 Release（CHANGELOG 日志见 release.yml 工作流）"
           }
           # 上传固件（幂等：文件已存在则跳过）
+          # 产物已在 “Rename firmware with version” 步骤改名为带版本号形式，
+          # 故这里同时上传 .img.gz 与 .sha256 校验文件。
           ls lede/bin/targets/x86/64/*.img.gz
-          for f in lede/bin/targets/x86/64/*.img.gz; do
-            if gh release view "$VER" --json assets --jq '.assets[].name' | grep -qx "$(basename "$f")"; then
-              echo "已存在: $(basename "$f")，跳过"
+          assets="$(gh release view "$VER" --json assets --jq '.assets[].name')"
+          for f in lede/bin/targets/x86/64/*.img.gz lede/bin/targets/x86/64/*.img.gz.sha256; do
+            [ -e "$f" ] || continue
+            name="$(basename "$f")"
+            if printf '%s\n' "$assets" | grep -qx "$name"; then
+              echo "已存在: $name，跳过"
             else
               gh release upload "$VER" "$f" --clobber
-              echo "已上传: $(basename "$f")"
+              echo "已上传: $name"
             fi
           done
           echo ">>> Release $VER 产物上传完成"

@@ -2,6 +2,120 @@
 
 本仓库所有功能/配置改动均记录于此。版本判型遵循全局规范（PATCH / MINOR / MAJOR）。
 
+## [v0.4.4] - 2026-10-09
+
+### 变更（构建产物加版本号）
+
+- **新增 `Resolve version from CHANGELOG` 步骤**（`build-openwrt.yml` 第 2 步，
+  紧随 `Checkout openwrt-build` 之后）：
+  - 从 `CHANGELOG.md` 顶部提取 `## [vX.Y.Z]` 作为**唯一版本来源**，
+    与 `release.yml` 同源，避免两处版本号漂移。
+  - 输出 `VERSION`（含 `v`）/ `VERSION_NOV`（不含 `v`）/ `SHORT_SHA`
+    到 `$GITHUB_ENV` 供后续步骤使用。
+  - 找不到版本标题或格式不符 `vMAJOR.MINOR.PATCH` 时**直接 `exit 1`**
+    （红线 3：禁止静默失败 —— 无版本号不允许出包）。
+- **新增 `Rename firmware with version` 步骤**，在编译后、上传前重命名产物：
+  - `openwrt-x86-64-generic-ext4-combined-efi.img.gz`
+    → `openwrt-x86-64-ssrplus-vX.Y.Z-<sha7>-ext4-combined-efi.img.gz`
+  - 即把 `openwrt-x86-64-` 之后的目标名（`generic`）替换为
+    `ssrplus-<VERSION>-<SHORT_SHA>`，**保留镜像类型后缀**
+    （`ext4-combined-efi` / `squashfs-combined-efi` 等），便于辨认镜像类型。
+  - 同时生成 `.sha256` 校验文件。
+  - 重命名后**断言**产物名含版本号且以 `.img.gz` 结尾，不符即失败
+    （防止将来改坏命名逻辑却默默出包）。
+- **artifact 名带版本号**：`openwrt-x86-64-ssrplus-vX.Y.Z-<sha7>`，
+  便于在 Actions 页区分每次构建；同时上传 `.sha256`。
+- **Release 上传步骤**同步上传 `.img.gz` 与 `.sha256`（保持幂等：
+  已存在的 asset 跳过）。
+
+### 修复（仓库行尾未归一化导致 11195 行虚假 diff）
+
+- **`.gitattributes` 增加兜底规则 `* text=auto eol=lf`**：
+  - **症状**：工作树中 11 个文件为 CRLF 而索引为 LF，产生 **11195 行**
+    虚假 diff（`git status` 持续噪声）。根因是仓库**缺少兜底行尾规则** ——
+    原有规则只覆盖 `*.sh/*.nft/*.conf/*.json/*.yml/*.yaml/*.md` 与少数
+    无扩展名文件，`package/` 下 vendored 包的 `Makefile` / `LICENSE` /
+    `*.css` / `*.js` / `*.po` / `*.pot` 以及无扩展名的 config 与 hotplug
+    脚本均无规则覆盖，外部工具改写后无人纠正。
+  - **改动**：新增 `* text=auto eol=lf` 兜底（`text=auto` 会让 git 自行判定
+    二进制文件并跳过，故无需逐个排除）；补充 `*.css/*.js/*.po/*.pot/*.htm/
+    *.html/*.txt` 与 `package/**` 规则。
+  - **已归一化 11 个文件**：`package/luci-app-trafficctl/` 下的
+    `LICENSE`、`Makefile`、`htdocs/.../status.css`、`htdocs/.../status.js`、
+    `po/templates/*.pot`、`po/zh-cn/*.po`、`root/etc/config/trafficctl`、
+    `root/etc/hotplug.d/dhcp/99-trafficctl-newdevice`、
+    `root/etc/hotplug.d/iface/99-trafficctl-shapes`、
+    `root/etc/init.d/trafficctl-telegram`、`root/usr/libexec/rpcd/luci.trafficctl`。
+  - **安全性已验证**：归一化前逐个确认这些文件与 HEAD 的 blob 一致
+    （`git diff --ignore-cr-at-eol` 为空，即**纯行尾差异、无内容改动**），
+    归一化后逐个 `git hash-object` 比对仍为 `SAME`。
+  - **结果**：全仓库工作树 CRLF 文件数 = **0**，`git status` 不再有噪声。
+
+### 验证（本次全链路，路由器 `192.168.3.254`，固件 `10aec80` = v0.4.2）
+
+> 用户已全新刷机到 `10aec80abc3d367567405a629507d1439029fe25`（v0.4.2）。
+> 该版本含 v0.4.1 的 BBR 修复与 v0.4.2 的 LAN IP 固化，**不含** v0.4.3 的
+> SSR-Plus 写入修复，故本次验证同时确认了「已修复项仍然有效」与
+> 「未修复项的失效形态符合预期」。
+
+**生效项（实测）**：
+
+| 项 | 实测值 |
+|---|---|
+| 内核 | `6.18.55`，`DISTRIB_REVISION='R26.10.9'` |
+| LAN | `192.168.3.254/24`，`proto=static`（v0.4.2 固化生效） |
+| PPPoE | `wan proto=pppoe device=eth1`，`pppoe-wan mtu 1492` |
+| IPv6 | `wan_6 proto=dhcpv6 reqprefix=56`，`network.wan6` 已删除 |
+| **SQM 上行** | `cake 45Mbit besteffort dual-srchost nat overhead 34 mpu 68` |
+| **SQM 下行** | `ifb4pppoe-wan` `cake 900Mbit dual-dsthost nat ingress` |
+| SQM 队列时延 | 上行 `pk_delay 674us / av_delay 636us`；下行 `pk_delay 25us / av_delay 4us` |
+| SQM 整形工作 | 上行 `overlimits 190264`，`dropped 78 / 322655`（0.02%） |
+| **BBR** | 运行时 `tcp_congestion_control = bbr`，`turboacc.global.set=1`，`turboacc.config.tcpcca=bbr`，`firewall.@defaults[0].tcpcca=bbr`（v0.4.1 双覆盖者修复生效） |
+| `tcp_timestamps` | `1` |
+| `tcp_notsent_lowat` | `4294967295`（默认不限） |
+| 包 | `sqm-scripts 1.6.0-1`、`tc-tiny 6.18.0-2`、`kmod-sched-cake`/`kmod-ifb`/`kmod-sched-core 6.18.55-1` |
+| i18n | `luci-i18n-trafficctl-zh-cn` 已编入（`opkg list-installed` 可见） |
+| 已排除服务 | `vsftpd`/`luci-app-vsftpd`/`ksmbd-server`/`luci-app-ksmbd`/`autosamba` 均为 0 |
+
+**连通性（端到端）**：`baidu 200`、`taobao 200`、`google 302`、`github 200`、
+`youtube 200`；出口 IPv4 = `203.27.106.146`（代理节点，`ifconfig.me` 与
+`api.ipify.org` 一致）。`qq.com` 返回 501 属站点对无 UA 请求的正常响应，非故障。
+
+**DNS 分流（客户端路径 `127.0.0.1:53`）**：
+
+| 域名 | A | AAAA | 判定 |
+|---|---|---|---|
+| `baidu.com` | 4 | 0 | 国内，上游确实无 AAAA |
+| `taobao.com` | 8 | **8** | 国内，保留真实 AAAA（未误伤） |
+| `qq.com` | 2 | 0 | 国内，上游确实无 AAAA |
+| `google.com` | 6 | 0 | 经代理，AAAA 被拒 |
+| `chatgpt.com` | 2 | 0 | 经代理，AAAA 被拒 |
+| `steamcommunity.com` | 1 | 0 | 经代理，AAAA 被拒 |
+| `github.com` | 1 | 0 | 经代理，AAAA 被拒 |
+
+`gfw_list.conf` 中 `127.0.0.1#5335` 条数 = **23617**（与分流设计一致）；
+`dnsmasq` `noresolv=1` + `server=127.0.0.1#5353`；`pdnsd_enable=4`（mosdns）、
+`filter_aaaa=1`；`mosdns` 运行时 `DNS_MODE` = `main_sequence_disable_IPv6`。
+
+**延迟与抖动**：网关 `0.080/0.090/0.132 ms`（0% 丢包）；
+`223.5.5.5` `21.527/21.632/21.852 ms`（0% 丢包，max−min = 0.325 ms）。
+
+**符合预期的未修复项（v0.4.3 已修，本固件是 v0.4.2）**：
+
+- `tunnel_forward_mosdns = tcp://8.8.4.4:53,tcp://8.8.8.8:53`（包默认），
+  且 `option tunnel_forward`（模板特征）**不存在**，说明该键由 LuCI CBI
+  保存时写入；这与 v0.4.3 的根因分析一致（脚本写入因空配置失败而被丢弃）。
+- `/etc/firewall.user` 中的 IPv6 MSS clamp 仍是死代码
+  （`uci show firewall` 中 `firewall.user` include 计数 = 0），
+  但功能未缺失：fw4 的 `mtu_fix=1`（lan/wan 均为 1）已下发 **4 条**
+  `maxseg size set rt mtu` 规则覆盖 IPv4/IPv6。
+
+**开机日志**：`dnsproxy` 的 ERROR 集中于开机窗口（`19:33:53`–`19:34:13`），
+根因与上次一致 —— `eth1` 在 `proto=dhcp` 阶段从上游租到不路由公网的地址，
+PPPoE 建立后即恢复，非新增故障。`modprobe` 报 `act_ipt`/`nss-ifb`
+不存在属 SQM 固定模块清单的无害项（cake 实测正常）。
+`ddns-scripts` 报 `Service section disabled!` 系上游默认模板未启用。
+
 ## [v0.4.3] - 2026-10-09
 
 ### 修复（SSR-Plus 三项 UCI 写入曾整体失效 —— 本节是本仓库迄今最隐蔽的坑）

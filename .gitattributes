@@ -2,6 +2,18 @@
 /.gitignore                           text eol=lf
 /.gitattributes                       text eol=lf
 
+# ---------------------------------------------------------------
+# 兜底规则：按内容自动判定文本/二进制，文本一律 LF。
+# 覆盖下方逐条规则未触及的类型 —— 历史上漏掉的正是这些：
+#   package/ 下 vendored 包的 Makefile / LICENSE / *.css / *.js / *.po / *.pot，
+#   以及无扩展名的 config 与 hotplug 脚本。
+# 背景（2026-10-09）：工作树中曾有 12 个文件为 CRLF 而索引为 LF，产生 11195
+#   行虚假 diff（`git status` 持续噪声）。根因是仓库缺少兜底行尾规则，
+#   外部工具改写工作树后无人纠正。
+# `text=auto` 会让 git 自行判定二进制文件并跳过，故无需逐个排除。
+# ---------------------------------------------------------------
+* text=auto eol=lf
+
 # 关键文件强制 LF 行尾
 # 原因: patch 若被转成 CRLF 会导致 CI 中 git apply 失败;
 #       shell 脚本(init/uci-defaults)若为 CRLF 会在路由器上解析失败。
@@ -13,11 +25,20 @@
 *.yml    text eol=lf
 *.yaml   text eol=lf
 *.md     text eol=lf
+# vendored 包中的 Web 资源与翻译文件（此前无任何规则覆盖）
+*.css    text eol=lf
+*.js     text eol=lf
+*.po     text eol=lf
+*.pot    text eol=lf
+*.htm    text eol=lf
+*.html   text eol=lf
+*.txt    text eol=lf
 # 本机排查脚本（PowerShell）强制 LF（这些文件当前被 .gitignore 排除，
 # 规则为将来若纳入版本管理时预留）
 *.ps1    text eol=lf
+
 # 无扩展名的 OpenWrt 配置文件/脚本强制 LF
-# （core.autocrlf=true 时无扩展名文件不被上面规则覆盖，会被转 CRLF 导致路由器解析失败）
+# （无扩展名文件不被上面的扩展名规则覆盖，会被转 CRLF 导致路由器解析失败）
 #
 # 注意: 模式必须匹配仓库内的**真实路径**。overlay 文件位于 files/ 前缀下
 # （files/etc/config/dnsproxy 等），原先写成根锚定的 /etc/config/dnsproxy
@@ -30,3 +51,7 @@
 **/etc/hotplug.d/iface/50-ipv6-pd-lan text eol=lf
 **/etc/rc.local                       text eol=lf
 **/etc/sysctl.conf                    text eol=lf
+
+# package/ 下 vendored 包的全部文件（含无扩展名的 Makefile / LICENSE /
+# root/etc/config/* / root/etc/hotplug.d/* / root/etc/init.d/*）
+package/**                            text eol=lf
