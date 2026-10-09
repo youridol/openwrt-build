@@ -287,12 +287,22 @@ dnsmasq 把哪些域名指向 mosdns:5335**。当前仓库值 **`'1'`**（v0.4.0
   `local_flows=0` 被无条件写入；其 `service_triggers` 含 `interface.*` raw trigger，
   接口事件会再次清零。**若日后需要它非零，应设 `network.globals.steering_flows`
   （上游 UCI 开关），不要改 `rc.local`。**
-- **[未决] SSR-Plus 运行时生成文件的改动路径**（审计报告 §10 第 6 条）：
-  `applechina.conf`（173 条明文 `114.114.114.114`）、
-  `whitelist_forward.conf`（8 条无效 `server=/域名/127.0.0.1`）、
-  `dnsmasq` 的 `log-facility=/dev/null` 三者都需先定位生成路径再决定用 overlay
-  还是 UCI，否则会被 `ssrplusupdate.sh`（每日 02:00）或服务重启覆盖。
-  **这是当前最优先的后续项。**
+- **[生成路径已查明，待批准] dnsmasq 日志与 Apple 域名的明文 DNS**（审计 §10 D13/D17）：
+  两项都**不能用 overlay 硬覆盖**，原因已查清（详见 `docs/audit/2026-10-09-network-audit.md`
+  末尾「2026-10-10 复核」一节）：
+  - `log-facility=/dev/null` 由 LEDE 上游
+    `package/lean/default-settings/files/zzz-default-settings` 每次构建
+    `sed -i '/log-facility/d'` 再 `echo` 写入 —— overlay 会被再追加一行。
+    正确做法是 UCI `dhcp.@dnsmasq[0].logfacility`（init 脚本第 944 行转成命令行参数，
+    命令行优先于 conf-file）。
+  - `applechina.conf` 的 173 条明文 `114.114.114.114` 由
+    `/etc/init.d/shadowsocksr` 第 1442–1453 行处理。**陷阱**：把 `apple_dns` 设成
+    `127.0.0.1#5353` **不幂等** —— `old_appledns` 只用 `grep -oE` 抽 IP、丢掉端口，
+    二次启动会叠成 `127.0.0.1#5353#5353`。推荐做法是 overlay 该文件且**不设**
+    `apple_dns`（此时那段 `if [ -n "$new_appledns" ]` 整体跳过，文件原样拷入）。
+  - `whitelist_forward.conf` 已**不是**问题：当前 6 行且形状为
+    `nftset=/域名/4#inet#ss_spec#whitelist_domain`（fw4 正确写法），上游升级后自行改掉。
+  改动这两项属「修改 DNS 配置」，**须先申请批准**。
 - **[已解决] `package/luci-app-trafficctl` 的 vendored 副本维护**（v0.4.7，升级到 1.21.4）：
   改为「**vendored 包 + patch 差分 + 同步脚本 + CI 断言**」四件套，不再依赖人工记忆。
   - `patches/luci-app-trafficctl/` 记录相对上游的全部差分，`UPSTREAM` 记录基线 tag。

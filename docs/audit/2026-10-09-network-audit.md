@@ -246,17 +246,40 @@ tcp/udp :::5335  mosdns          tcp/udp :::1234        v2ray
 ### P2-13 dnsmasq 日志被静默丢弃
 
 - 现象：`/etc/dnsmasq.conf` 只含一行有效配置 `log-facility=/dev/null`；`logread | grep -ci dnsmasq` = **0**（日志总行数 1232）。
+- **【2026-10-10 复核更正】改动归属已查明：这是 LEDE 上游的主动行为，不是本项目的配置错误。**
+  `coolsnowwolf/lede` 的
+  `package/lean/default-settings/files/zzz-default-settings` 里有：
+  ```sh
+  sed -i '/log-facility/d' /etc/dnsmasq.conf
+  echo "log-facility=/dev/null" >> /etc/dnsmasq.conf
+  ```
+  即每次构建都**故意**删掉该行再写入 `/dev/null`（dnsmasq 日志量大，上游选择静音）。
+  因此本行**永远不会**出现在 `files/` overlay 里 —— 它由固件的 default-settings
+  在构建时生成。要注意：若用 overlay 强行覆盖 `/etc/dnsmasq.conf`，
+  会被这段 `sed` + `echo` 追加第二次，反而更乱。
 - 影响：dnsmasq 的报错（上游超时、SERVFAIL、配置加载失败）完全不落日志。本次审计中 `dnsproxy`/`mosdns` 也无任何日志（`logread | grep -i dnsproxy` = 0）。整条 DNS 链路在故障时**没有可用的诊断输出**——这正是本项目历史上容易「只看进程在跑」就判为正常的原因之一。
-- 拟改：把 `log-facility` 改为 `/dev/log` 或删除该行（回到默认 syslog），并把 `dnsproxy.verbose` 保持 `0`（避免刷日志），使故障时可从 `logread` 定位上游。
-- 回滚：恢复 `log-facility=/dev/null`。
+- 拟改（**改为走 UCI，不要用 overlay**）：`uci set dhcp.@dnsmasq[0].logfacility='/dev/log'`
+  （`/etc/init.d/dnsmasq` 第 944 行 `append_parm "$cfg" logfacility "--log-facility"`
+  会把 UCI 值转成命令行参数，**命令行参数优先于 `conf-file` 里的同名指令**，
+  故可稳定覆盖上游那段 sed 的结果）。并把 `dnsproxy.verbose` 保持 `0`（避免刷日志）。
+  实测 `logger -t dsh-test` 能在 `logread` 中看到 → syslog 通道可用。
+- 回滚：`uci -q delete dhcp.@dnsmasq[0].logfacility && uci commit dhcp && /etc/init.d/dnsmasq restart`。
 
 ### P2-14 `whitelist_forward.conf` 的 `server=/域名/127.0.0.1` 是无效冗余
 
 - 现象：`/tmp/dnsmasq.d/dnsmasq-ssrplus.d/whitelist_forward.conf` 含 8 条 `server=/域名/127.0.0.1`（无端口 → 指向自身 :53）：`bilibili.com`、`bilibili.cn`、`bilivideo.com`、`bilivideo.cn`、`biliapi.com`、`biliapi.net`、`apple.com`、`api.qnaigc.com`。全树仅此 8 条为不带端口形式（带端口的 `127.0.0.1#5335` 有 23670 条）。
 - 实测：8 个域名解析全部退出码 0、0–1ms、返回真实地址；`example.org` 对照同样正常。**无 NXDOMAIN/SERVFAIL/超时** → dnsmasq 忽略指向自身的 nameserver，未形成自环。
 - 判定：无效冗余，不是故障。同文件中的 `ipset=/域名/whitelist` 仍独立生效（白名单放行功能正常）。
-- 拟改：澄清意图——或删除这 8 条 `server=`（保留 `ipset=`），或补成 `#5335`。需先确认 SSR-Plus 生成该文件的代码路径，避免下次 `ssrplusupdate.sh` 覆盖。
-- 回滚：无需（无功能变化）。
+- **【2026-10-10 复核更正】该条事实描述已过时**：当前路由器上
+  `/tmp/dnsmasq.d/dnsmasq-ssrplus.d/whitelist_forward.conf` 实际只有 **6 行**，
+  且形状是 `nftset=/bilibili.com/4#inet#ss_spec#whitelist_domain`（不是
+  `server=/域名/127.0.0.1`），即 SSR-Plus 在 fw4 下已改用 `nftset=` 把域名解析
+  结果直接灌进 nftables 集合 —— 这正是 fw4 形态下的正确写法，**不是冗余也不是缺陷**。
+  当时判为「8 条无效 `server=`」应是在旧版本（fw3/ipset 时代）观察到的，
+  升级到 1.21.x + fw4 之后已被上游自行修掉。
+- 处置：**无需改动**（结论从「待澄清」改为「上游已自行解决」）。
+  仍保留本条以便日后对照：若又看到 `server=/域名/127.0.0.1`（不带端口）出现，
+  才是真正的自环隐患。
 
 
 ### P1-6 境外 IPv6 完全不经代理
@@ -497,11 +520,11 @@ tcp/udp :::5335  mosdns          tcp/udp :::1234        v2ray
 | D10 | `.gitattributes` 补 `*.ps1`、`**/etc/config/sqm`、`**/etc/sysctl.conf`；更正 AGENTS.md §2 红线 4 / §4 / §5 / §9 / 附录；版本定 **v0.4.0**（功能级） | 已落地 |
 | D11 | `tcp_timestamps` 恢复内核默认 `1`；删 `tcp_notsent_lowat` 行（回到不限） | 已落地 |
 | D12 | 产出：本报告 + `GLOSSARY.md` + `docs/adr/0001`、`docs/adr/0002` | 已落地 |
-| D13 | dnsmasq 日志由 `log-facility=/dev/null` 改回可读（现整条 DNS 链路无诊断输出） | **未落地**：`files/` 中无 `dnsmasq.conf` overlay，该行在路由器上由固件默认自带；需先确认改动归属（新增 overlay vs UCI） |
-| D14 | 清理 `whitelist_forward.conf` 的 8 条无效 `server=/域名/127.0.0.1` | **未落地**：该文件由 SSR-Plus 在运行时生成，生成路径未确认；且实测未形成自环（解析 0–1ms 正常），非故障 |
+| D13 | dnsmasq 日志由 `log-facility=/dev/null` 改回可读（现整条 DNS 链路无诊断输出） | **归属已查明**（2026-10-10）：该行由 LEDE 上游 `package/lean/default-settings/files/zzz-default-settings` 每次构建故意写入 → **不要用 overlay**（会被再追加一行），应用 `uci set dhcp.@dnsmasq[0].logfacility='/dev/log'`。**待用户批准**（属修改 DNS 配置） |
+| D14 | 清理 `whitelist_forward.conf` 的 8 条无效 `server=/域名/127.0.0.1` | **已是伪问题，无需改动**：当前文件 6 行且形状为 `nftset=/域名/4#inet#ss_spec#whitelist_domain`（fw4 正确写法），上游在升级后已自行改掉 |
 | D15 | 移除 `network.wan6` 并同步 `del_list firewall.@zone[1].network='wan6'` | 已落地 |
 | D16 | 不补打 `v0.3.5` tag；本次不发 tag，由用户刷机验证后决定 | 已落地 |
-| D17 | `applechina.conf`（173 条明文 `114.114.114.114`）改走加密链 —— 用户已确认要改 | **未落地**：同 D14，文件由 SSR-Plus 生成，生成路径未确认 |
+| D17 | `applechina.conf`（173 条明文 `114.114.114.114`）改走加密链 —— 用户已确认要改 | **生成路径已查明**（init 脚本 1442–1453 行）。**注意陷阱**：把 `apple_dns` 设成 `127.0.0.1#5353` 不幂等（`old_appledns` 仅抽 IP、丢端口 → 二次启动叠成 `#5353#5353`）。推荐做法 A（overlay 该文件并**不设** `apple_dns`）。**待用户批准** |
 | D18 | MSS clamp 追加改为幂等（现网 `/etc/firewall.user` 已重复两遍） | 已落地 |
 
 ---
@@ -622,4 +645,70 @@ dnsmasq 日志（D13）、`whitelist_forward.conf` 清理（D14）、`applechina
      `ssrplusupdate.sh`（每日 02:00）或服务重启覆盖。**这是本版本最需要优先补的三项。**
 7. **`applechina.conf` 的转发目标已确证**为 `114.114.114.114`（173 条，全部同址）——
    明文 DNS，非 DoH。用户已决定改走加密链，但受第 6 条阻塞。
+
+---
+
+## 【2026-10-10 复核】三项的生成路径与结论（取代上面第 6 条的待办）
+
+三份文件的生成路径**已全部查明**：
+
+### D13 `log-facility=/dev/null` —— 上游行为，用 UCI 覆盖
+
+来源是 `coolsnowwolf/lede` 的
+`package/lean/default-settings/files/zzz-default-settings`：
+```sh
+sed -i '/log-facility/d' /etc/dnsmasq.conf
+echo "log-facility=/dev/null" >> /etc/dnsmasq.conf
+```
+每次构建都会**故意**这样写。故：
+- **不要**用 `files/` overlay 覆盖 `/etc/dnsmasq.conf` —— 那段 `sed` 会在其后
+  再追加一行，结果出现两个 `log-facility`（后者生效，等于白改）。
+- 正确做法是 UCI：`uci set dhcp.@dnsmasq[0].logfacility='/dev/log'`。
+  `/etc/init.d/dnsmasq` 第 944 行 `append_parm "$cfg" logfacility "--log-facility"`
+  会把它转成**命令行参数**，命令行优先于 `conf-file` 里的同名指令，可稳定覆盖。
+- 实测 `logger -t dsh-test` 能在 `logread` 看到 → syslog 通道可用。
+- 回滚：`uci -q delete dhcp.@dnsmasq[0].logfacility && uci commit dhcp && /etc/init.d/dnsmasq restart`。
+
+### D14 `whitelist_forward.conf` —— 上游已自行解决，无需改动
+
+当前文件只有 **6 行**，形状为
+`nftset=/bilibili.com/4#inet#ss_spec#whitelist_domain`，**不是**原先记录的
+`server=/域名/127.0.0.1`。即 SSR-Plus 在 fw4 下已改用 `nftset=` 把解析结果
+灌进 nftables 集合（fw4 形态的正确写法）。原记录应为 fw3/ipset 时代的观察，
+升级后已消失。**结论：不是缺陷，不改。**
+
+### D17 `applechina.conf` 明文 `114.114.114.114` —— 真实存在，但改法有陷阱
+
+生成路径（`/etc/init.d/shadowsocksr` 第 1442–1453 行）：
+```sh
+if [ "$(uci_get_by_type global apple_optimization 1)" == "1" ]; then
+    new_appledns="$(uci_get_by_type global apple_dns)"
+    if [ -n "$new_appledns" ]; then
+        sed -i 's/[[:space:]]//g' /etc/ssrplus/applechina.conf
+        old_appledns=$(grep -oE '[0-9]+\.[0-9]+\.[0-9]+\.[0-9]+' /etc/ssrplus/applechina.conf | sort -u)
+        if [ -n "$old_appledns" ] && [ "$old_appledns" != "$new_appledns" ]; then
+            sed -i "s,$old_appledns,$new_appledns,g" /etc/ssrplus/applechina.conf
+        fi
+    fi
+    cp -f /etc/ssrplus/applechina.conf "$TMP_DNSMASQ_PATH/"
+fi
+```
+
+**关键陷阱：把 `apple_dns` 设成 `127.0.0.1#5353` 不是幂等的。**
+`old_appledns` 是用 `grep -oE '([0-9]+\.){3}[0-9]+'` 抽出来的，**只含 IP、丢掉 `#5353`**。
+所以第二次启动时 `old_appledns=127.0.0.1`、`new_appledns=127.0.0.1#5353`，两者不等
+→ sed 再替换一次 → 得到 `127.0.0.1#5353#5353`，dnsmasq 解析该行会出错。
+（已在本地用同样的 sed 逻辑复现确认。）
+
+**可行的两种做法**（都待用户批准，因属「修改 DNS 配置」）：
+- **做法 A（推荐）**：新增 `files/etc/ssrplus/applechina.conf` overlay，内容为
+  173 条 `server=/<域名>/127.0.0.1#5353`，**并保持 `apple_dns` 未设置**。
+  此时上面那个 `if [ -n "$new_appledns" ]` 整段被跳过，文件被原样 `cp` 到
+  `$TMP_DNSMASQ_PATH`，改动稳定且幂等；需同步确认该路径不是 shadowsocksr 包的
+  conffile（若会，则改用 uci-defaults 在首启时写）。
+- **做法 B**：把 `apple_dns` 设成一个**不带端口**的值（如 `127.0.0.1`）。
+  这样第二轮 `old == new`，幂等；但 `server=/域名/127.0.0.1` 是自环形式，
+  dnsmasq 会忽略该 nameserver（审计 P2-14 已实测），等于**没改** —— 不推荐。
+
+**当前状态：未落地，等用户确认做法 A 后再实施。**
 
