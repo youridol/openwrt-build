@@ -2,6 +2,60 @@
 
 本仓库所有功能/配置改动均记录于此。版本判型遵循全局规范（PATCH / MINOR / MAJOR）。
 
+## [v0.4.9] - 2026-10-10
+
+### 修复 — 上游依赖导致整个包与中文语言包被静默丢弃
+
+v0.4.8 的标签构建在 `Verify SQM / i18n` 步骤失败，原因**不是**上一节修掉的那个断言，
+而是更深的依赖问题，且症状极其隐蔽。
+
+**根因**：上游 1.21.4 的 `LUCI_DEPENDS` 是
+`+conntrack +luci-base +rpcd +curl +tc +iw +hostapd-utils`。
+其中 `hostapd-utils` 在 lede 里声明为
+
+```
+DEPENDS:=@$(subst $(space),||,$(foreach pkg,$(HOSTAPD_PROVIDERS),PACKAGE_$(pkg)))
+VARIANT:=*
+```
+
+即**只有选中了某个 hostapd/wpad 变体时该符号才存在**。本固件目标是 **x86_64 且无
+WiFi 硬件**（实测路由器上无 `/sys/class/ieee80211`、无 `hostapd`/`wpad` 二进制），
+所以这个依赖**永远无法满足**。kconfig 的依赖求解因此把 `luci-app-trafficctl`
+**整包**判定为不可选，连带 `luci.mk` 的 `LuciTranslation` 生成的语言包子包
+`luci-i18n-trafficctl-zh-cn`（`DEPENDS:=$(PKG_NAME)`）一起从 `.config` 消失。
+
+**为什么难发现**：构建**不报错**（`opkg` 只是不装这两个包），界面**只是变英文**，
+没有 `exit 1` 也没有 `WARNING`。只有那一条断言会挂。而且 v0.4.6 及更早的
+`Makefile` 里 `LUCI_DEPENDS:=+conntrack +luci-base +rpcd +curl` 并没有这串依赖，
+所以这个坑是**随 v0.4.7 升级上游 1.21.4 一起引入的**，v0.4.7 又恰好先被另一个
+断言挡住、从未走到这里，因此一直潜伏到 v0.4.8 才暴露。
+
+**处置**：
+
+- `package/luci-app-trafficctl/Makefile` 的 `LUCI_DEPENDS` **去掉 `+hostapd-utils`**，
+  并写明理由。`hostapd_cli` 只用于「WiFi 拒绝列表立即生效」，属可选增强：
+  `trafficctl-fw.sh` 调用前先做 `command -v hostapd_cli` 检测，缺失时回落到 ubus
+  封禁并在界面提示；本目标无 WiFi，该功能本就不适用。
+- CI 新增**反向断言**：`LUCI_DEPENDS` 一旦又出现 `hostapd-utils` 立即失败，
+  避免日后「同步上游」时把坑带回来。
+- CI 诊断输出修正：原诊断用 `grep -E '…trafficctl.*='`，而 kconfig 对未启用的
+  bool 写的是 `# CONFIG_PACKAGE_x is not set`（**行尾没有 `=`**），因此它永远匹配
+  不到、会误报「无任何 trafficctl i18n 符号」。现改为打印
+  `grep -E 'trafficctl' .config` 的全部相关行，并附带 hostapd/wpad 变体状态。
+- `tools/verify-trafficctl-invariants.sh` 同步加入该断言（本地可复跑）。
+- `tools/regen-trafficctl-patches.py` 把 `Makefile` 纳入 `0002` 分组，
+  patch 里现在记录了 `-…+hostapd-utils` / `+…` 这一行差分。
+
+### 验证
+
+`tools/verify-trafficctl-invariants.sh` 全绿（含 `LUCI_DEPENDS` 反向断言、
+patch 在干净上游基线上重放零告警且与 vendored 包逐字节一致）。
+另用负向样例确认该断言有效：把 `+hostapd-utils` 写回即被命中。
+
+**教训**：断言一个 `CONFIG_PACKAGE_*` 之前，先确认该符号在当前目标上确实存在；
+硬件相关的包只能「报告状态」，不能「必须 `=y`」。更进一步，**列出依赖时也要确认
+每个包在当前目标上可满足** —— 一个不可满足的可选依赖会静默拖垮整包。
+
 ## [v0.4.8] - 2026-10-10
 
 ### 新增 — Telegram 机器人提升为页面级独立 tab

@@ -86,14 +86,18 @@
      否则 CI 的 `Verify luci-app-trafficctl local invariants` 会因
      「patch 重放结果 ≠ vendored 包」而 `exit 1`。
    - 升级上游用 `sh tools/sync-trafficctl.sh <tag>`（会覆盖包目录并重算 patch）。
-   - **三项本地改动必须保留**（被覆盖会静默失效，界面不报错、构建也成功）：
+   - **四项本地改动必须保留**（被覆盖会静默失效，界面不报错、构建也成功）：
      1. `root/usr/local/bin/trafficctl-bytes-nft.sh` 的重写 —— 上游至今用本内核
         不支持的 `flags dynamic` map + `update @bytes_in`，且只挂 forward 单钩子；
         丢掉它 → **速率列恒为 `—`**。详见红线 7/8 与第 4 节。
-     2. `status.js`/`status.css`/`telegram.js`/`menu.d`/`config`/`rpcd` 的刷新与 tab 改动 ——
+     2. `Makefile` 的 `LUCI_DEPENDS` 去掉 `+hostapd-utils` —— 该符号只在选中
+        hostapd/wpad 变体时存在，x86_64 无 WiFi → 不可满足 → kconfig 把整包
+        连同 `luci-i18n-trafficctl-zh-cn` 一起从 `.config` 丢弃。
+        丢掉这个修正 → **界面变英文、i18n 断言失败**（构建不报错，症状隐蔽）。
+     3. `status.js`/`status.css`/`telegram.js`/`menu.d`/`config`/`rpcd` 的刷新与 tab 改动 ——
         丢掉它 → **冷启动不再自动刷新**、Telegram 变回超长折叠小节、或设置区冒出
         内层 tab。Telegram 必须是**页面级** tab（顶部行：设备 | Telegram机器人 | 端口转发）。
-     3. `po/zh-cn/luci-app-trafficctl.po` —— 丢掉它 → **中文界面变英文**。
+     4. `po/zh-cn/luci-app-trafficctl.po` —— 丢掉它 → **中文界面变英文**。
    新增/修改该包的中文字符串后，跑 `python3 tools/check-trafficctl-i18n.py`
      （缺失会失败；用 `--write-pot` 同步模板）。
 
@@ -117,10 +121,15 @@
   `kmod-tcp-bbr`、`iptables-mod-fullconenat`。
 - **trafficctl 1.21.4 的额外依赖**：`iw`（读 WiFi 频段/信号）、`conntrack`
   （未卸载模式下的每设备字节统计）—— 这两个 CI 显式 `=y` 并断言。
-  `hostapd-utils`（`hostapd_cli` 把 MAC 拒绝列表立即应用到运行中的射频）**视硬件而定**：
-  上游 `hostapd/Makefile` 里它的 `DEPENDS` 是 `@` 加 `HOSTAPD_PROVIDERS` 列表，
-  只有选中某个 hostapd/wpad 变体时符号才存在。x86_64 无 WiFi 硬件 → 符号不存在，
-  故 CI 对它**条件启用**并只报告状态，**不得**断言「必须 `=y`」（v0.4.7 因此失败过）。
+  **`+hostapd-utils` 已从 Makefile 的 `LUCI_DEPENDS` 中移除**（本仓库补丁，见下）。
+  上游 1.21.4 把它写成依赖，但它在 lede 里声明为
+  `DEPENDS:=@<某个 hostapd/wpad 变体>` + `VARIANT:=*` —— **只有选中 hostapd/wpad
+  变体时该符号才存在**。x86_64 无 WiFi 硬件 → 永远不可满足 → kconfig 把
+  `luci-app-trafficctl` **整包**判为不可选，连带 `luci-i18n-trafficctl-zh-cn`
+  （`DEPENDS:=$(PKG_NAME)`）一起从 `.config` 消失。
+  **症状极其隐蔽**：构建不报错、界面变英文，只有 i18n 断言会挂
+  （v0.4.7/v0.4.8 两次构建均由此失败）。已加 CI 反向断言禁止它被加回去；
+  `tools/verify-trafficctl-invariants.sh` 也会检查。
 
 ---
 
@@ -288,18 +297,33 @@ dnsmasq 把哪些域名指向 mosdns:5335**。当前仓库值 **`'1'`**（v0.4.0
     升级上游跑 `sh tools/sync-trafficctl.sh <tag>`。
   - CI 步骤 `Verify luci-app-trafficctl local invariants` 会从 `UPSTREAM` 记录的 tag
     **真实克隆上游、重放全部 patch、要求与 vendored 包逐字节一致**，
-    并断言本地三项改动仍在（nft 后端语法/三钩子/`@lan`、`optRefresh` 与 `1s` 档位、
-    设置区 tab、中文翻译完整性）。
+    并断言本地改动仍在（nft 后端语法/三钩子/`@lan`、`LUCI_DEPENDS` 不含
+    hostapd-utils、`optRefresh` 与 `1s` 档位、Telegram 为页面级 tab、
+    中文翻译完整性）。
+  全部断言集中在 `tools/verify-trafficctl-invariants.sh`（本地可复跑，
+  与 CI 同一份逻辑；`TCTL_UPSTREAM_LOCAL=<上游包目录>` 可离线运行）。
   **必须保留的本地改动**（被覆盖会静默失效，不会报错）：
   1. 重写 `root/usr/local/bin/trafficctl-bytes-nft.sh` —— 上游**至今未修**，
      仍用本内核不支持的 `flags dynamic` map + `update @bytes_in` 且只挂 forward 单钩子
      （见红线 7/8 与第 4 节的「代理流量走 INPUT/OUTPUT」）。丢掉它 → **速率列恒为 `—`**。
-  2. `status.js` / `status.css` / `telegram.js` / `menu.d` / `config` / `rpcd` 的
+  2. `Makefile` 去掉 `LUCI_DEPENDS` 里的 `+hostapd-utils` —— 见第 3 节。
+     丢掉它 → **整包与中文包一起被 kconfig 丢弃，界面变英文**（构建不报错）。
+  3. `status.js` / `status.css` / `telegram.js` / `menu.d` / `config` / `rpcd` 的
      刷新与 tab 改动 —— 默认 5 秒自动刷新、1s/2s 档位、`refresh_interval` 端到端
      接线、**Telegram 为页面级独立 tab**（顶部行：设备 | Telegram机器人 | 端口转发）。
      丢掉它 → **冷启动不再自动刷新**、Telegram 变回超长折叠小节、或设置区冒出
      内层 tab（两级 tab 让人分不清层级）。
-  3. `po/zh-cn/luci-app-trafficctl.po` —— 丢掉它 → **中文界面变英文**。
+  4. `po/zh-cn/luci-app-trafficctl.po` —— 丢掉它 → **中文界面变英文**。
+- **[已解决] 上游依赖把整包拖下水（v0.4.7 起潜伏，v0.4.9 修）**：
+  上游 1.21.4 的 `LUCI_DEPENDS` 含 `+hostapd-utils`，而该包在 lede 里是
+  `DEPENDS:=@<某个 hostapd/wpad 变体>` + `VARIANT:=*` —— 只有选中 hostapd/wpad
+  变体时符号才存在。本目标 x86_64 无 WiFi → 不可满足 → kconfig 把
+  `luci-app-trafficctl` 整包判为不可选，连带 `luci-i18n-trafficctl-zh-cn`
+  （`DEPENDS:=$(PKG_NAME)`）一起从 `.config` 消失。
+  **排查这类问题的方法**：不要在日志里 grep「符号是否存在」（CI 不 dump 整个
+  `.config`，`is not set` 行又没有 `=`，很容易误判）。正确做法是
+  **对比「已知能通过的旧版本」与「现在」的差异**，或直接在 CI 里
+  `grep -E 'trafficctl' .config` 把全部相关行打出来。
 - **[已解决] CI 守卫的依赖断言曾把正常情况判成失败**（v0.4.7 首次构建，v0.4.8 修）：
   我曾把 `hostapd-utils` 断言为「必须 `=y`」，但上游 `hostapd/Makefile` 里它的
   `DEPENDS` 是 `@` 加 `HOSTAPD_PROVIDERS` 列表 —— **只有选中某个 hostapd/wpad

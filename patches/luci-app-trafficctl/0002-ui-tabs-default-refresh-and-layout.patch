@@ -1,3 +1,41 @@
+diff --git a/Makefile b/Makefile
+index 2cec7e7..bd1591e 100644
+--- a/Makefile
++++ b/Makefile
+@@ -10,7 +10,32 @@ PKG_MAINTAINER:=Denis Iusupov <yusdyr@gmail.com>
+ LUCI_TITLE:=LuCI Traffic Control
+ LUCI_DESCRIPTION:=Per-device traffic monitoring, rate limiting (nft/iptables), \
+  traffic shaping (tc/HTB), internet blocking, and WiFi MAC filtering.
+-LUCI_DEPENDS:=+conntrack +luci-base +rpcd +curl +tc +iw +hostapd-utils
++
++# 【本仓库补丁（相对上游 1.21.4）】去掉 `+hostapd-utils`
++#
++# 上游在这里写的是：
++#   LUCI_DEPENDS:=+conntrack +luci-base +rpcd +curl +tc +iw +hostapd-utils
++#
++# 其中 hostapd-utils 在 lede 里声明为
++#   DEPENDS:=@$(subst $(space),||,$(foreach pkg,$(HOSTAPD_PROVIDERS),PACKAGE_$(pkg)))
++#   VARIANT:=*
++# 即「只有选中了某个 hostapd/wpad 变体时该符号才存在」。本固件目标是
++# **x86_64 且无 WiFi 硬件**（实测路由器上无 /sys/class/ieee80211、无 hostapd/wpad
++# 二进制），因此 PACKAGE_hostapd-utils 永远无法满足。
++#
++# 后果比「装不上这个可选件」严重得多：OpenWrt 的依赖求解会把
++# luci-app-trafficctl 判定为不可满足 → 该符号连同它的中文语言包子包
++# （LuciTranslation 生成 luci-i18n-trafficctl-zh-cn，DEPENDS:=$(PKG_NAME)）
++# **一起从 .config 消失**。表现为构建成功、界面却是英文、且
++# `Verify SQM / i18n` 断言以「无任何 trafficctl i18n 符号」失败。
++# v0.4.7/v0.4.8 两次构建都栽在这里（v0.4.6 及更早的 Makefile 没有这串依赖，
++# 所以从未暴露）。
++#
++# hostapd_cli 只用于「WiFi 拒绝列表立即生效」，属可选增强：
++# root/usr/local/bin/trafficctl-fw.sh 用它之前先做 `command -v hostapd_cli`
++# 检测，缺失时回落到 ubus 封禁并在界面提示。本目标无 WiFi，该功能本就不适用。
++# 故这里改为**不声明**该依赖；WiFi 路由器若需要可自行 opkg install hostapd-utils。
++LUCI_DEPENDS:=+conntrack +luci-base +rpcd +curl +tc +iw
+ LUCI_PKGARCH:=all
+ 
+ include $(TOPDIR)/feeds/luci/luci.mk
 diff --git a/htdocs/luci-static/resources/view/trafficctl/status.css b/htdocs/luci-static/resources/view/trafficctl/status.css
 index a379735..dbf0129 100644
 --- a/htdocs/luci-static/resources/view/trafficctl/status.css

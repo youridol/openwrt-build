@@ -156,6 +156,31 @@ ok "无 td[data-…] 前缀选择器"
 
 # ─────────────────────────────────────────────────────────────
 note ""
+note "=== 4b. LUCI_DEPENDS 不得含本目标不可满足的包 ==="
+# hostapd-utils 在 lede 里声明为 DEPENDS:=@<某个 hostapd/wpad 变体> + VARIANT:=*，
+# 即**只有选中 hostapd/wpad 变体时该符号才存在**。本目标是 x86_64 无 WiFi 硬件
+# （实测路由器上无 /sys/class/ieee80211、无 hostapd/wpad 二进制），故永远不可满足。
+# 危害不止「少装一个可选件」：kconfig 会把 luci-app-trafficctl **整包**判为不可选，
+# 连带 LuciTranslation 生成的 luci-i18n-trafficctl-zh-cn（DEPENDS:=$(PKG_NAME)）
+# 一起从 .config 消失。症状隐蔽 —— 构建不报错、界面变英文、只有 i18n 断言会挂。
+# v0.4.7/v0.4.8 两次构建均由此失败。
+MK="$PKG/Makefile"
+if grep -qE '^LUCI_DEPENDS:.*hostapd-utils' "$MK"; then
+    bad "Makefile 的 LUCI_DEPENDS 含 hostapd-utils（x86_64 不可满足，会让整包消失）"
+    grep -nE '^LUCI_DEPENDS:' "$MK"
+else
+    ok "LUCI_DEPENDS 未含 hostapd-utils"
+fi
+# 反向确认：剩余依赖行必须存在且非空
+if grep -qE '^LUCI_DEPENDS:=\+' "$MK"; then
+    ok "LUCI_DEPENDS 形如 ':=+…'（$(sed -n 's/^LUCI_DEPENDS:=//p' "$MK")）"
+else
+    bad "LUCI_DEPENDS 缺失或格式异常"
+    grep -nE '^LUCI_DEPENDS' "$MK" || echo "       (没有 LUCI_DEPENDS 行)"
+fi
+
+# ─────────────────────────────────────────────────────────────
+note ""
 note "=== 5. 文件模式与上游一致（29 × 100755 + 11 × 100644）==="
 # patch 里记录的是索引模式；若副本模式漂移，重放时会打印
 #   warning: xxx has type 100755, expected 100644

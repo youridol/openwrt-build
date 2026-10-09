@@ -265,30 +265,24 @@ jobs:
           echo "CONFIG_PACKAGE_kmod-sched-core=y" >> .config
           echo "CONFIG_PACKAGE_tc-tiny=y" >> .config
 
-          # === luci-app-trafficctl 1.21.4 新增的显式依赖 ===
-          # 1.21.4 的 LUCI_DEPENDS 为
+          # === luci-app-trafficctl 的显式依赖 ===
+          # 上游 1.21.4 的 LUCI_DEPENDS 为
           #   +conntrack +luci-base +rpcd +curl +tc +iw +hostapd-utils
-          # trafficctl 用它们做：iw → 读取 WiFi 频段/信号强度；
-          # hostapd-utils (hostapd_cli) → 立即把 MAC 拒绝列表应用到运行中的射频
-          # （缺它时 UI 会提示「WiFi 阻断未生效，需重启 WiFi」）；
-          # conntrack → 未卸载模式下的每设备字节统计。
           #
-          # 写入方式说明（v0.4.7 踩过）：
-          #   iw 与 conntrack 是硬依赖，直接写 =y 即可。
-          #   hostapd-utils **不可**无条件写 =y —— 上游 Makefile 里它是
-          #     DEPENDS:=@$(HOSTAPD_PROVIDERS 之一)
-          #   即只有选中某个 hostapd/wpad 变体时该符号才存在。本目标是
-          #   x86_64 无 WiFi 硬件，该符号不存在；直接写这一行会让
-          #   `make defconfig` 之后符号仍未定义，后续断言随之失败。
-          #   故改为「条件启用」：仅当某个 hostapd/wpad 变体已被选中时才加。
+          # 本仓库已在 package/luci-app-trafficctl/Makefile 里**去掉
+          # +hostapd-utils**（见该文件的注释）。原因：hostapd-utils 在 lede 中
+          # 声明为 `DEPENDS:=@<某个 hostapd/wpad 变体>` + `VARIANT:=*`，
+          # 而本目标是 x86_64 无 WiFi 硬件 → 该符号永远不可满足 →
+          # 依赖求解把 luci-app-trafficctl **整包**判定为不可选，连带
+          # luci-i18n-trafficctl-zh-cn（DEPENDS:=$(PKG_NAME)）一起从 .config
+          # 消失。症状是构建不报错、界面变英文、i18n 断言失败。
+          #
+          # 这里仍然显式写出 iw 与 conntrack：它们真实存在且可用
+          # （conntrack 实测 opkg 提供 1.4.7-1；iw 见 log 中的 OK 行），
+          # 显式声明可避免「依赖靠自动解析、顺序一变就丢」。
+          # hostapd-utils 不再写入 —— 本目标无 WiFi，且它已不是依赖项。
           echo "CONFIG_PACKAGE_iw=y" >> .config
           echo "CONFIG_PACKAGE_conntrack=y" >> .config
-          if grep -qE "^CONFIG_PACKAGE_(hostapd|wpad|wpa-supplicant)[a-z0-9-]*=y$" .config; then
-            echo "CONFIG_PACKAGE_hostapd-utils=y" >> .config
-            echo "  (检测到 hostapd/wpad 变体，已启用 hostapd-utils)"
-          else
-            echo "  (无 hostapd/wpad 变体，跳过 hostapd-utils —— x86_64 无 WiFi 属正常)"
-          fi
 
           # === 显式排除不用的文件服务 ===
           # 实测这两个服务对用户无用：vsftpd 监听 0.0.0.0:21 但无实际用途；
@@ -328,48 +322,63 @@ jobs:
             || echo "WARN luci-app-sqm 未启用（LuCI 里无 SQM 页面，但内核与脚本仍生效）"
 
           echo "=== luci-app-trafficctl 的功能依赖 ==="
-          # trafficctl 1.21.4 用 iw 读 WiFi 频段/信号、用 hostapd-utils
-          # (hostapd_cli) 把 MAC 拒绝列表立即应用到运行中的射频、用 conntrack
-          # 在未卸载模式下统计字节。
-          #
-          # 注意三者的可用性并不相同（v0.4.7 首次构建即栽在这条断言上）：
-          #   conntrack —— 真实存在（实测 opkg 有 conntrack 1.4.7-1，
-          #       /usr/sbin/conntrack 在位），必为 =y。
-          #   iw —— 存在于 packages feed，但**不一定随依赖被拉入**；
-          #       本仓库已显式写 =y，故断言为 =y 是合理的。
-          #   hostapd-utils —— 上游 Makefile 里它的 DEPENDS 是
-          #       @$(HOSTAPD_PROVIDERS 之一)，即**只有选中某个 hostapd/wpad
-          #       变体时该符号才存在**。x86_64 目标无 WiFi 硬件，符号合理地
-          #       不存在，因此**不能**断言 =y，否则把正常情况判成失败。
-          # 故：iw / conntrack 必须 =y；hostapd-utils 只报告状态。
+          # 本仓库已在 Makefile 里去掉上游的 +hostapd-utils（理由见该文件注释：
+          # 它只在选中 hostapd/wpad 变体时存在，x86_64 无 WiFi → 不可满足 →
+          # 会导致 luci-app-trafficctl 与其 i18n 子包一起从 .config 消失）。
+          # 故这里只断言真正存在且必需的两项。
           for sym in CONFIG_PACKAGE_iw CONFIG_PACKAGE_conntrack; do
             if grep -q "^${sym}=y$" .config; then
               echo "OK   ${sym}=y"
             else
               echo "FAIL ${sym} 未启用（trafficctl 相应功能会降级）："
-              grep -E "^#? ?${sym}[ =]" .config || echo "  (符号不存在于 .config)"
+              grep -E "^#? ?${sym}(=| is not set)" .config || echo "  (符号不存在于 .config)"
               exit 1
             fi
           done
-          # hostapd-utils：视硬件而定，缺失只是 WiFi 阻断降级，不阻断构建。
-          if grep -q "^CONFIG_PACKAGE_hostapd-utils=y$" .config; then
-            echo "OK   CONFIG_PACKAGE_hostapd-utils=y（WiFi 阻断可即时生效）"
+          # 反向断言：Makefile 里不得再出现 hostapd-utils 依赖。
+          # 它若被加回去，整包会被依赖求解丢弃（症状隐蔽：构建成功但界面变英文）。
+          if grep -q 'hostapd-utils' ../openwrt-build/package/luci-app-trafficctl/Makefile \
+               && grep -qE '^LUCI_DEPENDS:.*hostapd-utils' ../openwrt-build/package/luci-app-trafficctl/Makefile; then
+            echo "FAIL Makefile 的 LUCI_DEPENDS 又含 hostapd-utils"
+            echo "     该符号在 x86_64（无 WiFi）不可满足，会让整包与中文包一起消失。"
+            grep -nE '^LUCI_DEPENDS:' ../openwrt-build/package/luci-app-trafficctl/Makefile
+            exit 1
           else
-            echo "INFO hostapd-utils 未启用 —— 本目标无 WiFi 硬件（x86_64），"
-            echo "     trafficctl 的 WiFi 阻断功能不适用；界面会自行提示降级。"
+            echo "OK   LUCI_DEPENDS 未含 hostapd-utils（x86_64 不可满足）"
           fi
 
-          echo "=== trafficctl 中文语言包（符号名易写错，必须校验）==="
+          echo "=== trafficctl 本体与中文语言包都必须入配置 ==="
           # 正确符号：luci-i18n-trafficctl-zh-cn
           #   luci.mk 由目录名推导 LUCI_BASENAME=trafficctl，再生成
           #   Package/luci-i18n-$(LUCI_BASENAME)-$(lang)。
           # 历史错误写法 luci-i18n-luci-app-trafficctl-zh-cn 不匹配任何符号，
-          # 会被 confdata.c 静默忽略，导致中文包从未编入 —— 故在此阻断。
-          if grep -q "^CONFIG_PACKAGE_luci-i18n-trafficctl-zh-cn=y$" .config; then
-            echo "OK   CONFIG_PACKAGE_luci-i18n-trafficctl-zh-cn=y"
-          else
-            echo "FAIL 中文语言包未启用，检查符号名是否写成 luci-i18n-luci-app-trafficctl-zh-cn"
-            grep -E "^#? ?CONFIG_PACKAGE_luci-i18n-.*trafficctl.*=" .config || echo "  (无任何 trafficctl i18n 符号)"
+          # 会被 confdata.c 静默忽略，导致中文包从未编入。
+          #
+          # 这里同时断言**本体**：中文语言包是 luci-app-trafficctl 的子包
+          # （DEPENDS:=$(PKG_NAME)），本体一旦被依赖求解丢弃，语言包必然
+          # 跟着消失。只查语言包会在根因上绕远路（v0.4.7/v0.4.8 的经历）。
+          tfail=0
+          for sym in CONFIG_PACKAGE_luci-app-trafficctl \
+                     CONFIG_PACKAGE_luci-i18n-trafficctl-zh-cn; do
+            if grep -q "^${sym}=y$" .config; then
+              echo "OK   ${sym}=y"
+            else
+              echo "FAIL ${sym} 未启用"
+              tfail=1
+            fi
+          done
+          if [ "$tfail" != "0" ]; then
+            # 诊断输出：kconfig 对未启用的 bool 写的是
+            #   # CONFIG_PACKAGE_x is not set
+            # 行尾**没有** '='，所以 `grep '…trafficctl.*='` 永远匹配不到，
+            # 会误报「无任何 trafficctl i18n 符号」。故这里直接列出全部相关行。
+            echo "--- .config 中与 trafficctl 有关的全部符号 ---"
+            grep -E "trafficctl" .config || echo "  (一条都没有 → 包被依赖求解整体丢弃)"
+            echo "--- 根因排查：hostapd/wpad 变体是否存在 ---"
+            grep -E "^#? ?CONFIG_PACKAGE_(hostapd|wpad|wpa-supplicant)[a-z0-9_-]*(=| is not set)" .config \
+              || echo "  (没有任何 hostapd/wpad 变体 → x86_64 无 WiFi)"
+            echo "  提示：若上面既无 luci-app-trafficctl 也无 luci-i18n-*，则根因是"
+            echo "        LUCI_DEPENDS 里含本目标不可满足的包（历史上是 hostapd-utils）。"
             exit 1
           fi
 

@@ -28,8 +28,11 @@ GROUPS = [
      'rewrite nft byte counter backend for this kernel',
      ['root/usr/local/bin/trafficctl-bytes-nft.sh']),
     ('0002-ui-tabs-default-refresh-and-layout.patch',
-     'settings tabs, default refresh, card waterfall layout',
-     ['htdocs/luci-static/resources/view/trafficctl/status.js',
+     'Makefile dep fix, settings tabs, default refresh, card waterfall layout',
+     [# 去掉 LUCI_DEPENDS 里的 +hostapd-utils：该符号只在选中 hostapd/wpad
+      # 变体时存在；x86_64 无 WiFi → 不可满足 → 整包连同 i18n 子包一起被丢弃。
+      'Makefile',
+      'htdocs/luci-static/resources/view/trafficctl/status.js',
       'htdocs/luci-static/resources/view/trafficctl/status.css',
       # Telegram Bot 提升为页面级独立 tab（新增视图 + menu.d 登记 + 排序）
       'htdocs/luci-static/resources/view/trafficctl/telegram.js',
