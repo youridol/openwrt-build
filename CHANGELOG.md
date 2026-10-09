@@ -2,6 +2,65 @@
 
 本仓库所有功能/配置改动均记录于此。版本判型遵循全局规范（PATCH / MINOR / MAJOR）。
 
+## [v0.4.1] - 2026-10-09
+
+> 刷机实测后的修复版本。v0.4.0 的改动在真实固件上验证，发现并修复 BBR 未生效的
+> 两个覆盖者；其余改动（SQM 双向整形、filter_aaaa、i18n 符号名）已实测生效。
+
+### 修复（BBR 未生效，被两个后执行者覆盖）
+
+- **`99-gaming-optimize` 增加 `turboacc.global.set='1'` 与 `firewall.@defaults[0].tcpcca='bbr'`**：
+  - **现象**：v0.4.0 刷机后 `turboacc.config.tcpcca` 仍为 `cubic`，
+    运行时 `net.ipv4.tcp_congestion_control = cubic`。
+  - **根因 1**：`/rom/etc/uci-defaults/turboacc` 在本脚本**之后**执行
+    （uci-defaults 按文件名排序，`99-gaming-optimize` < `turboacc`），
+    其逻辑是 `cat > /etc/config/turboacc` **整体重写**配置，把 `tcpcca` 写回 `cubic`。
+    对策：先设 `turboacc.global.set='1'` —— 该脚本首行守卫
+    `[ "$(uci -q get "turboacc.global.set")" -eq "1" ] && exit 0` 会使它直接退出。
+    这是利用上游自身的幂等开关，无需修改上游包。
+  - **根因 2**：内核升级到 6.18.55 后，`/etc/init.d/firewall`（`START=19`）
+    新增 `apply_tcpcca_section()`，读 `firewall.@defaults[0].tcpcca`（默认 `cubic`）
+    并 `sysctl -w` 覆盖，在 fw4 `start/reload/restart` 时都会执行。
+    对策：同时设 `firewall.@defaults[0].tcpcca='bbr'`。
+  - **验证**（路由器 192.168.3.254）：三项均为 `bbr`，运行时已生效。
+
+### 已验证生效（v0.4.0 改动在真实固件的实测结果）
+
+- **SQM 双向 cake 整形成功**：上行 `pppoe-wan` → `cake 45Mbit besteffort
+  dual-srchost nat nowash overhead 34 mpu 68`；下行 `ifb4pppoe-wan` →
+  `cake 900Mbit besteffort dual-dsthost nat ingress`。上行排队时延
+  `pk_delay 23us / av_delay 3us`，`overlimits 203438`（整形器积极工作），
+  丢包率 <0.01%。对照：刷机前 `pppoe-wan` 为 `qdisc noqueue`（无任何队列管理）。
+- **`filter_aaaa=1` 生效**：`chatgpt.com` 的 AAAA 已被拒绝（回落 IPv4 走代理，
+  ADR-0001 的语义得到实测确认）；`taobao.com` 仍返回 8 条真实 AAAA（未误伤国内）；
+  `google.com` / `steamcommunity.com` / `github.com` 的 AAAA 均为 0 条（合成 SOA）。
+- **mosdns `reject` 前置生效**：运行时 `/var/etc/ssrplus/mosdns-config.yaml`
+  的序列为 `lazy_cache → reject → prefer_ipv4 → forward`（6 个 plugin 完整）。
+- **trafficctl 中文语言包已编入**：`luci-i18n-trafficctl-zh-cn` 出现在
+  `opkg list-installed`，证实 v0.4.0 的 i18n 符号名修正有效（原符号从未匹配）。
+- **`wan6` 已删除**、`firewall zone wan` 只剩 `wan`、`vsftpd`/`ksmbd`/`autosamba`
+  均已从固件移除、`tcp_timestamps=1`、`tcp_notsent_lowat` 回到默认不限。
+
+### 记录（固件基线变化，本版本未修改这些）
+
+- 内核 `6.12.107` → **`6.18.55`**；`DISTRIB_REVISION` `R26.05.20` → **`R26.10.9`**。
+- **防火墙后端由 fw3/iptables 改为 fw4/nftables**（`table inet fw4`）。
+  SSR-Plus 透明代理同步改用 nftables（`table inet ss_spec`；
+  `blacklist_forward.conf` 输出 `nftset=` 而非 `ipset=`）。
+- 由此产生一个已知死代码：`/etc/firewall.user` 不再被 fw4 加载
+  （`uci show firewall` 中无该 include），故 `99-gaming-optimize` 追加的
+  IPv6 MSS clamp 行在当前固件上不生效。功能未缺失 —— fw4 的 `mtu_fix=1`
+  已原生下发 4 条 `tcp option maxseg size set rt mtu` 规则覆盖该功能。
+  **后续应改为 fw4 的 include 机制（`/etc/nftables.d/`）或直接依赖 mtu_fix。**
+
+### 未落地（需先定位 SSR-Plus 生成路径，同 v0.4.0）
+
+- `applechina.conf` 明文 DNS 加密化、dnsmasq 日志恢复、whitelist 冗余清理。
+- 另：`tunnel_forward_mosdns` 会被 LuCI 页面的
+  `client_dns_defaults.htm` 在加载时重置为包默认（`tcp://8.8.4.4:53,...`）。
+  本次已在路由器上手工改回 DoH 并重启生效；**仓库侧尚无防护**，
+  需评估是否改为不依赖该 UCI 项，或加启动后校正。
+
 ## [v0.4.0] - 2026-10-09
 
 > 依据：`docs/audit/2026-10-09-network-audit.md`（对在线路由器 `192.168.3.254` 的只读全链路审计，

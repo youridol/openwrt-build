@@ -25,13 +25,26 @@ uci set firewall.@defaults[0].drop_invalid='1'
 uci set firewall.@zone[0].mtu_fix='1'
 
 # turboacc 的 tcpcca 必须与 sysctl.conf 的 bbr 一致。
-# 原因：/etc/init.d/turboacc 在 S90 启动（晚于 S11sysctl），其第 145 行执行
-#   sysctl -w net.ipv4.tcp_congestion_control="$tcpcca"
-# 实测 turboacc.config.tcpcca 默认 'cubic'，会把 sysctl.conf 设好的 bbr 覆盖
-# 掉（运行时读数为 cubic，尽管 tcp_bbr 模块已加载、bbr 在可用列表中）。
+#
+# 【2026-10-09 刷机实测】内核从 6.12.107 升到 6.18.55 后，出现**两个**覆盖者：
+#
+# 覆盖者 1 —— turboacc 包自带的 uci-defaults（/rom/etc/uci-defaults/turboacc）：
+#   它的执行顺序在本脚本**之后**（uci-defaults 按文件名排序，'9' < 't'），
+#   且其逻辑是 `cat > /etc/config/turboacc` **整体重写**该配置文件，
+#   把 tcpcca 写回 'cubic'。因此单靠下面第 34 行的 uci set 会被它抹掉。
+#   对策：先设 turboacc.global.set='1' —— 该脚本首行有守卫
+#   `[ "$(uci -q get "turboacc.global.set")" -eq "1" ] && exit 0`，
+#   使其直接退出、不再重写配置。这是利用上游自身的幂等开关，无需改上游包。
+#
+# 覆盖者 2 —— /etc/init.d/firewall（START=19）新增的 apply_tcpcca_section()：
+#   它读 firewall.@defaults[0].tcpcca（默认 'cubic'）并 sysctl -w 覆盖，
+#   在 fw4 restart/reload/start 时都会跑。故须同时设该 UCI 键。
+#
 # 作用域仅限路由器自身发起的 TCP（dnsproxy 的 DoH、代理隧道、opkg），
 # 不影响转发的客户端流量。
+uci set turboacc.global.set='1'
 uci set turboacc.config.tcpcca='bbr'
+uci set firewall.@defaults[0].tcpcca='bbr'
 uci -q set turboacc.config.fastpath='flow_offloading'
 uci -q set turboacc.config.fastpath_fo_hw='0'
 uci -q set turboacc.config.fullcone='1'
