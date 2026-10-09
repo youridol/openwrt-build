@@ -230,7 +230,19 @@ dnsmasq 把哪些域名指向 mosdns:5335**。当前仓库值 **`'1'`**（v0.4.0
    真实浏览器才是有效证据。
 4. 改动 UCI 后确认**运行时**配置已重建（如 `/var/etc/ssrplus/mosdns-config.yaml`）。
 5. 改完做**回归**：国内域名（baidu/qq/taobao）+ 国外站点（google/youtube/github）+ DNS 加密链路。
-6. 改动前**先备份**：`/etc/config/*`、`/var/etc/ssrplus/*` 到 `/root/ssrfix-backup-<ts>/`，
+6. **在路由器上做诊断时，别让诊断本身污染测量结果**（实测踩过，误导过一次判断）：
+   - BusyBox 的 `ps w` 会把长命令行**折行**，且脚本**自身的 cmdline 会包含搜索关键字**
+     → `ps w | grep -c '<脚本名>'` 会**严重虚高**（我一度报出「2532 个进程」，
+     真实只有 8 个，并据此误判成「生产事故」）。
+     正确做法：遍历 `/proc/[0-9]*/cmdline`，**只匹配 exec 名 + 第一个参数**，
+     不要把整条 cmdline 纳入匹配。
+   - 循环 `for d in /proc/[0-9]*` 本身就会 fork 大量进程并推高 load。
+     测 load 要用**单次读取**（`cat /proc/loadavg`），并观察它是否在**自行回落**；
+     若回落，说明尖峰是诊断造成的。
+   - 同理：断言脚本/CI 守卫里的 `grep` 要**先剥掉注释行**再判断，
+     否则「解释错误写法的注释」会让断言永久误报（v0.4.7 的 nft 守卫、
+     v0.4.10 的 `setInterval(runQuery` 守卫都踩过）。
+7. 改动前**先备份**：`/etc/config/*`、`/var/etc/ssrplus/*` 到 `/root/ssrfix-backup-<ts>/`，
    并在报告中写明回滚命令。
 
 ---
