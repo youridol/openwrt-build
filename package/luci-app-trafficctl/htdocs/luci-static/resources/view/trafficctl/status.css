@@ -209,16 +209,29 @@
 }
 
 /* ── Column visibility chips ─────────────────────────────────────── */
+/* chips 容器：必须有 flex-wrap，否则在窄卡片里会横向溢出。
+   （2026-10-10 修复：此前完全没有为 .tc-chips-wrap 定义样式，
+   一长串「可见列」chips 在卡片内不能换行，右侧被裁掉。） */
+.tc-chips-wrap {
+    display: flex;
+    flex-wrap: wrap;
+    align-items: center;
+    gap: 2px;
+    margin-bottom: 2px;
+    max-width: 100%;
+}
 .tc-col-chip {
     display: inline-block;
     padding: 2px 8px;
     border-radius: 10px;
     font-size: 11px;
+    line-height: 16px;
     cursor: pointer;
     user-select: none;
-    margin: 2px;
+    margin: 0;
     transition: all .15s;
     font-weight: 500;
+    flex: 0 0 auto;
 }
 .tc-col-chip--on  { background: var(--tc-speed); color: #fff; border: 1px solid var(--tc-speed); }
 .tc-col-chip--off { background: var(--tc-bg); color: var(--tc-muted); border: 1px solid var(--tc-border); }
@@ -261,21 +274,37 @@
 .tc-settings-body {
     padding: 12px 14px 14px;
 }
-/* 卡片网格：窄屏单列，宽屏自动多列 */
+/* 设置区容器：**CSS 多列瀑布流**，卡片在列间自动分配，列高自然均衡。
+   历史教训（两次）：
+     - 旧版 repeat(auto-fit, minmax(320px,1fr)) 网格：行高由该行最高卡片决定，
+       邻列矮卡片下方留大片空白，视觉参差；
+     - 中间版按语义手工分两列（flex）：当某列含 Telegram 这类超长卡片时，
+       另一列会出现数百像素空白（实测左 340px vs 右 1692px）。
+   多列布局（column-count）让浏览器按内容高度自动平衡，是这类「不等高卡片流」
+   的标准解法。窄屏自动降为单列。 */
 .tc-settings-grid {
-    display: grid;
-    grid-template-columns: repeat(auto-fit, minmax(320px, 1fr));
-    gap: 10px;
-    align-items: start;
+    column-count: 2;
+    column-gap: 12px;
+}
+@media (max-width: 760px) {
+    .tc-settings-grid { column-count: 1; }
 }
 .tc-card {
+    /* 卡片不跨列断裂，且与下一张保持间距 */
+    break-inside: avoid;
+    -webkit-column-break-inside: avoid;
+    page-break-inside: avoid;
+    display: inline-block;   /* 配合 column 布局，避免外边距塌陷 */
+    width: 100%;
+    margin: 0 0 12px;
     border: 1px solid var(--tc-border);
     border-radius: 5px;
     background: var(--tc-bg);
     overflow: hidden;
 }
+/* 展开态用左侧色条标示，比整框变色更克制、也更容易扫视 */
 .tc-card--open {
-    border-color: var(--tc-speed, var(--tc-border));
+    border-left: 3px solid var(--tc-speed, var(--tc-border));
 }
 .tc-collapsible-head {
     display: flex;
@@ -283,10 +312,11 @@
     gap: 6px;
     cursor: pointer;
     user-select: none;
-    padding: 8px 12px !important;
+    padding: 9px 12px !important;
     margin: 0 !important;
     border-bottom: 1px solid transparent;
     font-weight: 600;
+    font-size: 12px;
     transition: background .12s ease;
 }
 .tc-collapsible-head:hover {
@@ -296,11 +326,12 @@
     border-bottom-color: var(--tc-border);
 }
 .tc-collapse-arrow {
-    font-size: 11px;
+    font-size: 10px;
     color: var(--tc-muted);
-    width: 12px;
+    width: 10px;
     display: inline-block;
     text-align: center;
+    flex: 0 0 auto;
 }
 .tc-card .tc-collapsible-body {
     padding: 10px 12px;

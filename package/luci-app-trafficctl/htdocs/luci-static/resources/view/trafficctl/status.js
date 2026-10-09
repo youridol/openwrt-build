@@ -206,6 +206,17 @@ function loadOpts() {
 function saveOpts(o) {
 	try { window.localStorage.setItem(STORAGE_KEY, JSON.stringify(o)); } catch(e) {}
 }
+
+// 整表自动刷新间隔（秒）。0 = 关闭。
+//
+// 【2026-10-10 修正】旧版默认值是 0（即「关」），于是**冷启动打开页面后
+// 数据完全不会自动刷新**，用户必须手动点「所有设备」或切换设备才更新一次。
+// 现改为默认 5 秒；用户在界面上显式选「关」时（保存 refresh=0）仍然尊重其选择。
+var DEFAULT_REFRESH_SECS = 5;
+function getRefreshSecs(o) {
+	if (!o || o.refresh === undefined || o.refresh === null) return DEFAULT_REFRESH_SECS;
+	return parseInt(o.refresh, 10) || 0;
+}
 function fmtBytes(b) {
 	if (b == null || isNaN(b)) return '—';
 	if (b < 1024) return b + ' B';
@@ -1443,27 +1454,37 @@ return view.extend({
 
 		var refreshPick = mkChipPick([
 			{v:'0',l:_('Off')},{v:'5',l:'5s'},{v:'10',l:'10s'},{v:'30',l:'30s'},{v:'60',l:'60s'}
-		], String(opts.refresh||0), function(v) {
-			var o = loadOpts(); o.refresh = parseInt(v); saveOpts(o); updateUrlParams(o); self._setupTimer();
+		], String(getRefreshSecs(opts)), function(v) {
+			var o = loadOpts(); o.refresh = parseInt(v, 10); saveOpts(o); updateUrlParams(o);
+			self._setupTimer();
+			// 从「关」切回非 0 时立刻拉一次，避免用户白等一整个间隔
+			if (getRefreshSecs(o) > 0) runQuery();
 		});
 
 		var pollIntervalPick = mkChipPick([
 			{v:'0',l:_('Off')},{v:'1',l:'1s'},{v:'2',l:'2s'},{v:'5',l:'5s'}
 		], String(opts.pollInterval !== undefined ? opts.pollInterval : 2), function(v) {
-			var o = loadOpts(); o.pollInterval = parseInt(v); saveOpts(o); updateUrlParams(o);
+			var o = loadOpts(); o.pollInterval = parseInt(v, 10); saveOpts(o); updateUrlParams(o);
 			self._restartBytesPoll();
 		});
 
 		var avgWindowPick = mkChipPick([
 			{v:'5',l:'5s'},{v:'15',l:'15s'},{v:'30',l:'30s'},{v:'60',l:'60s'}
 		], String(opts.avgWindow||15), function(v) {
-			var o = loadOpts(); o.avgWindow = parseInt(v); saveOpts(o); updateUrlParams(o);
+			var o = loadOpts(); o.avgWindow = parseInt(v, 10); saveOpts(o); updateUrlParams(o);
+			// 改「窗口」后必须立即按新窗口重算，否则新设置要等一个轮询周期才生效，
+			// 用户观感就是「改了没反应 / 没自动刷新」。
+			refreshSpeedViews();
 		});
 
 		var avgMethodPick = mkChipPick([
 			{v:'simple',l:_('Simple')},{v:'ewma',l:_('EWMA')}
 		], opts.avgMethod||'simple', function(v) {
 			var o = loadOpts(); o.avgMethod = v; saveOpts(o); updateUrlParams(o);
+			// 切换算法后清掉历史与 EWMA 累加器，避免两种算法的数据互相污染。
+			self._speedHistory = {}; self._upSpeedHistory = {};
+			self._speedEwma = {};    self._upSpeedEwma = {};
+			refreshSpeedViews();
 		});
 
 		var protoPick = mkChipPick([
@@ -1879,7 +1900,11 @@ return view.extend({
 
 		function pollBytes() {
 			if (document.hidden) return;
-			if (!isAllMode()) return;
+			// 【2026-10-10 修正】旧版在此处直接 `if (!isAllMode()) return;`，
+			// 导致**单设备模式下速率与流量曲线完全不刷新**（用户选定某台设备后
+			// 页面数字定格不动，必须切回「所有设备」才恢复）。实际上 bytes 数据
+			// 对两种模式都有用：all 模式刷新表格单元格，单设备模式刷新图表。
+			// 故不再按模式提前返回，改为在下方按模式分派刷新目标。
 			callBytes().then(function(data) {
 				if (!Array.isArray(data)) return;
 				var now = Date.now();
@@ -1986,10 +2011,12 @@ return view.extend({
 						time: now
 					};
 				});
-				if (self._sumCol === '_speed') {
-					runAll();
-				} else {
-					updateSpeedCells();
+				// 按当前模式分派刷新目标：
+				//   all 模式 -> 表格单元格（排序在速率列时需整表重排）
+				//   单设备   -> 只需刷新该设备的流量曲线（updateDeviceGraph）
+				if (isAllMode()) {
+					if (self._sumCol === '_speed') runAll();
+					else updateSpeedCells();
 				}
 				updateDeviceGraph();
 			}).catch(function(){});
@@ -2011,6 +2038,53 @@ return view.extend({
 			while (deviceGraphDiv.firstChild) deviceGraphDiv.removeChild(deviceGraphDiv.firstChild);
 			deviceGraphDiv.appendChild(svg);
 			deviceGraphDiv.classList.remove('tc-hidden');
+		}
+
+		// 立即按当前配置重算并重绘速率相关视图（不等待下一次轮询）。
+		//
+		// 【2026-10-10 新增】「窗口」「方法」等速率参数以前只是写进 localStorage，
+		// 要等下一个轮询周期才由 pollBytes 重新计算，用户感觉是「改了没反应」。
+		// 这里把「重算 + 重绘」抽出来，供参数变更时即时调用：
+		//   - 窗口变小：按新窗口截断历史后重算 avg/max
+		//   - 方法切换：按新算法重算（调用方已清空历史）
+		// 只重算已有历史，不主动发起网络请求，避免与轮询重复打后端。
+		function refreshSpeedViews() {
+			var o = loadOpts();
+			var pollInterval = o.pollInterval || 2;
+			var avgWindow = o.avgWindow || 15;
+			var avgMethod = o.avgMethod || 'simple';
+			var maxSamples = Math.max(2, Math.round(avgWindow / (pollInterval || 2)));
+
+			function recompute(histKey, mapKey, ewmaKey) {
+				var hist = self[histKey] || {};
+				Object.keys(hist).forEach(function(ip) {
+					var h = hist[ip];
+					if (!h || !h.length) return;
+					// 按新窗口截断，保证窗口从「下一次生效」变为「立即生效」
+					while (h.length > maxSamples) h.shift();
+					var sum = 0, mx = 0;
+					h.forEach(function(p) { sum += p.speed; if (p.speed > mx) mx = p.speed; });
+					var cur = h[h.length - 1] ? h[h.length - 1].speed : 0;
+					var avg;
+					if (avgMethod === 'ewma') {
+						// 用当前历史按 EWMA 递推一遍，得到与新设置一致的均值
+						var alpha = 2 / (maxSamples + 1);
+						avg = h[0].speed;
+						for (var i = 1; i < h.length; i++) avg = alpha * h[i].speed + (1 - alpha) * avg;
+						self[ewmaKey] = self[ewmaKey] || {};
+						self[ewmaKey][ip] = avg;
+					} else {
+						avg = sum / h.length;
+					}
+					self[mapKey][ip] = { current: cur, avg: avg, max: mx };
+				});
+			}
+			recompute('_speedHistory', '_speedMap', '_speedEwma');
+			recompute('_upSpeedHistory', '_upSpeedMap', '_upSpeedEwma');
+
+			if (isAllMode()) updateSpeedCells();
+			updateDeviceGraph();
+			updateExtendedStats();
 		}
 
 		function runSingle(ip) {
@@ -2291,7 +2365,12 @@ return view.extend({
 				deviceGraphDiv.classList.add('tc-hidden');
 				runAll();
 			} else {
-				self._stopBytesPoll();
+				// 【2026-10-10 修正】旧版在此处调用 self._stopBytesPoll()，
+				// 把速率/丢弃/整形的轮询**整体停掉**；而 runSingle 只查一次
+				// 连接列表，于是选定设备后速率与流量曲线永久定格。
+				// 现在单设备模式同样需要字节轮询（用于刷新该设备的曲线），
+				// 故改为确保轮询处于运行状态。
+				self._startBytesPoll();
 				pollDrops();
 				runSingle(ip);
 			}
@@ -2330,7 +2409,9 @@ return view.extend({
 
 		this._setupTimer = function() {
 			if (self._timer) { clearInterval(self._timer); self._timer = null; }
-			var iv = parseInt(loadOpts().refresh||0);
+			// 用 getRefreshSecs 而非直接读 opts.refresh：
+			// 未设置时取默认 5 秒，保证**冷启动即自动刷新**。
+			var iv = getRefreshSecs(loadOpts());
 			if (iv > 0) self._timer = setInterval(runQuery, iv*1000);
 		};
 
@@ -2338,13 +2419,14 @@ return view.extend({
 			if (self._bytesTimer) return;
 			var o = loadOpts();
 			var pollMs = (o.pollInterval !== undefined ? o.pollInterval : 2) * 1000;
-			if (pollMs <= 0) return;
-			pollBytes();
-			self._bytesTimer = setInterval(pollBytes, pollMs);
-			pollDrops();
-			self._dropTimer = setInterval(pollDrops, 5000);
-			pollShapeStats();
-			self._shapeTimer = setInterval(pollShapeStats, 5000);
+			// pollInterval=0（用户显式选「关」）时不建速率轮询，但要照常刷新
+			// 丢弃/整形统计，否则那两个面板会一起冻结。
+			if (pollMs > 0) {
+				pollBytes();
+				self._bytesTimer = setInterval(pollBytes, pollMs);
+			}
+			if (!self._dropTimer) { pollDrops();     self._dropTimer  = setInterval(pollDrops, 5000); }
+			if (!self._shapeTimer){ pollShapeStats(); self._shapeTimer = setInterval(pollShapeStats, 5000); }
 		};
 		this._stopBytesPoll = function() {
 			if (self._bytesTimer) { clearInterval(self._bytesTimer); self._bytesTimer = null; }
@@ -2353,7 +2435,8 @@ return view.extend({
 		};
 		this._restartBytesPoll = function() {
 			self._stopBytesPoll();
-			if (isAllMode()) self._startBytesPoll();
+			// 两种模式都需要速率轮询：all 模式刷表格，单设备模式刷曲线。
+			self._startBytesPoll();
 		};
 
 		this._setupTimer();
@@ -2414,55 +2497,56 @@ return view.extend({
 		var sectionLabel = function(t) { return E('div', {'class':'tc-section-label'}, t); };
 
 		// ── 设置面板 ───────────────────────────────────────────────────────
-		// 2026-10-10 起：**默认展开，不再整体收起**。
+		// 2026-10-10 起：**默认全展开，不再整体收起**。
 		// 旧实现把整个设置区包在一个可折叠容器里（初始 tc-hidden），
 		// 用户必须点击标题才能看到任何设置项，且收起后完全看不出里面有什么。
-		// 现改为：常显标题栏（不可折）+ 内容始终可见；
-		// 内部 6 个小节改为**并排卡片网格**，以标题+摘要常显，各自可独立展收。
+		// 2026-10-10 二次修正：各小节**默认全部展开**，且**不再把折叠状态写进
+		//   localStorage**。原因是旧版把每次点击都持久化，用户一旦收起来过某个
+		//   小节，之后每次打开页面它都是收起的，表现为「设置没有完全展开」。
+		//   设置项本就不多，默认全展开更符合直觉。
 		var settingsBody = E('div', {'class':'tc-settings-body'});
 		var settingsHeader = E('div', {'class':'tc-settings-head'}, [
 			E('span', {'class':'tc-settings-title'}, _('Settings')),
 			E('span', {'class':'tc-settings-hint'}, _('changes are saved automatically'))
 		]);
 
-		// ── 可展开小节（内容懒加载；默认收起但**标题常显**）──────────────
-		// startOpen 语义保留：调用方可要求某节初始展开。
-		// onFirstOpen: 首次展开时回调，用于懒加载内容（避免一次性打满 RPC）。
-		function mkCollapsible(title, content, startOpen) {
-			var body = E('div', {'class': 'tc-collapsible-body' + (startOpen ? '' : ' tc-hidden')});
+		// ── 可展开小节 ────────────────────────────────────────────────────
+		// startOpen 缺省为 true（全展开）。仍保留折叠能力，便于用户临时收起
+		// 不关心的小节；但折叠状态只在本次会话内有效，不跨页面持久化。
+		// loader: 首次展开时调用的懒加载函数，签名 loader(bodyEl)。
+		//   作为参数传入的**原因**：小节默认展开时，mkCollapsible 内部会在
+		//   返回前就触发首次展开；若沿用旧的「返回后再赋值 api.onFirstOpen」
+		//   写法，回调此刻还未挂上，懒加载永远不会执行（内容区将空白）。
+		function mkCollapsible(title, content, startOpen, loader) {
+			var open = (startOpen === undefined) ? true : !!startOpen;
+			var body = E('div', {'class': 'tc-collapsible-body' + (open ? '' : ' tc-hidden')});
 			if (content) body.appendChild(content);
-			var arrow = E('span', {'class':'tc-collapse-arrow'}, startOpen ? '▾' : '▸');
+			var arrow = E('span', {'class':'tc-collapse-arrow'}, open ? '▾' : '▸');
 			var label = sectionLabel(title);
 			label.classList.add('tc-collapsible-head');
 			label.appendChild(arrow);
-			var el = E('div', {'class':'tc-card' + (startOpen ? ' tc-card--open' : '')}, [label, body]);
-			var api = {label: label, body: body, el: el, _opened: !!startOpen};
-			function setOpen(open) {
+			var el = E('div', {'class':'tc-card' + (open ? ' tc-card--open' : '')}, [label, body]);
+			var api = {label: label, body: body, el: el, _opened: false, _loader: loader};
+			function setOpen(v) {
+				open = !!v;
 				body.classList.toggle('tc-hidden', !open);
 				el.classList.toggle('tc-card--open', open);
 				arrow.textContent = open ? '▾' : '▸';
-				if (open && !api._opened) { api._opened = true; if (api.onFirstOpen) api.onFirstOpen(); }
+				if (open && !api._opened) {
+					api._opened = true;
+					if (api._loader) api._loader(body);
+				}
 			}
-			// 展开状态本身也持久化，刷新后保持用户的布局选择
-			var key = 'tc.set.' + title;
-			var saved = null;
-			try { saved = window.localStorage.getItem(key); } catch (e) {}
-			if (saved === '1') setOpen(true);
-			else if (saved === '0') setOpen(false);
-
-			label.addEventListener('click', function() {
-				var willOpen = body.classList.contains('tc-hidden');
-				setOpen(willOpen);
-				try { window.localStorage.setItem(key, willOpen ? '1' : '0'); } catch (e) {}
-			});
-			// 供懒加载逻辑复用（保持原有调用点语义）
+			label.addEventListener('click', function() { setOpen(!open); });
 			label._tcSetOpen = setOpen;
+			// 初始即展开时立刻触发懒加载
+			if (open) setOpen(true);
 			return api;
 		}
 
 		// ── Telegram Bot section (lazy-loaded) ─────────────────────────────
-		var tgSection = mkCollapsible(_('Telegram Bot'), null, false);
-		tgSection.onFirstOpen = function() { loadTelegramUI(tgSection.body); };
+		// loadTelegramUI 是函数声明（会提升），可直接作为 loader 传入。
+		var tgSection = mkCollapsible(_('Telegram Bot'), null, true, function(body) { loadTelegramUI(body); });
 
 		function loadTelegramUI(container) {
 			var statusSpan = E('span', {'style':'font-size:12px;margin-left:8px;color:var(--tc-muted)'}, _('Loading…'));
@@ -2780,8 +2864,7 @@ return view.extend({
 		settingsBody.appendChild(displaySection.el);
 
 		// ── Logging & Persistence section (lazy-loaded) ────────────────────
-		var loggingSection = mkCollapsible(_('Logging & Persistence'), null, false);
-		loggingSection.onFirstOpen = function() { loadLoggingUI(loggingSection.body); };
+		var loggingSection = mkCollapsible(_('Logging & Persistence'), null, true, function(body) { loadLoggingUI(body); });
 
 		function loadLoggingUI(container) {
 			var statusSpan = E('span', {'style':'font-size:12px;color:var(--tc-muted)'}, _('Loading…'));
@@ -2840,8 +2923,7 @@ return view.extend({
 		settingsBody.appendChild(loggingSection.el);
 
 		// ── Flow Offload section (lazy-loaded) ─────────────────────────────
-		var offloadSection = mkCollapsible(_('Flow Offload'), null, false);
-		offloadSection.onFirstOpen = function() { loadOffloadUI(offloadSection.body); };
+		var offloadSection = mkCollapsible(_('Flow Offload'), null, true, function(body) { loadOffloadUI(body); });
 
 		function loadOffloadUI(container) {
 			var statusSpan = E('span', {'style':'font-size:12px;color:var(--tc-muted)'}, _('Loading…'));
@@ -2932,13 +3014,24 @@ return view.extend({
 			connFiltersRow
 		]), true);
 
-		// 全部小节统一放入卡片网格（顺序即视觉顺序）
+		// ── 装配设置区：扁平瀑布流，避免卡片高度参差与列间空白 ─────────────
+		//
+		// 【2026-10-10 布局重排（第二次）】
+		//   旧版一：`repeat(auto-fit, minmax(320px,1fr))` 网格。CSS Grid 的行高由
+		//     该行最高的卡片决定，邻列矮卡片下方留大片空白。
+		//   旧版二：按语义手工分两列（flex）。当某列含 Telegram（实测 1270px）
+		//     这类超长卡片时，另一列出现数百像素空白（实测左 340 vs 右 1692）。
+		//   现改为**扁平列表 + CSS 多列瀑布流**（.tc-settings-grid 用 column-count），
+		//     由浏览器按卡片实际高度自动分列，列高自然均衡；窄屏自动降单列。
+		//   因此这里**不再套列容器**，直接把卡片顺序放入网格。
+		//   顺序按「使用频率从高到低」排列，保证首屏是常用项：
+		//     显示 / 表格与速率（高频）→ 流量卸载 → 日志 → Telegram（低频、最长）
 		var settingsGrid = E('div', {'class':'tc-settings-grid'}, [
-			tgSection.el,
 			displaySection.el,
-			loggingSection.el,
+			tableSection.el,
 			offloadSection.el,
-			tableSection.el
+			loggingSection.el,
+			tgSection.el
 		]);
 		settingsBody.appendChild(settingsGrid);
 
