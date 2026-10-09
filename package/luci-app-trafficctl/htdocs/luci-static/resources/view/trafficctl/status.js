@@ -1452,8 +1452,12 @@ return view.extend({
 		var deviceGraphDiv = E('div', { 'class': 'tc-device-graph tc-hidden' });
 		var activityDiv = E('div', { 'class': opts.showActivity ? '' : 'tc-hidden' });
 
+		// 整表自动刷新间隔。用户要求最低支持 1 秒（用于实时监看所有设备表格）。
+		// 注意：1s 会明显增加 rpcd 调用频率（每秒一次 summary+bytes），
+		// 在低性能设备上可能造成负担，故默认仍为 5s，但把 1s/2s 作为可选项。
 		var refreshPick = mkChipPick([
-			{v:'0',l:_('Off')},{v:'5',l:'5s'},{v:'10',l:'10s'},{v:'30',l:'30s'},{v:'60',l:'60s'}
+			{v:'0',l:_('Off')},{v:'1',l:'1s'},{v:'2',l:'2s'},{v:'5',l:'5s'},
+			{v:'10',l:'10s'},{v:'30',l:'30s'},{v:'60',l:'60s'}
 		], String(getRefreshSecs(opts)), function(v) {
 			var o = loadOpts(); o.refresh = parseInt(v, 10); saveOpts(o); updateUrlParams(o);
 			self._setupTimer();
@@ -1579,11 +1583,11 @@ return view.extend({
 		graphPopup.addEventListener('mouseleave', hideGraphPopup);
 
 		connsDiv.addEventListener('mouseenter', function(ev) {
-			var cell = ev.target.closest ? ev.target.closest('td[data-spark-ip]') : null;
+			var cell = ev.target.closest ? ev.target.closest('[data-spark-ip]') : null;
 			if (cell) showGraphPopup(cell);
 		}, true);
 		connsDiv.addEventListener('mouseleave', function(ev) {
-			var cell = ev.target.closest ? ev.target.closest('td[data-spark-ip]') : null;
+			var cell = ev.target.closest ? ev.target.closest('[data-spark-ip]') : null;
 			if (!cell) return;
 			var related = ev.relatedTarget;
 			if (related && (graphPopup === related || graphPopup.contains(related))) return;
@@ -1805,7 +1809,7 @@ return view.extend({
 
 			Object.keys(self._speedMap).forEach(function(ip) {
 				var s = self._speedMap[ip];
-				var cell = connsDiv.querySelector('td[data-speed-ip="'+ip+'"]');
+				var cell = connsDiv.querySelector('[data-speed-ip="'+ip+'"]');
 				if (!cell) return;
 				if (s.current > 1024) {
 					cell.className = 'tc-speed-active';
@@ -1817,7 +1821,7 @@ return view.extend({
 
 				// 上行速率列（与下行对称刷新）
 				var su = self._upSpeedMap[ip];
-				var upCell = connsDiv.querySelector('td[data-upspeed-ip="'+ip+'"]');
+				var upCell = connsDiv.querySelector('[data-upspeed-ip="'+ip+'"]');
 				if (upCell && su) {
 					if (su.current > 1024) {
 						upCell.className = 'tc-upspeed-active';
@@ -1828,7 +1832,7 @@ return view.extend({
 					upCell.title = _('Avg')+': '+fmtSpeed(su.avg)+' / '+_('Max')+': '+fmtSpeed(su.max);
 				}
 
-				var sparkCell = connsDiv.querySelector('td[data-spark-ip="'+ip+'"]');
+				var sparkCell = connsDiv.querySelector('[data-spark-ip="'+ip+'"]');
 				if (sparkCell) {
 					while (sparkCell.firstChild) sparkCell.removeChild(sparkCell.firstChild);
 					var sm = self._shapeMap[ip], dm = self._dropMap[ip];
@@ -1851,7 +1855,7 @@ return view.extend({
 					Object.keys(self._dropMap).forEach(function(ip) {
 						var dp = self._dropMap[ip].packets || 0;
 						var db = self._dropMap[ip].bytes   || 0;
-						var cell = connsDiv.querySelector('td[data-drop-ip="'+ip+'"]');
+						var cell = connsDiv.querySelector('[data-drop-ip="'+ip+'"]');
 						if (!cell) return;
 						while (cell.firstChild) cell.removeChild(cell.firstChild);
 						if (dp > 0) {
@@ -1884,7 +1888,7 @@ return view.extend({
 				if (isAllMode()) {
 					Object.keys(self._shapeMap).forEach(function(ip) {
 						var bl = self._shapeMap[ip].backlog || 0;
-						var cell = connsDiv.querySelector('td[data-backlog-ip="'+ip+'"]');
+						var cell = connsDiv.querySelector('[data-backlog-ip="'+ip+'"]');
 						if (!cell) return;
 						while (cell.firstChild) cell.removeChild(cell.firstChild);
 						if (bl > 0) {
