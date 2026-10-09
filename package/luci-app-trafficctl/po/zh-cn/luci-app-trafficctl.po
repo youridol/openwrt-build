@@ -1338,3 +1338,6 @@ msgstr " 标志（Linux 5.7+，由 fw4/nftables 自动设置）会周期性把�
 
 msgid "If your current firmware uses fw3 (iptables) or ships a kernel older than 5.7, a router with modern OpenWrt and fw4 support will have this working out of the box."
 msgstr "若当前固件使用 fw3（iptables）或内核低于 5.7，则换用支持 fw4 的新版 OpenWrt 路由器即可开箱可用。"
+
+msgid "Notifications and remote control over Telegram. Changes are saved automatically."
+msgstr "通过 Telegram 接收通知与远程控制。更改会自动保存。"

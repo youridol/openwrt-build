@@ -2,6 +2,96 @@
 
 本仓库所有功能/配置改动均记录于此。版本判型遵循全局规范（PATCH / MINOR / MAJOR）。
 
+## [v0.4.8] - 2026-10-10
+
+### 新增 — Telegram 机器人提升为页面级独立 tab
+
+顶部 tab 行由「设备 | 端口转发」变为 **「设备 | Telegram机器人 | 端口转发」**，
+设置区内的嵌套 tab 全部取消（两级 tab 会让人分不清哪一层在切页）。
+
+- **新增独立视图 `telegram.js`**（396 行）：把 `status.js` 里的 `loadTelegramUI`
+  （304 行）连同它依赖的 `mkToggle`（10 行）与 `RATE_PRESETS`（11 行）一起迁出。
+  搬迁前做过依赖分析，确认它只用到全局 `E` / `_` 与三个 `rpc.declare`，
+  **不引用** `status.js` 的任何局部作用域（`self` / `opts` / `loadOpts` /
+  `settingsBody` 等），因此可以安全独立成视图。
+- `status.js` 删除 `tgSection`、`loadTelegramUI`、三个 `callTelegram*` 声明，
+  以及 `tabDisplay` / `tabDevices` / `tabTelegram` / `settingsTabBar` /
+  `selectSettingsTab` 整套内层 tab 机制（−307 行、−29 行）。其余设置项改为
+  在 `settingsBody` 内顺序常显。
+- `menu.d` 新增 `telegram` 页，`order` 排为 **设备(1) | Telegram(2) | 端口转发(3)**。
+- CSS 移除 `.tc-settings-tabs` / `.tc-stab` / `.tc-settings-pane`；卡片瀑布流移到
+  `.tc-settings-body`（`column-count: 2`，≤760px 降为单列）。
+
+### 修复 — v0.4.7 构建失败：依赖断言写错
+
+v0.4.7 在 5m11s 失败于 CI 步骤 `Verify SQM / i18n`。根因是**我新增的断言写错了**：
+把 `hostapd-utils` 断言为「必须 `=y`」。上游 `hostapd/Makefile` 里该包的
+`DEPENDS` 是 `@` 加 `HOSTAPD_PROVIDERS` 列表 —— **只有选中某个 hostapd/wpad
+变体时该符号才存在**。本目标是 x86_64、无 WiFi 硬件（实测路由器上无
+`/sys/class/ieee80211`、无 `hostapd`/`wpad` 二进制），符号合理地不存在。
+
+- `iw` / `conntrack` 仍断言必须 `=y`（`conntrack` 实测真实存在：opkg 有
+  `conntrack 1.4.7-1`，`/usr/sbin/conntrack` 在位）。
+- `hostapd-utils` 改为**条件启用**（仅当检测到 hostapd/wpad 变体时才写 `=y`），
+  校验时只报告状态，缺失不阻断构建。
+- 用 4 个场景本地验证断言逻辑：无 WiFi ✓、有 WiFi + utils ✓、缺 `iw` ✗（被拦）、
+  缺 `conntrack` ✗（被拦）。
+
+### 修复 — patch 里的伪 mode 变更
+
+v0.4.7 的 patch 含大量 `index a..b 100755`，套用时打印
+`warning: xxx has type 100755, expected 100644`。根因：regen 脚本在临时目录建
+git 仓库，而上游 clone 位于 Windows 挂载点（`/mnt/c`），DrvFs 把文件一律报告为
+`0777`，于是 `git add -A` 记成 `100755`，与 patch 应有的索引模式不符
+（上游权威：**29 × 100755 + 11 × 100644**）。
+
+- `tools/regen-trafficctl-patches.py` 新增 `local_index_modes()` / `apply_modes()`：
+  以**本仓库 git 索引**为权威模式表，在 `git add` **之前** `os.chmod` 落盘权限。
+- 生成后复查「无 `old`/`new mode` 行」。
+- 实测：三个 patch 重放**零告警**且与 vendored 包**逐字节一致**。
+
+### 变更 — CI 守卫重构为可本地复跑的脚本
+
+把 226 行内联断言抽成 `tools/verify-trafficctl-invariants.sh`。抽出的两个理由：
+内联的 heredoc/python 段在 YAML 里易因缩进出错，且**本地无法复现**；抽出后
+本地 `sh tools/verify-trafficctl-invariants.sh` 与 CI 用同一份逻辑，不会出现
+「本地过了 CI 挂」。断言覆盖：nft 后端语法/三钩子/`@lan`/单事务、JSON 契约字段、
+`po/zh-cn` 完整性、`optRefresh` 与 1s 档位、`refresh_interval` 端到端、
+设置区无内层 tab、`telegram.js` 与 `menu.d` 登记、无 `td[data-]` 前缀选择器、
+文件模式与上游一致，以及「从 `UPSTREAM` 记录的 tag 克隆 → 重放全部 patch →
+与 vendored 包逐字节一致」。
+
+### 修复 — sync 脚本的设计缺陷
+
+原 `tools/sync-trafficctl.sh` 先覆盖 `package/` 再重算 patch —— 这会把本地改动
+一起覆盖掉，重算出**空 patch**。重写为：备份 → 覆盖新上游 → **套用旧 patch**
+（冲突则明确中止并给出回滚命令）→ 重算 → 更新 `UPSTREAM` → 复跑校验。
+并加入前置检查：包目录或 patch 目录有未提交改动时**拒绝执行**。
+同时把 patch 生成逻辑统一到 regen 工具一处，避免两份实现漂移。
+
+### 验证
+
+**静态**：`node --check`（`status.js`/`portfw.js`/`telegram.js`）通过；
+全部 shell `sh -n` 通过；`msgfmt` 编译通过，中文翻译 **402/402** 覆盖、0 空译文；
+文件模式 **29 × 100755 + 11 × 100644**（与上游一致）；patch 无 `old`/`new mode` 行；
+workflow YAML 合法（26 步）。
+
+**负向测试（9 项，全部被抓住）**：nft 退回不支持语法、缺 output 钩子、
+移除 `optRefresh`、缺 1s 档位、`status.js` 出现内层 tab 痕迹、`telegram.js` 缺失、
+`menu.d` 未登记、模式漂移、中文翻译缺失 —— 破坏后脚本均退出 1 并打印对应
+FAIL 行；恢复后复跑通过。
+
+**路由器实测（192.168.3.254）**：顶部 tab 渲染为
+**设备 | Telegram机器人 | 端口转发**，三者切换正常、高亮正确；
+Telegram 独立页含 7 个开关 + 17 个键盘按钮，全中文；
+设备页设置区无内层 tab、5 个卡片常显、`column-count=2` 瀑布流生效；
+设备表 22 下行 + 22 上行单元格，速率实时刷新（187 bit/s ~ 129.9 Kbit/s）。
+
+**已知限制（非缺陷）**：路由器上的 `.lmo` 是 10 月 9 日刷机时从 1.8.0 编译的旧
+文件，故本版新增字符串（如 `New Device Defaults`、`Display & Table`）在当前
+路由器上仍显示英文。`.lmo` 由构建主机的 `po2lmo` 在打包时生成（路由器上没有该
+工具），下一次固件构建会从本仓库 `.po` 重新编译。
+
 ## [v0.4.7] - 2026-10-10
 
 ### 新增 — trafficctl 升级到上游 1.21.4 并建立「可跟进上游」的维护机制

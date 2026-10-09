@@ -21,6 +21,7 @@ PKG = ROOT / 'package' / 'luci-app-trafficctl'
 JS_FILES = [
     PKG / 'htdocs/luci-static/resources/view/trafficctl/status.js',
     PKG / 'htdocs/luci-static/resources/view/trafficctl/portfw.js',
+    PKG / 'htdocs/luci-static/resources/view/trafficctl/telegram.js',
 ]
 PO = PKG / 'po/zh-cn/luci-app-trafficctl.po'
 POT = PKG / 'po/templates/luci-app-trafficctl.pot'

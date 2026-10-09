@@ -253,9 +253,6 @@ msgstr ""
 msgid "Device name"
 msgstr ""
 
-msgid "Devices"
-msgstr ""
-
 msgid "Devices already known:"
 msgstr ""
 
@@ -272,9 +269,6 @@ msgid "Dismiss"
 msgstr ""
 
 msgid "Display"
-msgstr ""
-
-msgid "Display & Table"
 msgstr ""
 
 msgid "Distinct remote clients"
@@ -566,6 +560,9 @@ msgid "Note: speed is measured before shaper — bursts above limit are normal"
 msgstr ""
 
 msgid "Notifications"
+msgstr ""
+
+msgid "Notifications and remote control over Telegram. Changes are saved automatically."
 msgstr ""
 
 msgid "Notifications only"

@@ -365,12 +365,15 @@
 .tc-col-chip--on  { background: var(--tc-speed); color: var(--tc-on-accent); border: 1px solid var(--tc-speed); }
 .tc-col-chip--off { background: var(--tc-bg); color: var(--tc-muted); border: 1px solid var(--tc-border); }
 
-/* ── Settings panel (tabbed) ──────────────────────────────────────────
+/* ── Settings panel ───────────────────────────────────────────────────
    【本仓库补丁（相对上游 1.21.4）】
    上游把整个设置区包在可折叠容器内且初始隐藏（.tc-settings-toggle +
    .tc-settings-body.tc-hidden），用户必须点标题才能看到设置项。
-   本仓库改为：常显标题栏 + 内容始终可见 + **tab 分页**（Telegram 独立成页，
-   因为其表单极长，实测单卡片可达 1270px，会把整页撑到 2600px 以上）。
+   本仓库改为：常显标题栏 + 内容始终可见。
+
+   Telegram Bot 已提升为**页面级独立 tab**（telegram.js，由 menu.d 生成，
+   与「设备」「端口转发」并列），故这里不再有内层 tab —— 两级 tab 会让人
+   分不清哪一层在切页。相关样式（.tc-settings-tabs / .tc-stab）已移除。
    ─────────────────────────────────────────────────────────────────── */
 .tc-settings-panel {
     border-radius: 6px;
@@ -397,51 +400,25 @@
     font-size: 11px;
     color: var(--tc-faint, var(--tc-muted));
 }
+/* 卡片瀑布流：卡片高度不一，用 CSS 多列让浏览器自动均衡分列，
+   避免网格「按行取最高卡片」留下的大片空白。 */
 .tc-settings-body {
     padding: 12px 14px 14px;
-}
-
-/* ── Settings tabs ─────────────────────────────────────────────────── */
-.tc-settings-tabs {
-    display: flex;
-    flex-wrap: wrap;
-    gap: 4px;
-    margin-bottom: 12px;
-    border-bottom: 1px solid var(--tc-border);
-}
-.tc-stab {
-    padding: 6px 14px;
-    cursor: pointer;
-    user-select: none;
-    font-size: 12px;
-    font-weight: 600;
-    color: var(--tc-muted);
-    border: 1px solid transparent;
-    border-bottom: 2px solid transparent;
-    border-radius: 4px 4px 0 0;
-    margin-bottom: -1px;
-    transition: color .12s ease, background .12s ease;
-}
-.tc-stab:hover {
-    color: var(--tc-text, inherit);
-    background: var(--tc-bg);
-}
-.tc-stab--active {
-    color: var(--tc-speed);
-    border-bottom-color: var(--tc-speed);
-    background: var(--tc-bg);
-}
-
-/* ── Settings cards：多列瀑布流 ──────────────────────────────────────
-   卡片高度不一（Telegram 1.2k px、显示 ~100 px），用 CSS 多列让浏览器
-   自动均衡分列，避免网格「按行取最高卡片」留下的大片空白。 */
-.tc-settings-pane {
     column-count: 2;
     column-gap: 12px;
 }
 @media (max-width: 760px) {
-    .tc-settings-pane { column-count: 1; }
+    .tc-settings-body { column-count: 1; }
 }
+
+/* Telegram 独立页：内容较长，单列铺满，不做多列（表单需要整行宽度）。 */
+.tg-page {
+    margin-top: 4px;
+}
+
+/* ── Settings cards ──────────────────────────────────────────────────
+   卡片高度不一（Telegram 1.2k px、显示 ~100 px），由 .tc-settings-body 上的
+   column-count 让浏览器自动均衡分列，避免网格「按行取最高卡片」留下空白。 */
 .tc-card {
     break-inside: avoid;
     -webkit-column-break-inside: avoid;

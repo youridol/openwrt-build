@@ -90,8 +90,9 @@
      1. `root/usr/local/bin/trafficctl-bytes-nft.sh` 的重写 —— 上游至今用本内核
         不支持的 `flags dynamic` map + `update @bytes_in`，且只挂 forward 单钩子；
         丢掉它 → **速率列恒为 `—`**。详见红线 7/8 与第 4 节。
-     2. `status.js`/`status.css`/`config`/`rpcd` 的刷新与 tab 改动 ——
-        丢掉它 → **冷启动不再自动刷新**、Telegram 变回超长折叠小节。
+     2. `status.js`/`status.css`/`telegram.js`/`menu.d`/`config`/`rpcd` 的刷新与 tab 改动 ——
+        丢掉它 → **冷启动不再自动刷新**、Telegram 变回超长折叠小节、或设置区冒出
+        内层 tab。Telegram 必须是**页面级** tab（顶部行：设备 | Telegram机器人 | 端口转发）。
      3. `po/zh-cn/luci-app-trafficctl.po` —— 丢掉它 → **中文界面变英文**。
    新增/修改该包的中文字符串后，跑 `python3 tools/check-trafficctl-i18n.py`
      （缺失会失败；用 `--write-pot` 同步模板）。
@@ -114,9 +115,12 @@
 - 启用的关键 CONFIG：`luci-app-ssr-plus`（含 Iptables 透明代理、Xray、ChinaDNS-NG、MosDNS 等）、
   `luci-app-trafficctl` + `luci-i18n-...-zh-cn`、`dnsproxy` + `luci-app-dnsproxy` + CA 证书、
   `kmod-tcp-bbr`、`iptables-mod-fullconenat`。
-- **trafficctl 1.21.4 的额外依赖**：`iw`（读 WiFi 频段/信号）、`hostapd-utils`
-  （`hostapd_cli` 把 MAC 拒绝列表立即应用到运行中的射频；缺它时界面提示
-  「WiFi 阻断未生效」）、`conntrack`。CI 已显式 `=y` 并断言。
+- **trafficctl 1.21.4 的额外依赖**：`iw`（读 WiFi 频段/信号）、`conntrack`
+  （未卸载模式下的每设备字节统计）—— 这两个 CI 显式 `=y` 并断言。
+  `hostapd-utils`（`hostapd_cli` 把 MAC 拒绝列表立即应用到运行中的射频）**视硬件而定**：
+  上游 `hostapd/Makefile` 里它的 `DEPENDS` 是 `@` 加 `HOSTAPD_PROVIDERS` 列表，
+  只有选中某个 hostapd/wpad 变体时符号才存在。x86_64 无 WiFi 硬件 → 符号不存在，
+  故 CI 对它**条件启用**并只报告状态，**不得**断言「必须 `=y`」（v0.4.7 因此失败过）。
 
 ---
 
@@ -290,10 +294,26 @@ dnsmasq 把哪些域名指向 mosdns:5335**。当前仓库值 **`'1'`**（v0.4.0
   1. 重写 `root/usr/local/bin/trafficctl-bytes-nft.sh` —— 上游**至今未修**，
      仍用本内核不支持的 `flags dynamic` map + `update @bytes_in` 且只挂 forward 单钩子
      （见红线 7/8 与第 4 节的「代理流量走 INPUT/OUTPUT」）。丢掉它 → **速率列恒为 `—`**。
-  2. `status.js` / `status.css` / `config` / `rpcd` 的刷新改动 —— 默认 5 秒自动刷新、
-     1s/2s 档位、`refresh_interval` 端到端接线、设置区 tab 分页。
-     丢掉它 → **冷启动不再自动刷新**、Telegram 又变回超长折叠小节。
+  2. `status.js` / `status.css` / `telegram.js` / `menu.d` / `config` / `rpcd` 的
+     刷新与 tab 改动 —— 默认 5 秒自动刷新、1s/2s 档位、`refresh_interval` 端到端
+     接线、**Telegram 为页面级独立 tab**（顶部行：设备 | Telegram机器人 | 端口转发）。
+     丢掉它 → **冷启动不再自动刷新**、Telegram 变回超长折叠小节、或设置区冒出
+     内层 tab（两级 tab 让人分不清层级）。
   3. `po/zh-cn/luci-app-trafficctl.po` —— 丢掉它 → **中文界面变英文**。
+- **[已解决] CI 守卫的依赖断言曾把正常情况判成失败**（v0.4.7 首次构建，v0.4.8 修）：
+  我曾把 `hostapd-utils` 断言为「必须 `=y`」，但上游 `hostapd/Makefile` 里它的
+  `DEPENDS` 是 `@` 加 `HOSTAPD_PROVIDERS` 列表 —— **只有选中某个 hostapd/wpad
+  变体时该符号才存在**。x86_64 目标无 WiFi 硬件，符号合理地不存在 → 构建失败。
+  教训：**断言一个 `CONFIG_PACKAGE_*` 之前，先确认该符号在当前目标上确实存在**；
+  硬件相关的包只能「报告状态」，不能「必须 =y」。
+- **[已解决] patch 里的伪 mode 变更**（v0.4.8）：regen 脚本在临时目录建 git 仓库，
+  而上游 clone 在 Windows 挂载点（`/mnt/c`）被 DrvFs 一律报告为 `0777`，于是
+  `git add -A` 记成 `100755`，与应有的索引模式不符（上游权威
+  **29 × 100755 + 11 × 100644**），套用时打印
+  `warning: xxx has type 100755, expected 100644`。
+  处置：regen 以**本仓库 git 索引**为权威模式表，在 `git add` 之前 `os.chmod`。
+  排查同类问题的入手点：`grep -h '^old mode\|^new mode' patches/luci-app-trafficctl/*.patch`
+  应为空。
 - **[已修复] trafficctl 速率恒为 `—`**（v0.4.5）：原 `trafficctl-bytes-nft.sh` 用了
   本内核不支持的 nftables 语法且错误被 `2>/dev/null` 吞掉，只剩空链；
   且只挂 forward 链、看不到 REDIRECT 后的代理流量。

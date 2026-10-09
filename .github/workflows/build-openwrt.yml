@@ -108,184 +108,17 @@ jobs:
       - name: Verify luci-app-trafficctl local invariants (速度监控 / 中文翻译 / 刷新)
         working-directory: openwrt-build
         run: |
-          # ============================================================
-          # 为什么需要这一步
-          # ------------------------------------------------------------
-          # package/luci-app-trafficctl 是 vendored 副本（源自
-          # YusDyr/luci-app-trafficctl v1.21.4）。上游**至今未修** nftables
-          # 字节计数后端：它仍用本内核不支持的
-          #     nft add map … '{ type ipv4_addr : counter; flags dynamic; }'
-          #     nft add rule … 'update @bytes_in { ip daddr counter }'
-          # 且只挂 forward 单钩子（看不到 REDIRECT 后的代理流量）。
-          # 一旦有人在「同步上游」时把本地重写覆盖掉，速率列会**恒为 —**，
-          # 而界面不会报错、构建也会成功 —— 属于静默功能失效。
-          # 同理，po/zh-cn 被删会让中文界面变英文；1s/2s 刷新档位与默认
-          # 刷新值被回退会让「所有设备」表格不再自动刷新。
-          # 这三类都必须在 CI 里显式断言，见 AGENTS.md 红线 9。
-          # ============================================================
-          set -e
-          PKG=package/luci-app-trafficctl
-          fail=0
-
-          echo "=== 1. 包存在性与 vendored 版本 ==="
-          test -d "$PKG" || { echo "FAIL 缺少 $PKG"; exit 1; }
-          ver=$(sed -n 's/^PKG_VERSION:=//p' "$PKG/Makefile")
-          echo "    PKG_VERSION = $ver"
-          echo "    UPSTREAM    = $(cat patches/luci-app-trafficctl/UPSTREAM 2>/dev/null || echo '(缺失)')"
-
-          echo ""
-          echo "=== 2. nft 字节计数后端必须是本内核可用的写法 ==="
-          B="$PKG/root/usr/local/bin/trafficctl-bytes-nft.sh"
-          # 只看**非注释行**：本地脚本的头部注释会引用上游的错误写法做说明，
-          # 若把注释也算进来，这个检查会永远误报。
-          B_CODE="$(grep -v '^[[:space:]]*#' "$B")"
-          # 2a. 禁止上游那套不支持的内核语法：值为 counter 的 map +
-          #     `update @map { … counter }`。本内核 6.18.55 / nftables 1.1.6
-          #     对二者均报 "Error: Could not process rule: Not supported"。
-          if printf '%s\n' "$B_CODE" | grep -qE "type ipv4_addr[[:space:]]*:[[:space:]]*counter"; then
-            echo "FAIL 检测到 'type ipv4_addr : counter' 的 map（本内核报 Not supported）"
-            printf '%s\n' "$B_CODE" | grep -nE "type ipv4_addr[[:space:]]*:[[:space:]]*counter"
-            fail=1
-          fi
-          if printf '%s\n' "$B_CODE" | grep -qE "update @bytes_(in|out)"; then
-            echo "FAIL 仍在使用本内核不支持的 'update @bytes_… { … counter }'"
-            printf '%s\n' "$B_CODE" | grep -nE "update @bytes_(in|out)"
-            fail=1
-          fi
-          if printf '%s\n' "$B_CODE" | grep -qE "nft add map"; then
-            echo "FAIL 仍在使用 'nft add map'（应改用 set + add @set）"
-            printf '%s\n' "$B_CODE" | grep -nE "nft add map"
-            fail=1
-          fi
-          # 2b. 必须是 set + add @set 的受支持写法
-          printf '%s\n' "$B_CODE" | grep -qE "^[[:space:]]*type ipv4_addr[[:space:]]*$" \
-            && echo "OK   set 使用 'type ipv4_addr'（受支持）" \
-            || { echo "FAIL 未找到受支持的 set 定义"; fail=1; }
-          printf '%s\n' "$B_CODE" | grep -qE "add @bytes_in[[:space:]]*\{ ip daddr counter \}" \
-            && echo "OK   使用 'add @bytes_in { ip daddr counter }'" \
-            || { echo "FAIL 未找到受支持的 add @set 计数写法"; fail=1; }
-          # 2c. 必须同时挂 forward / input / output（代理流量走 INPUT/OUTPUT）
-          for h in mon_forward mon_input mon_output; do
-            grep -q "$h" "$B" \
-              && echo "OK   挂载 hook: $h" \
-              || { echo "FAIL 缺少 hook $h（代理流量将统计不到）"; fail=1; }
-          done
-          # 2d. 必须用 @lan 限定地址归属
-          grep -q "@lan" "$B" \
-            && echo "OK   使用 @lan 限定 LAN 网段" \
-            || { echo "FAIL 未用 @lan 限定，集合会被非 LAN 地址污染"; fail=1; }
-          # 2e. 必须单事务原子重建（AGENTS.md 红线 8）
-          grep -q "nft -c -f" "$B" \
-            && echo "OK   提交前先 nft -c -f 校验" \
-            || { echo "FAIL 缺少 nft -c -f 预校验，并发会重复建规则导致速率翻倍"; fail=1; }
-          # 2f. 必须保留上游的 JSON 契约字段（totals.sh 消费）
-          for fld in bytes_tcp bytes_udp '"src":"nft"' degraded; do
-            grep -q "$fld" "$B" \
-              && echo "OK   JSON 字段: $fld" \
-              || { echo "FAIL 缺少 JSON 字段 $fld（trafficctl-totals.sh 会失真）"; fail=1; }
-          done
-
-          echo ""
-          echo "=== 3. 中文翻译必须存在且完整 ==="
-          test -f "$PKG/po/zh-cn/luci-app-trafficctl.po" \
-            && echo "OK   po/zh-cn 存在" \
-            || { echo "FAIL 缺少 po/zh-cn/luci-app-trafficctl.po"; fail=1; }
-          test -f "$PKG/po/templates/luci-app-trafficctl.pot" \
-            && echo "OK   pot 模板存在" \
-            || { echo "FAIL 缺少 pot 模板"; fail=1; }
-          # 翻译覆盖率（缺译文即失败）
-          if command -v python3 >/dev/null 2>&1; then
-            python3 tools/check-trafficctl-i18n.py || { echo "FAIL 中文翻译不完整"; fail=1; }
-          else
-            echo "警告：无 python3，跳过翻译覆盖率检查"
-          fi
-
-          echo ""
-          echo "=== 4. 设置区 tab 与刷新档位（本地 UI 改动）==="
-          S="$PKG/htdocs/luci-static/resources/view/trafficctl/status.js"
-          grep -q "optRefresh" "$S" \
-            && echo "OK   默认刷新逻辑 optRefresh 存在" \
-            || { echo "FAIL 缺少 optRefresh：冷启动将不再自动刷新"; fail=1; }
-          grep -q "{v:'1',l:'1s'}" "$S" \
-            && echo "OK   刷新档位含 1s" \
-            || { echo "FAIL 刷新档位缺少 1s（要求最低 1 秒）"; fail=1; }
-          grep -q "tc-settings-tabs" "$S" \
-            && echo "OK   设置区 tab 结构存在" \
-            || { echo "FAIL 缺少设置区 tab（Telegram 应独立成页）"; fail=1; }
-          # 选择器不得退回带 td 前缀的写法（div.td 匹配不到）
-          if grep -qE "querySelector(All)?\('td\[data-|closest\('td\[data-" "$S"; then
-            echo "FAIL 出现 td[data-…] 前缀选择器（元素是 div.td，永不匹配）"
-            grep -nE "querySelector(All)?\('td\[data-|closest\('td\[data-" "$S"
-            fail=1
-          else
-            echo "OK   无 td[data-…] 前缀选择器"
-          fi
-
-          echo ""
-          echo "=== 5. patch 可在上游基线上重放，并复现 vendored 包 ==="
-          # 这是「日后能跟进上游」的核心保证：从 UPSTREAM 记录的 tag 克隆
-          # 上游，套用全部 patch，结果必须与 vendored 包逐字节一致。
-          # 上游若发布了新版而 patch 未跟上，这里会明确失败（不静默）。
-          UP_TAG="$(cat patches/luci-app-trafficctl/UPSTREAM 2>/dev/null || true)"
-          if [ -z "$UP_TAG" ]; then
-            echo "FAIL 缺少 patches/luci-app-trafficctl/UPSTREAM（记录基线 tag）"
-            fail=1
-          else
-            echo "    基线 tag: $UP_TAG"
-            # patch 的绝对路径：下面要在子 shell 里 cd 到别处套用
-            PATCHES_ABS="$(cd patches/luci-app-trafficctl && pwd)"
-            UPTMP="$(mktemp -d)"
-            if git clone --depth 1 --branch "$UP_TAG" \
-                 https://github.com/YusDyr/luci-app-trafficctl.git "$UPTMP/up" 2>&1 | tail -2; then
-              REPLAY="$UPTMP/replay"
-              mkdir -p "$REPLAY"
-              cp -r "$UPTMP/up/luci-app-trafficctl/." "$REPLAY/"
-              # 上游 checkout 在 Linux runner 上是 LF；仍统一一次以防万一
-              find "$REPLAY" -type f -exec sed -i 's/\r$//' {} +
-              ( cd "$REPLAY" && git init -q && git add -A \
-                && git -c user.email=ci@local -c user.name=ci commit -qm base )
-              applied=1
-              for p in "$PATCHES_ABS"/*.patch; do
-                [ -f "$p" ] || continue
-                if ( cd "$REPLAY" && git apply --check -p1 "$p" 2>/dev/null ); then
-                  ( cd "$REPLAY" && git apply -p1 "$p" )
-                  echo "OK   套用 $(basename "$p")"
-                else
-                  echo "FAIL $(basename "$p") 无法套用到上游 $UP_TAG"
-                  ( cd "$REPLAY" && git apply --check -p1 "$p" ) || true
-                  applied=0; fail=1
-                fi
-              done
-              if [ "$applied" = "1" ]; then
-                # 与 vendored 包比对。
-                # 需排除：
-                #   - .git（重放用的临时仓库）
-                #   - LICENSE / README.md（来自上游**仓库根**，不在包目录内，
-                #     故 vendored 包里有、重放目录里没有）
-                if diff -rq -x .git -x LICENSE -x README.md "$REPLAY" "$PKG" 2>&1 \
-                     | grep . ; then
-                  echo "FAIL patch 重放结果与 vendored 包不一致（见上方差异）"
-                  fail=1
-                else
-                  echo "OK   重放结果与 vendored 包逐字节一致"
-                fi
-              fi
-            else
-              echo "FAIL 无法克隆上游 $UP_TAG（检查 tag 是否存在或网络）"
-              fail=1
-            fi
-            rm -rf "$UPTMP"
-          fi
-
-          echo ""
-          if [ "$fail" != "0" ]; then
-            echo "trafficctl 本地不变量校验失败 —— 见上方 FAIL 行"
-            echo "提示：若这是「同步上游」导致的，请重跑"
-            echo "      python3 tools/regen-trafficctl-patches.py <上游包目录>"
-            echo "      并确认本地改动已重新落地（见 AGENTS.md 红线 9）"
-            exit 1
-          fi
-          echo "trafficctl 本地不变量校验通过"
+          # 这一步的全部断言都在 tools/verify-trafficctl-invariants.sh 里。
+          #
+          # 为什么抽成脚本而不是写在 YAML 里：
+          #   1. 断言较多（含一段 python 用来按 git 索引修正文件模式），内联在
+          #      YAML 里容易因缩进/heredoc 出错，且无法在本地直接跑；
+          #   2. 抽出来后本地可 `sh tools/verify-trafficctl-invariants.sh` 复现，
+          #      CI 与本地用同一份逻辑，不会出现「本地过了 CI 挂」。
+          #
+          # 该脚本校验的核心是「四项本地改动仍在」+「patch 可复现 vendored 包」，
+          # 详见脚本头部注释与 AGENTS.md 红线 9。
+          sh tools/verify-trafficctl-invariants.sh
 
       - name: Fetch luci-app-dnsproxy upstream and apply local patches (ALL_DOH)
         working-directory: lede
@@ -435,16 +268,27 @@ jobs:
           # === luci-app-trafficctl 1.21.4 新增的显式依赖 ===
           # 1.21.4 的 LUCI_DEPENDS 为
           #   +conntrack +luci-base +rpcd +curl +tc +iw +hostapd-utils
-          # 其中 iw 与 hostapd-utils 未被其它包选中，靠 LuCI 依赖解析自动拉入，
-          # 但本仓库的 .config 是「先 defconfig 再逐条追加」，依赖自动解析发生
-          # 在 defconfig 阶段 —— 若 luci-app-trafficctl 在那一刻尚未进入
-          # package/（它由前一步 cp 进来，顺序上有保证），这两个包就拉不进来。
           # trafficctl 用它们做：iw → 读取 WiFi 频段/信号强度；
           # hostapd-utils (hostapd_cli) → 立即把 MAC 拒绝列表应用到运行中的射频
-          # （缺它时 UI 会提示「WiFi 阻断未生效，需重启 WiFi」）。
+          # （缺它时 UI 会提示「WiFi 阻断未生效，需重启 WiFi」）；
+          # conntrack → 未卸载模式下的每设备字节统计。
+          #
+          # 写入方式说明（v0.4.7 踩过）：
+          #   iw 与 conntrack 是硬依赖，直接写 =y 即可。
+          #   hostapd-utils **不可**无条件写 =y —— 上游 Makefile 里它是
+          #     DEPENDS:=@$(HOSTAPD_PROVIDERS 之一)
+          #   即只有选中某个 hostapd/wpad 变体时该符号才存在。本目标是
+          #   x86_64 无 WiFi 硬件，该符号不存在；直接写这一行会让
+          #   `make defconfig` 之后符号仍未定义，后续断言随之失败。
+          #   故改为「条件启用」：仅当某个 hostapd/wpad 变体已被选中时才加。
           echo "CONFIG_PACKAGE_iw=y" >> .config
-          echo "CONFIG_PACKAGE_hostapd-utils=y" >> .config
           echo "CONFIG_PACKAGE_conntrack=y" >> .config
+          if grep -qE "^CONFIG_PACKAGE_(hostapd|wpad|wpa-supplicant)[a-z0-9-]*=y$" .config; then
+            echo "CONFIG_PACKAGE_hostapd-utils=y" >> .config
+            echo "  (检测到 hostapd/wpad 变体，已启用 hostapd-utils)"
+          else
+            echo "  (无 hostapd/wpad 变体，跳过 hostapd-utils —— x86_64 无 WiFi 属正常)"
+          fi
 
           # === 显式排除不用的文件服务 ===
           # 实测这两个服务对用户无用：vsftpd 监听 0.0.0.0:21 但无实际用途；
@@ -483,14 +327,22 @@ jobs:
             && echo "OK   CONFIG_PACKAGE_luci-app-sqm=y" \
             || echo "WARN luci-app-sqm 未启用（LuCI 里无 SQM 页面，但内核与脚本仍生效）"
 
-          echo "=== luci-app-trafficctl 1.21.4 的功能依赖（必须为 =y）==="
-          # trafficctl 1.21.4 用 iw 读取 WiFi 频段/信号强度，用 hostapd-utils
-          # (hostapd_cli) 把 MAC 拒绝列表立即应用到运行中的射频；缺 hostapd_cli
-          # 时界面会显示「WiFi 阻断未生效」。conntrack 用于未卸载模式的字节统计。
-          # 这三个包在本仓库的 .config 里由依赖解析自动拉入并不保证，
-          # 故显式启用并在此断言。
-          for sym in CONFIG_PACKAGE_iw CONFIG_PACKAGE_hostapd-utils \
-                     CONFIG_PACKAGE_conntrack; do
+          echo "=== luci-app-trafficctl 的功能依赖 ==="
+          # trafficctl 1.21.4 用 iw 读 WiFi 频段/信号、用 hostapd-utils
+          # (hostapd_cli) 把 MAC 拒绝列表立即应用到运行中的射频、用 conntrack
+          # 在未卸载模式下统计字节。
+          #
+          # 注意三者的可用性并不相同（v0.4.7 首次构建即栽在这条断言上）：
+          #   conntrack —— 真实存在（实测 opkg 有 conntrack 1.4.7-1，
+          #       /usr/sbin/conntrack 在位），必为 =y。
+          #   iw —— 存在于 packages feed，但**不一定随依赖被拉入**；
+          #       本仓库已显式写 =y，故断言为 =y 是合理的。
+          #   hostapd-utils —— 上游 Makefile 里它的 DEPENDS 是
+          #       @$(HOSTAPD_PROVIDERS 之一)，即**只有选中某个 hostapd/wpad
+          #       变体时该符号才存在**。x86_64 目标无 WiFi 硬件，符号合理地
+          #       不存在，因此**不能**断言 =y，否则把正常情况判成失败。
+          # 故：iw / conntrack 必须 =y；hostapd-utils 只报告状态。
+          for sym in CONFIG_PACKAGE_iw CONFIG_PACKAGE_conntrack; do
             if grep -q "^${sym}=y$" .config; then
               echo "OK   ${sym}=y"
             else
@@ -499,6 +351,13 @@ jobs:
               exit 1
             fi
           done
+          # hostapd-utils：视硬件而定，缺失只是 WiFi 阻断降级，不阻断构建。
+          if grep -q "^CONFIG_PACKAGE_hostapd-utils=y$" .config; then
+            echo "OK   CONFIG_PACKAGE_hostapd-utils=y（WiFi 阻断可即时生效）"
+          else
+            echo "INFO hostapd-utils 未启用 —— 本目标无 WiFi 硬件（x86_64），"
+            echo "     trafficctl 的 WiFi 阻断功能不适用；界面会自行提示降级。"
+          fi
 
           echo "=== trafficctl 中文语言包（符号名易写错，必须校验）==="
           # 正确符号：luci-i18n-trafficctl-zh-cn
