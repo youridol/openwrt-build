@@ -126,6 +126,38 @@ grep -q "optRefresh" "$S" \
 grep -q "{v:'1',l:'1s'}" "$S" \
     && ok "刷新档位含 1s" \
     || bad "刷新档位缺少 1s（要求最低 1 秒）"
+# 轮询必须防重入：summary 实测约 1.9s，而档位可设 1s。
+# 若退回 `setInterval(runQuery, …)` 这种「不看上一拍是否回来」的写法，
+# 请求会层层堆积 → rpcd 不断 fork trafficctl-summary.sh → 路由器 load 飙升、
+# 页面反而卡住甚至 XHR 超时。
+# 说明：本文件自身会**解释**那个错误写法，故注释行要先剥掉再判断，
+# 否则永远误报（这个坑在别处也踩过，见 AGENTS.md 第 9 节）。
+S_CODE="$(grep -v '^[[:space:]]*//' "$S")"
+if printf '%s\n' "$S_CODE" | grep -qE 'setInterval\(tick,'; then
+    ok "轮询经由 tick（带防重入）"
+else
+    bad "轮询未走 tick：1s 档位会让请求堆积，压垮路由器"
+fi
+if printf '%s\n' "$S_CODE" | grep -qE 'setInterval\(runQuery,'; then
+    bad "存在 setInterval(runQuery, …)：缺少防重入，1s 档位会堆积请求"
+    printf '%s\n' "$S_CODE" | grep -nE 'setInterval\(runQuery,'
+else
+    ok "无 setInterval(runQuery, …)（已改为 setInterval(tick, …)）"
+fi
+grep -q "queryInFlight" "$S" \
+    && ok "存在 queryInFlight 重入锁" \
+    || bad "缺少 queryInFlight 重入锁"
+grep -q "document.hidden" "$S" \
+    && ok "页面不可见时跳过轮询" \
+    || bad "缺少 document.hidden 判断（后台标签页仍会压路由器）"
+# runQuery 及其两个分支必须 return promise，否则锁在发起请求时就复位，
+# 形同虚设（仍会堆积）。
+for pat in 'return callTrafficctl()' 'return callDevice(ip, proto)' \
+           'p = runAll()' 'p = runSingle(ip)'; do
+    grep -qF "$pat" "$S" \
+        && ok "runQuery 链路含 '${pat}'" \
+        || bad "缺少 '${pat}'：防重入锁会在请求完成前就复位"
+done
 grep -q "refresh_interval" "$PKG/root/usr/libexec/rpcd/luci.trafficctl" \
     && ok "rpcd 处理 refresh_interval" \
     || bad "rpcd 未处理 refresh_interval"

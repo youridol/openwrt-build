@@ -167,7 +167,7 @@ index a379735..dbf0129 100644
  .tc-settings-section-row {
      display: flex;
 diff --git a/htdocs/luci-static/resources/view/trafficctl/status.js b/htdocs/luci-static/resources/view/trafficctl/status.js
-index c2668eb..0725ad9 100644
+index c2668eb..bf34d0d 100644
 --- a/htdocs/luci-static/resources/view/trafficctl/status.js
 +++ b/htdocs/luci-static/resources/view/trafficctl/status.js
 @@ -163,24 +163,8 @@ var callNameSet = rpc.declare({
@@ -384,7 +384,18 @@ index c2668eb..0725ad9 100644
  		function runSingle(ip) {
  			var o = loadOpts();
  			var proto = (o.proto && o.proto !== 'all') ? o.proto : '';
-@@ -3405,7 +3493,7 @@ return view.extend({
+@@ -3087,7 +3175,9 @@ return view.extend({
+ 
+ 			setStatus(statusDiv, 'loading', _('Running…'));
+ 
+-			callDevice(ip, proto).then(function(data) {
++			// 必须 return：轮询的防重入锁依赖「请求真正结束」才复位
++			// （见 _setupTimer 旁的 tick 与 runQuery 的注释）。
++			return callDevice(ip, proto).then(function(data) {
+ 				if (!data || data.error) {
+ 					setStatus(statusDiv, 'error', (data && data.error) || _('Unknown error'));
+ 					return;
+@@ -3405,14 +3495,16 @@ return view.extend({
  				);
  				connsDiv.appendChild(E('div',{'style':'overflow-x:auto'},[tbl]));
  				connsDiv.appendChild(E('p',{'style':'color:var(--tc-faint);font-size:11px;margin-top:6px'},
@@ -393,18 +404,95 @@ index c2668eb..0725ad9 100644
  			}
  		}
  
-@@ -3522,7 +3610,9 @@ return view.extend({
+ 		function runAll() {
+ 			setStatus(statusDiv, 'loading', _('Scanning all devices…'));
+ 
+-			callTrafficctl().then(function(rows) {
++			// 必须 return：轮询的防重入锁依赖「请求真正结束」才复位
++			// （见 _setupTimer 旁的 tick 与 runQuery 的注释）。
++			return callTrafficctl().then(function(rows) {
+ 				if (!Array.isArray(rows)) rows = [];
+ 				searchSelect.updateDevices(rows);
+ 				renderSummary(rows);
+@@ -3458,14 +3550,24 @@ return view.extend({
+ 				self._pollMode = mode;
+ 				self._stopBytesPoll();
+ 			}
++			// 返回值必须是 promise：轮询的防重入锁（见 _setupTimer 旁的 tick）
++			// 依赖它在请求**真正结束**后才复位。runAll/runSingle 本身返回
++			// promise，这里把 updateExtendedStats 也纳入同一条链，保证锁覆盖
++			// 整个刷新过程（而不只是发起请求那一刻）。
++			var p;
+ 			if (ip === '__all__') {
+ 				deviceGraphDiv.classList.add('tc-hidden');
+-				runAll();
++				p = runAll();
+ 			} else {
+-				runSingle(ip);
++				p = runSingle(ip);
+ 				self._startBytesPoll();
+ 			}
++			if (p && typeof p.then === 'function') {
++				return p.then(function(r) { updateExtendedStats(); return r; },
++				              function(e) { updateExtendedStats(); throw e; });
++			}
+ 			updateExtendedStats();
++			return Promise.resolve();
+ 		}
+ 
+ 		// rateBtn handler removed — applyRate() is called directly from chip clicks
+@@ -3522,10 +3624,48 @@ return view.extend({
  
  		this._setupTimer = function() {
  			if (self._timer) { clearInterval(self._timer); self._timer = null; }
 -			var iv = parseInt(loadOpts().refresh||0);
+-			if (iv > 0) self._timer = setInterval(runQuery, iv*1000);
 +			// 【本仓库补丁】用 optRefresh 而非直接读 loadOpts().refresh：
 +			// 未设置时取默认 5 秒，保证**冷启动即自动刷新**（上游为 0=关）。
 +			var iv = parseInt(optRefresh(loadOpts()), 10) || 0;
- 			if (iv > 0) self._timer = setInterval(runQuery, iv*1000);
++			if (iv > 0) self._timer = setInterval(tick, iv*1000);
  		};
  
-@@ -3620,366 +3710,76 @@ return view.extend({
++		// 【本仓库补丁】轮询必须防重入。
++		//
++		// 为什么：`summary` 这个 ubus 调用在 23 台设备的路由上实测要 **1.9 秒**
++		// （它要读完整 conntrack 表 + nft 链 + tc 类）。而本仓库把刷新档位放到了
++		// 1s/2s（用户要求「最低按 1 秒刷新」）。若照上游那样直接
++		// `setInterval(runQuery, 1000)`，浏览器会每 1 秒发起一次、每次要 1.9 秒
++		// 才回，请求就会**层层堆积**：rpcd 侧不断 fork `trafficctl-summary.sh`，
++		// 路由器 load 飙高、页面反而卡住甚至 XHR 超时。
++		//
++		// 正确做法是「上一次没回来就跳过这一拍」。这样即使档位设成 1s，实际速率
++		// 也自动退化为后端能承受的 ~1.9s，不会堆积。
++		var queryInFlight = false;
++		function tick() {
++			if (queryInFlight) return;          // 上一拍还在跑，跳过
++			if (document.hidden) return;        // 页面不可见时不轮询，省路由器开销
++			queryInFlight = true;
++			self._queryInFlight = true;
++			try {
++				// runQuery 内部是 then/catch 链，返回的是 Promise（runAll/runSingle
++				// 都返回 promise）。用它来复位标志，确保任何路径都会解锁。
++				var p = runQuery();
++				if (p && typeof p.then === 'function') {
++					p.then(unlock, unlock);
++				} else {
++					unlock();
++				}
++			} catch (e) {
++				unlock();
++				throw e;
++			}
++		}
++		function unlock() {
++			queryInFlight = false;
++			self._queryInFlight = false;
++		}
++
+ 		this._startBytesPoll = function() {
+ 			if (self._bytesTimer) return;
+ 			var o = loadOpts();
+@@ -3620,366 +3760,76 @@ return view.extend({
  		var sep = function() { return E('span', {'class':'tc-sep'}); };
  		var sectionLabel = function(t) { return E('div', {'class':'tc-section-label'}, t); };
  
@@ -824,7 +912,7 @@ index c2668eb..0725ad9 100644
  
  		function loadLoggingUI(container) {
  			var statusSpan = E('span', {'style':'font-size:12px;color:var(--tc-muted)'}, _('Loading…'));
-@@ -4038,14 +3838,7 @@ return view.extend({
+@@ -4038,14 +3888,7 @@ return view.extend({
  		settingsBody.appendChild(loggingSection.el);
  
  		// ── New Device Defaults section (lazy-loaded) ──────────────────────
@@ -840,7 +928,7 @@ index c2668eb..0725ad9 100644
  
  		function loadNewDeviceUI(container) {
  			var statusSpan = E('span', {'style':'font-size:12px;color:var(--tc-muted)'}, _('Loading…'));
-@@ -4141,14 +3934,7 @@ return view.extend({
+@@ -4141,14 +3984,7 @@ return view.extend({
  		settingsBody.appendChild(newDevSection.el);
  
  		// ── Flow Offload section (lazy-loaded) ─────────────────────────────
@@ -856,7 +944,7 @@ index c2668eb..0725ad9 100644
  
  		function loadOffloadUI(container) {
  			var statusSpan = E('span', {'style':'font-size:12px;color:var(--tc-muted)'}, _('Loading…'));
-@@ -4243,7 +4029,7 @@ return view.extend({
+@@ -4243,7 +4079,7 @@ return view.extend({
  			colChipsContainer,
  			connColChipsContainer,
  			connFiltersRow
@@ -865,7 +953,7 @@ index c2668eb..0725ad9 100644
  		settingsBody.appendChild(tableSection.el);
  
  		function updateTableSectionMode() {
-@@ -4254,7 +4040,8 @@ return view.extend({
+@@ -4254,7 +4090,8 @@ return view.extend({
  		}
  		updateTableSectionMode();
  

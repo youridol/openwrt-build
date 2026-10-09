@@ -2,6 +2,52 @@
 
 本仓库所有功能/配置改动均记录于此。版本判型遵循全局规范（PATCH / MINOR / MAJOR）。
 
+## [v0.4.10] - 2026-10-10
+
+### 修复 — 1 秒刷新档位会把请求堆积到路由器上（我上一版引入的真问题）
+
+v0.4.6 为满足「最低按 1 秒刷新」把档位放到了 1s/2s，v0.4.8 又把它接进
+`_setupTimer`。但**上游的实现是 `setInterval(runQuery, iv*1000)`，不看上一拍是否
+回来**。
+
+本机实测（192.168.3.254，23 台设备）：一次 `summary` ubus 调用要 **1.5–1.9 秒**
+（它要读完整 conntrack 表 1052 条 + nft 链 + `tc class`）。所以档位设成 **1 秒**时，
+浏览器每 1 秒发一次、每次 1.9 秒才回 —— 请求层层堆积：rpcd 不断 fork
+`trafficctl-summary.sh`，路由器 load 飙到三位数，页面反而卡住并最终
+`✗ XHR request timed out`。这正是我一边观察到的现象。
+
+**处置**：
+
+- `status.js` 新增防重入的一拍函数 `tick()`：
+  - 上一拍还在跑就**跳过这一拍**（`queryInFlight`）；
+  - 页面不可见（`document.hidden`）时不轮询，避免后台标签页白耗路由器；
+  - 锁的复位挂在 `runQuery` 返回的 **promise** 上，保证请求真正结束才解锁。
+- 为此 `runAll()` 与 `runSingle()` 改为**返回**各自的 promise（原先它们只发起、
+  不返回），`runQuery()` 也改为返回 promise，并把 `updateExtendedStats()` 纳入
+  同一条链，使锁覆盖整个刷新过程而不只是「发起请求」那一刻。
+- 效果：档位设 1s 时，实际节奏自动退化为后端能承受的约 2 秒一拍，**不再堆积**。
+
+### 验证
+
+**浏览器实测（1s 档位，20 秒窗口）**：ubus 调用 23 次；`summary`（约 1520 ms）
+严格按 **2000 ms** 间隔发出 —— 1s 的 tick 触发后看到上一个未回就跳过；
+**同一接口内零重叠**。
+
+**路由器实测**：测试后 load 由三位数降到 **1.25**，`trafficctl-summary.sh`
+进程数 **1**（无 ppid=1 的孤儿进程），关键服务（dnsmasq/dnsproxy/shadowsocksr）
+全部正常，`ping 223.5.5.5` 往返 18 ms（移动宽带链路正常）。
+
+**静态**：`node --check` 通过；`tools/verify-trafficctl-invariants.sh` 新增
+5 项断言（`setInterval(tick,`、无 `setInterval(runQuery,`、`queryInFlight`、
+`document.hidden`、`runAll`/`runSingle` 返回 promise）并全绿；
+patch 在干净上游基线上重放零告警且与 vendored 包逐字节一致。
+
+### 说明
+
+断言脚本判断「有无 `setInterval(runQuery,`」前会先剥掉 `//` 注释行 ——
+代码与自己写的解释性注释都会提到那个错误写法，不剥会导致永久误报
+（这个坑在 v0.4.7 的 nft 守卫上已经踩过一次）。
+
 ## [v0.4.9] - 2026-10-10
 
 ### 修复 — 上游依赖导致整个包与中文语言包被静默丢弃

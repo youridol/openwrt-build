@@ -97,6 +97,10 @@
      3. `status.js`/`status.css`/`telegram.js`/`menu.d`/`config`/`rpcd` 的刷新与 tab 改动 ——
         丢掉它 → **冷启动不再自动刷新**、Telegram 变回超长折叠小节、或设置区冒出
         内层 tab。Telegram 必须是**页面级** tab（顶部行：设备 | Telegram机器人 | 端口转发）。
+        **轮询必须防重入**（`setInterval(tick, …)` + `queryInFlight` + `document.hidden`）：
+        一次 `summary` 实测 1.5–1.9 秒，而档位可设 1 秒，退回
+        `setInterval(runQuery, …)` 会让请求层层堆积、rpcd 不断 fork 子脚本、
+        路由器 load 飙到三位数、页面最终 `XHR request timed out`。
      4. `po/zh-cn/luci-app-trafficctl.po` —— 丢掉它 → **中文界面变英文**。
    新增/修改该包的中文字符串后，跑 `python3 tools/check-trafficctl-i18n.py`
      （缺失会失败；用 `--write-pot` 同步模板）。
