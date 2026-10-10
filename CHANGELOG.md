@@ -61,8 +61,21 @@ permissions:
   - `release.yml`（声明 `contents: write`）运行时打印 `Contents: write` → 能建 Release；
   - `build-openwrt.yml`（v0.4.11，未声明）运行时打印 `Contents: read` → 上传被 403 拒。
   两者唯一差别就是 `permissions` 声明，构成干净的对照实验。
-- 本轮修复**尚未经构建实测** —— 需要下一次 tag 构建才会真正走这条路径。
-  在它成功、且 Release 上确实出现 `.img.gz` 之前，不应认为该问题已解决。
+- **修复已由 v0.4.12 的 tag 构建端到端验证通过**（构建结论 `success`）：
+
+  | 版本 | Release 产物 | `.img.gz` |
+  |---|---|---|
+  | **v0.4.12** | **4 个** | **2 个** ✓ |
+  | v0.4.11 及更早 | 0 个 | 0 个 ✗ |
+
+  上传的校验文件与 GitHub 自己计算的文件摘要**逐字节一致**，证明上传内容完整：
+
+  ```
+  combined-efi.img.gz   58e4bd5a341ad28c7c86043da1c24a3d63afaadb465f40b0bb64b8d1206e356d
+  rootfs.img.gz         6182e2bb09a17c1279ffff5195c8ff64b6a1e89c032330722884c07e0163aca6
+  ```
+
+  Release notes 确认取自 `CHANGELOG.md` 对应版本段。
 
 ### 说明
 
