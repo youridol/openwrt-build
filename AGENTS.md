@@ -368,6 +368,27 @@ dnsmasq 把哪些域名指向 mosdns:5335**。当前仓库值 **`'1'`**（v0.4.0
   本内核不支持的 nftables 语法且错误被 `2>/dev/null` 吞掉，只剩空链；
   且只挂 forward 链、看不到 REDIRECT 后的代理流量。
   详见 CHANGELOG v0.4.5 与红线 7/8。
+- **[已解决] 所有 Release 曾经都是空的（v0.4.5~v0.4.10，v0.4.11 修）**：
+  `Upload firmware to GitHub Release` 步骤的 `working-directory` 是**工作区根**，
+  而本工作流把代码签出到 `openwrt-build/` 与 `lede/` **子目录**，根目录**没有 `.git`**
+  → `gh` 无法确定目标仓库，报
+  `failed to run git: fatal: not a git repository`。
+  而当时的等待循环 `if gh release view … >/dev/null 2>&1; then break; fi`
+  把**任何**失败都当成「Release 还没创建」→ 硬错误被吞、白等 60s，
+  最后抛出误导性的「Release 不存在（release.yml 未运行？）」。
+  结果：**六个版本的 Release 全为空**，而流水线除最后一步外全程显示成功。
+  处置：显式 `GH_REPO: ${{ github.repository }}`；等待循环区分「未找到」与硬错误；
+  并在上传后**断言 Release 上至少有一个 `.img.gz`**，否则 `exit 1`。
+  **教训**：`gh` 命令在 CI 里必须能确定仓库 —— 要么 `GH_REPO`，要么每条带 `--repo`；
+  且「等待某资源就绪」的循环不能把**所有**错误都当作「还没好」，
+  否则真实错误会被静默吞掉，只在最后抛一句与根因无关的提示。
+- **[已处理] CI 触发条件**：`on.push` 已加 `paths-ignore`
+  （`**.md`/`docs/**`/`.gitignore`/`LICENSE`），纯文档推送不再白跑 3.5 小时。
+  依据是 GitHub 官方文档原文 *"Path filters are not evaluated for pushes of tags."*
+  —— **只对分支推送生效**，推 tag 仍照常触发，不影响发版。
+  改这段属于「出错会静默失效」的一类（例如误把 tags 一起忽略 → 发版永不触发），
+  改完必须用 PyYAML 解析 `on:` 块，逐项确认 `branches`/`tags`/`workflow_dispatch`/
+  `schedule` 都在，且没有同时声明 `paths` 与 `paths-ignore`（GitHub 不允许共存）。
 - **[风险] 上行吞吐无法测量**：本机无可用上传端点（公共镜像 PUT 返回 405，
   且未安装测速工具）。SQM 的上行效果目前只能通过「上行饱和时 ping 抬升」间接验证。
 - **[风险] NAT1（fullcone）与软件 flow offloading 的交互无一手来源**：本机实测二者

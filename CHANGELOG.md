@@ -2,6 +2,61 @@
 
 本仓库所有功能/配置改动均记录于此。版本判型遵循全局规范（PATCH / MINOR / MAJOR）。
 
+## [v0.4.11] - 2026-10-10
+
+### 修复 — 所有 Release 都是空的（长期存在，v0.4.5 起每个版本都没有固件）
+
+**先说结论**：v0.4.5 ~ v0.4.10 **六个 Release 的 assets 全部为 0**，一个固件文件都没有。
+而流水线除了最后一步之外**全程显示成功** —— 属于最难发现的那类静默失效。
+
+**根因**：`Upload firmware to GitHub Release` 这一步的
+`working-directory` 是**工作区根**，而本工作流用
+`with.path: openwrt-build` / `with.path: lede` 把两份代码签出到了**子目录**，
+根目录下**没有 `.git`**。`gh` 找不到本地仓库就无法确定目标仓库，于是：
+
+```
+failed to run git: fatal: not a git repository (or any of the parent directories): .git
+```
+
+更糟的是当时的等待循环写成了
+`if gh release view "$VER" >/dev/null 2>&1; then break; fi` ——
+它把**任何**失败都当成「Release 还没创建」，于是这个硬错误被吞掉、白等 60 秒，
+最后只抛出一句 `Release vX 不存在（release.yml 未运行？）`，把根因指向了错误的方向。
+
+**处置**：
+
+- 该步骤显式声明 `GH_REPO: ${{ github.repository }}`（官方文档明确支持该环境变量，
+  用于「otherwise operate on a local repository」的命令）。
+- 等待循环改为**区分两类失败**：只有「未找到」才继续等待，其他失败立刻
+  打印真实输出并 `exit 1`。
+- 新增**兜底断言**：上传结束后 Release 上至少要有一个 `.img.gz`，否则 `exit 1`。
+  这正是本次能发现该问题的机制 —— 以前「上传失败但步骤不报错」的组合
+  会让空 Release 一直存在。
+
+### 验证
+
+- **复现**：在无 `.git` 的目录里跑 `gh release view v0.4.10` → 得到上述
+  `fatal: not a git repository`；加上 `GH_REPO` 后同一命令成功。
+- **控制流测试**（用假 `gh` 打桩，不触碰远端仓库）三个场景全部符合预期：
+  A. 未设 `GH_REPO` → 立刻报硬错误（不再白等 60s）；
+  B. 设了 `GH_REPO` 且 Release 尚未创建 → 等满后走 `gh release create` 兜底并上传 2 个文件；
+  C. Release 已存在 → 正常上传。
+- **幂等性与断言**单独验证：assets 为空→上传；含同名→跳过；只有旧版本→上传新版本；
+  名字只是前缀相近（`<name>.bak`）→不误判为已存在；
+  兜底断言的 `grep -c '\.img\.gz$'` 在空 assets 下得 0（会正确失败）、有产物时得 1。
+- `bash -n` 通过；YAML 合法（26 步）；`tags` 与新增的 `paths-ignore` 均保留。
+
+**注意**：本次修复只影响**今后**的发版。v0.4.5 ~ v0.4.10 的 Release 仍是空的 ——
+它们对应的固件在 Actions artifact 里（如
+`openwrt-x86-64-ssrplus-v0.4.10-51fb93f`，255 MB），但未附加到 Release。
+
+### 变更 — 纯文档推送不再触发 3.5 小时编译
+
+`on.push` 新增 `paths-ignore`（`**.md` / `docs/**` / `.gitignore` / `LICENSE`）。
+安全性依据是 GitHub 官方文档原文 *"Path filters are not evaluated for pushes of tags."*
+—— 只对分支推送生效，推 tag 仍照常触发，不影响发版。本次提交本身即为实测：
+只改 `.yml` 仍正常触发。
+
 ## [v0.4.10] - 2026-10-10
 
 ### 修复 — 1 秒刷新档位会把请求堆积到路由器上（我上一版引入的真问题）

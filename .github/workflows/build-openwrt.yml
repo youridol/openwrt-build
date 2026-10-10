@@ -713,26 +713,64 @@ jobs:
         if: startsWith(github.ref, 'refs/tags/')
         env:
           GH_TOKEN: ${{ github.token }}
+          # 【必须】显式指定仓库。
+          #
+          # 为什么：本步的 working-directory 是**工作区根**，而本工作流用
+          # `with.path: openwrt-build` / `with.path: lede` 把两份代码签出到了
+          # **子目录**，根目录下**没有 .git**。`gh` 找不到本地仓库就无法确定
+          # 目标仓库，会报：
+          #   failed to run git: fatal: not a git repository ...
+          # 结果 `gh release view` 永远失败 → 等待循环空转 60s → `gh release
+          # create` 也失败 → 本步 exit 1 → **Release 建出来了却一个固件都没有**。
+          # 这是长期存在的问题：v0.4.5 ~ v0.4.10 六个 Release 的 assets 均为 0。
+          #
+          # 另一个可用写法是给每条 gh 命令加 `--repo`；用 GH_REPO 更省事且
+          # 不易漏（官方文档明确支持该环境变量）。
+          GH_REPO: ${{ github.repository }}
         run: |
+          set -e
           VER="${GITHUB_REF_NAME}"
-          echo ">>> 将固件产物上传到 Release $VER"
+          echo ">>> 将固件产物上传到 Release $VER（仓库 $GH_REPO）"
+
           # 等待 release.yml 已创建 Release（通常秒级完成；此处最多等 60s）
+          #
+          # 注意：这里必须区分「Release 确实还不存在」与「gh 命令本身出错」。
+          # 早先的写法是 `if gh release view ... >/dev/null 2>&1; then break; fi`，
+          # 它把**任何**失败都当成「还没就绪」，于是 GH_REPO 缺失这种硬错误
+          # 被静默吞掉、白等 60 秒，最后只抛出一句含义不明的
+          # 「Release 不存在（release.yml 未运行？）」，排查时极易被误导。
+          ready=0
           for i in $(seq 1 12); do
-            if gh release view "$VER" >/dev/null 2>&1; then
-              break
-            fi
-            echo "Release $VER 尚未就绪，等待 5s... ($i/12)"
+            out="$(gh release view "$VER" 2>&1)" && { ready=1; break; }
+            # gh 对不存在的 tag 输出的是 `release not found`（小写）。
+            # 统一转小写再匹配，避免大小写差异导致判定失效
+            # （bash 的 case 区分大小写，而 PowerShell 的 -like 不区分 ——
+            #   校准时若用 PowerShell 观察会看不出这个坑）。
+            lc="$(printf '%s' "$out" | tr 'A-Z' 'a-z')"
+            case "$lc" in
+              *"release not found"*|*"not found"*|*"http 404"*|*"could not find"*)
+                echo "Release $VER 尚未就绪，等待 5s... ($i/12)" ;;
+              *)
+                # 非「未找到」的失败一律视为硬错误，立刻抛出真实原因
+                echo "!!! gh release view 失败（不是「尚未创建」）：" >&2
+                printf '%s\n' "$out" >&2
+                exit 1 ;;
+            esac
             sleep 5
           done
-          gh release view "$VER" >/dev/null 2>&1 || {
-            echo "!!! Release $VER 不存在（release.yml 未运行？），改用 gh release create 兜底" >&2
-            gh release create "$VER" --title "$VER" --notes "自动生成的 Release（CHANGELOG 日志见 release.yml 工作流）"
-          }
+
+          if [ "$ready" != "1" ]; then
+            echo "!!! Release $VER 在 60s 内仍未创建（release.yml 未运行？），改用 gh release create 兜底" >&2
+            gh release create "$VER" --title "$VER" \
+              --notes "自动生成的 Release（CHANGELOG 日志见 release.yml 工作流）"
+          fi
+
           # 上传固件（幂等：文件已存在则跳过）
           # 产物已在 “Rename firmware with version” 步骤改名为带版本号形式，
           # 故这里同时上传 .img.gz 与 .sha256 校验文件。
-          ls lede/bin/targets/x86/64/*.img.gz
+          ls -l lede/bin/targets/x86/64/*.img.gz
           assets="$(gh release view "$VER" --json assets --jq '.assets[].name')"
+          uploaded=0
           for f in lede/bin/targets/x86/64/*.img.gz lede/bin/targets/x86/64/*.img.gz.sha256; do
             [ -e "$f" ] || continue
             name="$(basename "$f")"
@@ -741,7 +779,18 @@ jobs:
             else
               gh release upload "$VER" "$f" --clobber
               echo "已上传: $name"
+              uploaded=$((uploaded+1))
             fi
           done
-          echo ">>> Release $VER 产物上传完成"
+
+          # 兜底断言：Release 上至少要有一个 .img.gz。
+          # 否则会出现「流水线显示成功、Release 却是空的」这种最难发现的静默失效
+          # （本步历史上正是如此：六个版本全部空 Release，而构建本身全程显示成功）。
+          final="$(gh release view "$VER" --json assets --jq '.assets[].name' | grep -c '\.img\.gz$' || true)"
+          if [ "${final:-0}" -lt 1 ]; then
+            echo "!!! Release $VER 上没有任何 .img.gz 产物，发版不完整" >&2
+            gh release view "$VER" --json assets --jq '.assets[].name' >&2
+            exit 1
+          fi
+          echo ">>> Release $VER 产物上传完成（本次新上传 $uploaded 个，现存 .img.gz $final 个）"
           gh release view "$VER" --json url --jq .url
