@@ -242,8 +242,21 @@ dnsmasq 把哪些域名指向 mosdns:5335**。当前仓库值 **`'1'`**（v0.4.0
    - 同理：断言脚本/CI 守卫里的 `grep` 要**先剥掉注释行**再判断，
      否则「解释错误写法的注释」会让断言永久误报（v0.4.7 的 nft 守卫、
      v0.4.10 的 `setInterval(runQuery` 守卫都踩过）。
-7. 改动前**先备份**：`/etc/config/*`、`/var/etc/ssrplus/*` 到 `/root/ssrfix-backup-<ts>/`，
-   并在报告中写明回滚命令。
+8. **看 CI 日志要按位置截取，不要先 grep 关键字**（踩过，连错三次）：
+   `gh run view --log` 里**源码回显占绝大部分** —— 每条 run 脚本都会以
+   `N\t<原文>` 的形式重印一遍，真实执行输出夹在中间。用关键字 grep 会同时命中
+   回显，于是误判成「没输出」或「输出正常」。
+   正确做法：先定位真实执行的**第一条**输出（它不带行号前缀），再从那里
+   **顺序原样**打印后续几十行。这样才看到那两行关键信息：
+   `>>> 将固件产物上传到 Release v0.4.11（仓库 …）`（证明 GH_REPO 已生效）
+   与随后的 `HTTP 403: Resource not accessible by integration`（真正的拦路虎）。
+9. **权限类问题用 `Set up job` 步骤的 `GITHUB_TOKEN Permissions` 块自检**：
+   它会列出本次运行**实际拿到**的权限（`Contents: read/write` 等），
+   几分钟内就能看到，**不必等 3.5 小时构建结束**。
+   `permissions` 是**按工作流**申请的，不是按仓库 —— 同一仓库里声明了的能用写权限、
+   未声明的取仓库默认（本项目默认 `read`）。
+10. 改动前**先备份**：`/etc/config/*`、`/var/etc/ssrplus/*` 到 `/root/ssrfix-backup-<ts>/`，
+    并在报告中写明回滚命令。
 
 ---
 
