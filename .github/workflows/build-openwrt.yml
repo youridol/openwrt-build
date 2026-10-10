@@ -33,6 +33,22 @@ env:
   TARGET: x86_64
   FEED_CONF: feeds.conf.default
 
+# 【必须】上传 Release 产物需要 contents: write。
+#
+# 为什么必须显式声明：本仓库的默认工作流令牌权限是 **read**
+# （`gh api repos/.../actions/permissions/workflow`
+#   -> {"default_workflow_permissions":"read"}）。
+# 不声明就拿到只读令牌，`gh release upload` 会被拒：
+#   HTTP 403: Resource not accessible by integration
+#   (.../releases/<id>/assets?name=...)
+# 而 release.yml 之所以能建 Release，正是因为它自己声明了
+# `permissions: contents: write` —— 两个工作流的令牌是各自独立申请的。
+#
+# v0.4.5 ~ v0.4.11 期间「Release 建得出来、固件一个都传不上去」就是这个原因
+# （叠加 GH_REPO 缺失，两个问题互相掩盖）。
+permissions:
+  contents: write
+
 jobs:
   build:
     runs-on: ubuntu-22.04

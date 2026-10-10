@@ -368,20 +368,39 @@ dnsmasq 把哪些域名指向 mosdns:5335**。当前仓库值 **`'1'`**（v0.4.0
   本内核不支持的 nftables 语法且错误被 `2>/dev/null` 吞掉，只剩空链；
   且只挂 forward 链、看不到 REDIRECT 后的代理流量。
   详见 CHANGELOG v0.4.5 与红线 7/8。
-- **[已解决] 所有 Release 曾经都是空的（v0.4.5~v0.4.10，v0.4.11 修）**：
-  `Upload firmware to GitHub Release` 步骤的 `working-directory` 是**工作区根**，
-  而本工作流把代码签出到 `openwrt-build/` 与 `lede/` **子目录**，根目录**没有 `.git`**
-  → `gh` 无法确定目标仓库，报
-  `failed to run git: fatal: not a git repository`。
-  而当时的等待循环 `if gh release view … >/dev/null 2>&1; then break; fi`
-  把**任何**失败都当成「Release 还没创建」→ 硬错误被吞、白等 60s，
-  最后抛出误导性的「Release 不存在（release.yml 未运行？）」。
-  结果：**六个版本的 Release 全为空**，而流水线除最后一步外全程显示成功。
-  处置：显式 `GH_REPO: ${{ github.repository }}`；等待循环区分「未找到」与硬错误；
-  并在上传后**断言 Release 上至少有一个 `.img.gz`**，否则 `exit 1`。
-  **教训**：`gh` 命令在 CI 里必须能确定仓库 —— 要么 `GH_REPO`，要么每条带 `--repo`；
-  且「等待某资源就绪」的循环不能把**所有**错误都当作「还没好」，
-  否则真实错误会被静默吞掉，只在最后抛一句与根因无关的提示。
+- **[已解决] 所有 Release 曾经都是空的（v0.4.5~v0.4.11，v0.4.12 修）**：
+  这个问题有**两个叠加的根因**，互相掩盖，只看最后那句错误提示会一直找错方向：
+
+  1. **`gh` 无法确定仓库** —— `Upload firmware to GitHub Release` 步骤的
+     `working-directory` 是**工作区根**，而本工作流把代码签出到
+     `openwrt-build/` 与 `lede/` **子目录**，根目录**没有 `.git`**，于是报
+     `failed to run git: fatal: not a git repository`。
+     而当时的等待循环 `if gh release view … >/dev/null 2>&1; then break; fi`
+     把**任何**失败都当成「Release 还没创建」→ 硬错误被吞、白等 60s，
+     最后抛出误导性的「Release 不存在（release.yml 未运行？）」。
+     **修法**：显式 `GH_REPO: ${{ github.repository }}`；等待循环区分
+     「未找到」与硬错误。
+
+  2. **工作流令牌权限不足**（v0.4.12 才找到）—— 修好第 1 条后，上传仍然被拒：
+     `HTTP 403: Resource not accessible by integration`。
+     原因是本仓库默认工作流令牌权限为 **read**
+     （`gh api repos/<o>/<r>/actions/permissions/workflow`
+     → `{"default_workflow_permissions":"read"}`），而
+     **`build-openwrt.yml` 没有声明 `permissions`**，于是拿不到写权限。
+     对照组：`release.yml` 自己声明了 `permissions: contents: write`，
+     所以它能建 Release —— **两个工作流的令牌是各自独立申请的**。
+     **修法**：`build-openwrt.yml` 顶层加 `permissions: contents: write`。
+
+  另加了**兜底断言**：上传后 Release 上至少要有一个 `.img.gz`，否则 `exit 1`。
+
+  **教训**：
+  - `gh` 命令在 CI 里必须能确定仓库（`GH_REPO` 或 `--repo`），
+    否则在非 git 目录下必失败。
+  - 「等待某资源就绪」的循环不能把**所有**错误都当作「还没好」，
+    否则真实错误被静默吞掉，只在最后抛一句与根因无关的提示。
+  - 写 Release assets 需要 `permissions: contents: write`；
+    仓库默认可能是 read，**不要假设默认够用**。
+  - 发版这类动作要加**结果断言**（产物数 ≥ 1），不能只看步骤是否退出 0。
 - **[已处理] CI 触发条件**：`on.push` 已加 `paths-ignore`
   （`**.md`/`docs/**`/`.gitignore`/`LICENSE`），纯文档推送不再白跑 3.5 小时。
   依据是 GitHub 官方文档原文 *"Path filters are not evaluated for pushes of tags."*

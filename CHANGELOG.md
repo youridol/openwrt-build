@@ -2,6 +2,73 @@
 
 本仓库所有功能/配置改动均记录于此。版本判型遵循全局规范（PATCH / MINOR / MAJOR）。
 
+## [v0.4.12] - 2026-10-10
+
+### 修复 — Release 上传失败的**第二个**根因：工作流令牌权限
+
+v0.4.11 修掉了 `GH_REPO` 缺失（gh 在非 git 目录无法确定仓库），并在 v0.4.11 的
+tag 构建里**确认那一步已生效** —— 日志出现了
+`>>> 将固件产物上传到 Release v0.4.11（仓库 youridol/openwrt-build）`，
+并且正常列出了两个固件文件。但紧接着上传仍被拒：
+
+```
+HTTP 403: Resource not accessible by integration
+   (.../releases/408449361/assets?name=openwrt-x86-64-ssrplus-v0.4.11-1b42cf0-…img.gz)
+```
+
+这是**令牌权限不足**的典型报错。核对后确认：
+
+| 工作流 | permissions 声明 | 结果 |
+|---|---|---|
+| `release.yml` | `contents: write` | 能创建 Release —— 一直正常 |
+| `build-openwrt.yml` | **没有**（故取仓库默认） | 上传产物被拒 403 |
+
+而本仓库的默认工作流令牌权限是 **`read`**：
+`gh api repos/youridol/openwrt-build/actions/permissions/workflow`
+→ `{"default_workflow_permissions":"read"}`。
+
+**两个工作流的令牌是各自独立申请的** —— `release.yml` 声明了写入权限所以能建
+Release，`build-openwrt.yml` 没声明就只有只读权限、传不了 assets。
+这解释了为什么「Release 建得出来、固件一个都传不上去」能长期共存：
+两个问题互相掩盖，只看最后那句误导性的错误提示会一直找错方向。
+
+**处置**：`build-openwrt.yml` 顶层新增
+
+```yaml
+permissions:
+  contents: write
+```
+
+与 `release.yml` 保持一致。
+
+### 验证
+
+- **v0.4.11 的日志已确认前一修复生效**：`GH_REPO` 存在、目标仓库正确、
+  固件文件已枚举（`ls -l` 列出了两个 `.img.gz`）。
+- **第二个根因有直接证据**（不再是推断）：v0.4.11 构建的 `Set up job` 步骤
+  打印了它实际拿到的令牌权限 ——
+  ```
+  GITHUB_TOKEN Permissions
+    Contents: read
+    Metadata: read
+    Packages: read
+  ```
+  `Contents: read` 正是 `gh release upload` 收到
+  `HTTP 403: Resource not accessible by integration` 的原因；
+  该 403 的 endpoint 与 GitHub 文档「Upload a release asset」
+  （`POST /repos/{owner}/{repo}/releases/{release_id}/assets`）一致。
+- **A/B 对照**：同一仓库、同一默认 `read` —— `release.yml` 声明了
+  `contents: write` 所以能创建 Release（一直成功）；
+  `build-openwrt.yml` 未声明，被拒。
+- 本轮修复**尚未经构建实测** —— 需要下一次 tag 构建才会真正走这条路径。
+  在它成功、且 Release 上确实出现 `.img.gz` 之前，不应认为该问题已解决。
+
+### 说明
+
+v0.4.5 ~ v0.4.11 的 Release 均为空。固件本身**都已成功编译**并保存在
+Actions artifact 里（如 `openwrt-x86-64-ssrplus-v0.4.11-1b42cf0`），
+只是没能附加到 Release。补齐属发布动作，需另行确认。
+
 ## [v0.4.11] - 2026-10-10
 
 ### 修复 — 所有 Release 都是空的（长期存在，v0.4.5 起每个版本都没有固件）
