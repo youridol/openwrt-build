@@ -20,7 +20,7 @@ A hard internet block also felt heavy-handed for everyday use — sometimes slow
 
 After that, the focus shifted to making the whole thing convenient to live with: a recent-devices bar for one-click access, live sparkline graphs with a hover popup, a searchable device picker, configurable columns, activity logging.
 
-The latest addition is Telegram — instant notifications when a new device joins the network, and the ability to block, unblock, or throttle any device directly from my phone without opening a browser.
+The latest addition is live per-host connection details — click any IP in the ranking or device table to see that host's active conversations.
 
 I hope it turns out as useful for you as it has been for me.
 
@@ -32,7 +32,7 @@ I hope it turns out as useful for you as it has been for me.
 | **Control** | Internet block · WiFi MAC deny · Rate limiter (nft policer) · Traffic shaper (tc/HTB) |
 | **Visibility** | WiFi band (2.4G/5G/6G) · LAN port detection · Reachability indicator · Extended stats |
 | **UX** | Searchable device picker · Column toggles · Colorblind-safe · Dark + light theme |
-| **Automation** | Telegram bot · Activity logging · Boot persistence · DHCP hotplug new-device alerts |
+| **Automation** | Activity logging · Boot persistence · DHCP hotplug new-device alerts |
 
 ---
 
@@ -76,7 +76,7 @@ I hope it turns out as useful for you as it has been for me.
 </table>
 
 <details>
-<summary>More screenshots — light theme, settings, Telegram, activity log…</summary>
+<summary>More screenshots — light theme, settings, activity log…</summary>
 <br/>
 
 <table>
@@ -129,14 +129,6 @@ I hope it turns out as useful for you as it has been for me.
 <td><img src="docs/img/column-toggle-dark.gif" alt="Column toggle" width="480"/></td>
 </tr>
 <tr>
-<td align="center"><b>Telegram Bot — configure &amp; toggle</b></td>
-<td align="center"><b>Telegram Bot settings</b></td>
-</tr>
-<tr>
-<td><img src="docs/img/telegram-toggle-dark.gif" alt="Telegram toggle" width="480"/></td>
-<td><img src="docs/img/dark/19-telegram-settings.png" alt="Telegram settings" width="480"/></td>
-</tr>
-<tr>
 <td align="center"><b>Logging &amp; Persistence settings</b></td>
 <td align="center"><b>Activity Log panel</b></td>
 </tr>
@@ -166,10 +158,9 @@ I hope it turns out as useful for you as it has been for me.
 - **Port Forwards tab** -- Inbound traffic control for DNAT port forwards and router-local open ports: live connection/client/byte stats per forward, instant pause/resume (drop rule, no firewall reload) and inbound rate limiting.
 - **Live Speed Polling** -- Optional polling with configurable interval (Off/1/2/5/10/30s) and averaging window (5s-5min); shows sparkline per device with spike filtering. Both can be stored as router-wide defaults via UCI (`poll_interval`, `avg_window`) for browsers that have not chosen their own.
 - **Reverse DNS** -- Optional hostname resolution for external destination IPs with in-memory cache (no repeated lookups).
-- **Searchable Device Picker** -- Command palette (search by name, IP, or MAC) with recent devices quick-access bar stored in localStorage.
-- **Telegram Bot** -- Optional bot for remote control: device list, block/unblock, rate limit, shape traffic, new device notifications. Runs on the router via long polling, no external server needed.
+- **Searchable Device Picker** -- Command palette (search by name, IP, or MAC).
 - **New Device Detection** -- Discovers new devices via three sources: ARP table, DHCP leases, Wi-Fi station list. Instant DHCP hotplug trigger for near-realtime alerts.
-- **Activity Logging** -- Configurable logging of all actions (blocks, ratelimits, shapes, config changes) to a local file and/or syslog. Includes source IP, username, and trigger (LuCI/Telegram/CLI).
+- **Activity Logging** -- Configurable logging of all actions (blocks, ratelimits, shapes, config changes) to a local file and/or syslog. Includes source IP, username, and trigger (LuCI/CLI).
 - **Default Limit for New Devices** -- Optionally rate-limit or shape a device the first time it appears on the network (Settings > New Device Defaults). Off by default. Switching it on records the devices already present, so only genuinely new ones are affected, and a device that already carries a limit is never overridden.
 - **Reboot Persistence** -- Shaping, block, and rate-limit rules optionally survive reboot via hotplug restore. Configurable per UCI option `persist_rules`. A rate limit keeps its bucket layout across the restore, so a subnet limited "5 Mbit each" does not come back as 5 Mbit for the whole subnet.
 
@@ -196,8 +187,8 @@ I hope it turns out as useful for you as it has been for me.
 | `kmod-ifb` | Upload shaping | Without it the shaper applies to download only, and reports that |
 | `iw-full` | Interface detection | WiFi band identification |
 | `bridge-utils` | Interface detection | LAN port identification (brctl) |
-| `curl` + `jsonfilter` | Telegram bot | jsonfilter is part of base OpenWrt |
-| `rpcd-mod-rrdns` | Reverse DNS | Included with `rpcd`; enables rDNS in LuCI, Telegram, and CLI |
+| `curl` + `jsonfilter` | Port forwards, shaping | jsonfilter is part of base OpenWrt |
+| `rpcd-mod-rrdns` | Reverse DNS | Included with `rpcd`; enables rDNS in LuCI and CLI |
 
 ## Compatibility
 
@@ -264,8 +255,8 @@ rule. The MAC does not rotate, so the rules that *can* be keyed on it are.
 - **A device with no DHCP lease and no neighbour entry** — a client behind a
   downstream router, reached through `extra_subnets` or a static route — has no
   MAC this router can see. Its IPv4 rules are applied as before and the reply
-  says **"IPv4 only"** in the message, in the LuCI status line and in the
-  Telegram bot's answer, rather than reporting an unqualified success.
+  says **"IPv4 only"** in the message and in the LuCI status line, rather than
+  reporting an unqualified success.
 - **A downstream router itself** is excluded on purpose. Its MAC is the source
   address of every packet it forwards, so a MAC-keyed rule aimed at it would
   black-hole or throttle every client behind it. It too is reported as
@@ -367,13 +358,6 @@ firewall/tc state — they disappear on the next reboot. To clear them
 immediately before removing the package, unblock/unlimit the affected devices
 from the dashboard first, or reboot the router after uninstalling.
 
-If you also enabled the Telegram bot, stop it before removing:
-
-```sh
-/etc/init.d/trafficctl-telegram stop
-/etc/init.d/trafficctl-telegram disable
-```
-
 ### From source (OpenWrt build system)
 
 ```sh
@@ -426,7 +410,7 @@ apk add hostapd-utils
 
 # rpcd-mod-rrdns is included with rpcd (no extra install needed)
 
-# For Telegram bot (optional)
+# For port forwards and shaping (jsonfilter + curl)
 apk add curl
 ```
 
@@ -455,7 +439,7 @@ opkg install hostapd-utils
 
 # rpcd-mod-rrdns is included with rpcd (no extra install needed)
 
-# For Telegram bot (optional)
+# For port forwards and shaping (jsonfilter + curl)
 opkg install curl
 ```
 
@@ -471,13 +455,6 @@ opkg install curl
 4. Use the search bar to find a device by name, IP, or MAC.
 5. Select a device to see its per-connection detail table.
 6. Use the action buttons to pause internet, block WiFi, or set a speed limit.
-
-### Telegram Bot (optional)
-
-1. Create a bot via [@BotFather](https://t.me/BotFather) and copy the token.
-2. Send any message to your bot and find your chat ID via `https://api.telegram.org/bot<TOKEN>/getUpdates`.
-3. In LuCI, expand **Settings > Telegram Bot**, enter token and chat ID, click **Test**, then **Save**.
-4. In Telegram, send `/devices` to see the device list with action buttons.
 
 ---
 
@@ -500,10 +477,10 @@ opkg install curl
 
 ### Activity Logging
 
-- All mutable actions are logged with timestamp, source IP, username, trigger (luci/telegram/cli), and target.
+- All mutable actions are logged with timestamp, source IP, username, trigger (luci/cli), and target.
 - Log file: `/tmp/trafficctl/activity.log` (volatile; survives until reboot). Path and max lines are configurable via UCI.
 - Optionally duplicates to syslog (`logger -t trafficctl`) for remote log collection.
-- Per-category toggles: blocks, ratelimits, shapes, telegram, config changes.
+- Per-category toggles: blocks, ratelimits, shapes, config changes.
 
 ### WiFi MAC Filtering
 
@@ -525,10 +502,8 @@ connected is shown in the table as **not applied** rather than as blocked.
 ```mermaid
 flowchart LR
     A((LuCI\nBrowser)) -->|JSON-RPC| B[rpcd backend]
-    T((Telegram)) -->|Bot API| TG[telegram bot]
 
     B --> C{Query or\nAction?}
-    TG --> C
 
     C -->|query| D[/Monitoring/]
     C -->|action| E[/Control/]
@@ -554,7 +529,7 @@ flowchart LR
     LOG --> SL[(syslog)]
 ```
 
-The frontend talks to a thin rpcd dispatcher over ubus. The Telegram bot provides parallel remote control via long polling. Backend shell scripts split into two groups: **monitoring** (read-only, pulls data from conntrack, ARP, DHCP leases, and wireless subsystems) and **control** (writes firewall rules, tc classes, or WiFi MAC filters). A firewall abstraction layer auto-detects nft vs iptables at runtime. All mutable actions are logged to a local file and optionally syslog. Rules optionally persist across reboots via hotplug scripts.
+The frontend talks to a thin rpcd dispatcher over ubus. Backend shell scripts split into two groups: **monitoring** (read-only, pulls data from conntrack, ARP, DHCP leases, and wireless subsystems) and **control** (writes firewall rules, tc classes, or WiFi MAC filters). A firewall abstraction layer auto-detects nft vs iptables at runtime. All mutable actions are logged to a local file and optionally syslog. Rules optionally persist across reboots via hotplug scripts.
 
 ---
 
@@ -567,8 +542,6 @@ The frontend talks to a thin rpcd dispatcher over ubus. The Telegram bot provide
 | `luci-app-trafficctl/root/usr/libexec/rpcd/luci.trafficctl` | rpcd backend — JSON-RPC dispatch |
 | `luci-app-trafficctl/root/usr/local/bin/trafficctl-*.sh` | Backend scripts (monitoring + control) |
 | `luci-app-trafficctl/root/usr/local/bin/trafficctl-fw.sh` | Firewall abstraction layer (sourced) |
-| `luci-app-trafficctl/root/usr/local/bin/trafficctl-telegram.sh` | Telegram bot daemon (long polling) |
-| `luci-app-trafficctl/root/etc/init.d/trafficctl-telegram` | procd init script for the bot |
 | `luci-app-trafficctl/root/etc/hotplug.d/iface/99-trafficctl-shapes` | Boot persistence for tc + block + ratelimit rules |
 | `luci-app-trafficctl/root/etc/hotplug.d/dhcp/99-trafficctl-newdevice` | Instant new-device detection via DHCP events |
 | `luci-app-trafficctl/root/usr/share/rpcd/acl.d/` | ACL permissions |
@@ -611,4 +584,3 @@ Contributions are welcome. Please:
 Licensed under the Apache License, Version 2.0. See [LICENSE](LICENSE) for the full text.
 
 Copyright 2024-2026 Denis Iusupov.
-

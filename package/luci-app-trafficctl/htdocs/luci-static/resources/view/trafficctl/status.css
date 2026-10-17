@@ -21,8 +21,6 @@
     --tc-tip-bg:  #2d3748;
     --tc-tip-fg:  #ffffff;
     --tc-shadow:  rgba(0,0,0,.15);
-    /* Telegram brand colour, kept deliberately brand-accurate. */
-    --tg-primary: #0088cc;
 }
 
 /* Bootstrap explicit dark mode */
@@ -41,7 +39,6 @@
     --tc-tip-bg:  #e2e8f0;
     --tc-tip-fg:  #1a202c;
     --tc-shadow:  rgba(0,0,0,.5);
-    --tg-primary: #3390ec;
 }
 
 /* OS dark preference (Argon auto mode, other themes) */
@@ -61,7 +58,6 @@
         --tc-tip-bg:  #e2e8f0;
         --tc-tip-fg:  #1a202c;
         --tc-shadow:  rgba(0,0,0,.5);
-        --tg-primary: #3390ec;
     }
 }
 
@@ -81,6 +77,146 @@
 .tc-center   { text-align: center; }
 .tc-sm       { font-size: 11px; }
 
+/* ── 按钮组与弹出面板（v0.6.4 起 ☰；v0.6.6 起「可见列」也用它）──────────
+   两个菜单共用一套构件：.tc-menu-group（按钮组，右对齐）>
+   .tc-menu（按钮 + 浮层）> .tc-menu-btn + .tc-menu-panel。
+   面板绝对定位，展开时设备表不跳动。 */
+.tc-menu-group {
+    display: flex;
+    justify-content: flex-end;
+    gap: 6px;
+    /* 下方 12px 是**表格与按钮之间的行距**。此前只有上边距，按钮组的下边缘
+       与表格上边缘实测相距 0px —— 按钮看起来贴在表头上，像表的一部分而不像
+       「控制这张表的按钮」。（表格自身没有上边距，故只能在这里给。） */
+    margin: 8px 0 12px;
+}
+.tc-menu {
+    position: relative;
+    display: inline-flex;
+}
+.tc-menu-btn {
+    display: inline-flex;
+    align-items: center;
+    justify-content: center;
+    height: 26px;
+    min-width: 30px;
+    padding: 0 8px;
+    font-size: 13px;
+    line-height: 1;
+    cursor: pointer;
+    white-space: nowrap;
+    color: inherit;
+    background: var(--tc-bg-alt);
+    border: 1px solid var(--tc-border);
+    border-radius: 4px;
+}
+/* 图标按钮（☰）不需要左右内边距，正方形更紧凑。 */
+.tc-menu-btn:not(.tc-menu-btn--text) { padding: 0; width: 30px; font-size: 15px; }
+.tc-menu-btn:hover { background: var(--tc-hover); }
+/* 展开态用主题强调色描边，让「现在是开着的」一眼可见 —— 面板收起后
+   按钮是唯一的指示物。 */
+.tc-menu-btn--open {
+    background: var(--tc-hover);
+    border-color: var(--tc-speed);
+    color: var(--tc-speed);
+}
+/* 浮层：绝对定位，不挤占表格位置 —— 展开时设备表不跳动。 */
+.tc-menu-panel {
+    position: absolute;
+    top: calc(100% + 4px);
+    right: 0;
+    z-index: 60;
+    min-width: 250px;
+    padding: 10px 12px;
+    text-align: left;
+    background: var(--tc-bg);
+    border: 1px solid var(--tc-border);
+    border-radius: 6px;
+    box-shadow: 0 4px 16px var(--tc-shadow);
+}
+/* 「可见列」面板要放下两组多行 chip + 筛选行，比 ☰ 面板宽。 */
+.tc-menu-panel .tc-chips-wrap { max-width: 460px; }
+/* 复选框在面板里可以窄一些（一行一个，不需要横向铺开）。 */
+.tc-menu-panel .tc-col-checks { min-width: 150px; }
+.tc-menu__row {
+    display: flex;
+    align-items: center;
+    gap: 8px;
+    margin-bottom: 8px;
+    font-size: 12px;
+    white-space: nowrap;
+}
+/* 标签定宽，四行档位才能左右对齐（否则长短不一的标签会让 chip 参差）。 */
+.tc-menu__row > .tc-inline-label {
+    width: 62px;
+    flex: 0 0 auto;
+    color: var(--tc-muted);
+}
+.tc-menu__label {
+    font-size: 11px;
+    color: var(--tc-muted);
+    margin: 6px 0 4px;
+}
+.tc-menu__label:first-child { margin-top: 0; }
+.tc-menu__foot {
+    display: flex;
+    align-items: center;
+    gap: 8px;
+    margin-top: 10px;
+    padding-top: 8px;
+    border-top: 1px solid var(--tc-border);
+}
+
+/* ── 视图开关行（v0.6.6）────────────────────────────────────────────
+   统计 / 连接 / 概览 / 扩展 / rDNS / 活动日志 六个开关直接展示在速率限制
+   卡片尾部。原先是可折叠卡片「视图与表格」—— 开关藏在折叠区里，表现为
+   「内容不见了却不知道开关在哪」。 */
+.tc-view-toggles {
+    display: flex;
+    align-items: center;
+    gap: 16px;
+    flex-wrap: wrap;
+    margin-top: 10px;
+}
+
+/* ── 行内「限制」弹层（v0.6.9）──────────────────────────────────────────
+   点设备表操作列的「限制」，在这台设备下方弹出它的限速设置。原先这些控件
+   平铺在「速率限制」卡片里，占掉大半高度，却只在给某台设备设限速时才用；
+   而设限速本来就要先选中一台设备 —— 两件事合成一步。
+   与 .tc-graph-popup 同样是挂在 document.body 上的浮层（脱离表格的
+   overflow 裁剪），故绝对定位、自带底色与阴影。 */
+.tc-limit-popup {
+    position: absolute;
+    z-index: 70;
+    width: 340px;
+    padding: 10px 12px;
+    text-align: left;
+    background: var(--tc-bg);
+    border: 1px solid var(--tc-border);
+    border-radius: 6px;
+    box-shadow: 0 4px 16px var(--tc-shadow);
+}
+.tc-limit-popup__who {
+    font-size: 12px;
+    font-weight: 600;
+    margin-bottom: 8px;
+    padding-bottom: 6px;
+    border-bottom: 1px solid var(--tc-border);
+    white-space: nowrap;
+    overflow: hidden;
+    text-overflow: ellipsis;
+}
+/* 档位 chip 在窄浮层里要能换行，否则 8 个档位会横向溢出。 */
+.tc-limit-popup .tc-chips-row { flex-wrap: wrap; }
+.tc-limit-popup__foot {
+    display: flex;
+    align-items: center;
+    gap: 8px;
+    margin-top: 8px;
+    padding-top: 8px;
+    border-top: 1px solid var(--tc-border);
+}
+
 /* ── Table extras ────────────────────────────────────────────────── */
 /* Base styles come from LuCI's .table .tr .th .td cascade */
 .table.tc-table .th { cursor: pointer; user-select: none; white-space: nowrap; font-size: 12px; }
@@ -90,6 +226,152 @@
     background: var(--tc-hover);
     cursor: pointer;
 }
+
+/* ── 表头与单元格居中（v0.6.5）──────────────────────────────────────
+   原先一行里混着三种对齐：表头左对齐、数字列右对齐、文字列左对齐 ——
+   设备多时列与列之间看起来是错位的，读一列要来回找基准。
+   统一居中后，每列的标题与内容落在同一条中轴上。
+   【作用域】只加在带 .tc-table--center 的表上（设备表 / 连接表 / 分组表）。
+   扩展统计面板也用 .tc-table，但它是「标签 — 数值」两栏行，居中会读不成
+   列表，故不加该类。
+   `.tc-right` / `.tc-center` 是**全局**工具类（表格之外也在用），
+   不在这里改它们，避免波及别处。 */
+.table.tc-table--center .th,
+.table.tc-table--center .td {
+    text-align: center;
+}
+/* 行内块级子元素也要跟着居中：单独给 .td 设 text-align 管不到它们 ——
+   例如 IP/MAC、类型/厂商、操作这三列的 `.tc-cell-stack` 是 flex 列容器，
+   其子项的对齐由容器自己的 align-items 决定，默认 stretch（左贴）。
+   同理，名称列里的主机名与铅笔图标是 inline，会随 text-align 走。 */
+.table.tc-table--center .td.tc-cell-stack {
+    align-items: center;
+}
+/* 单元格内的链接在居中布局下不该带下划线占视觉重量（保留 hover 提示）。 */
+.table.tc-table--center .td .tc-host-link { margin-left: 4px; }
+/* 表头的排序箭头跟着标签走，居中后不需要额外留白。 */
+.table.tc-table--center .th { padding-left: 4px; padding-right: 4px; }
+
+/* ── 两行式单元格（v0.6.3）────────────────────────────────────────────
+   参照爱快设备列表的形状：IP/MAC、终端类型/厂商、操作各占一列、列内上下两行。
+   这样把 16 列压到 9 列，不必横向滚动就能读全。
+   【关键】行高由「两行」决定：.tc-cell-stack 内的两行各自 line-height 收紧，
+   整行实测 ~42px（原来单行 36px × 16 列反而更宽且要滚动）。
+   两个子行对齐方式：主行正常色、副行小字灰色。 */
+.tc-cell-stack {
+    display: flex;
+    flex-direction: column;
+    justify-content: center;
+    gap: 1px;
+    line-height: 1.25;
+}
+.tc-cell-stack .tc-cell-main,
+.tc-cell-stack .tc-cell-sub {
+    display: block;
+    white-space: nowrap;
+    overflow: hidden;
+    text-overflow: ellipsis;
+    max-width: 100%;
+}
+.tc-cell-sub {
+    font-size: 10px;
+    color: var(--tc-muted);
+    line-height: 1.2;
+}
+/* IP/MAC 与 类型/厂商 两列是「设备标识」，给它们宽度上限，避免长主机名或长
+   厂商名把相邻的数字列挤变形。 */
+.table.tc-table .td.tc-cell-stack,
+.table.tc-table .th[data-col="ip"],
+.table.tc-table .th[data-col="_tydev"] {
+    min-width: 0;
+}
+/* 【关键】整表用 `table-layout: fixed`，而不是 auto。
+   auto 布局下 `width:Npx` 只是**建议**：浏览器按内容再分配，于是
+   ① 数字列被拉成几百像素的空槽（实测「累计上行」曾占满一屏宽），
+   ② 同时又有列被压到内容宽以下 —— 溢出实测 153px，来源是「操作」列只有
+   56px 却要塞下「Details / Limit」两个链接（需要 154px），整表因此多出一条
+   无意义的横向滚动条。
+   fixed 布局下宽度是**硬约束**：宽列给足，表格既不溢出、列宽也稳定。
+   【但】fixed 布局还有一条规范行为：所有列宽之和**小于**表格宽度时，
+   多余空间会**按各列宽度比例摊分**（实测每列都被放大 1.9 倍，
+   数字列间因此出现大片空白）。故宽度不做成百分比、也不额外放弹性列，
+   而是让**列宽之和自然接近表宽**：下面一个「占满剩余」的列
+   （名称，width:auto）吸收余量，其余列拿固定像素。 */
+.table.tc-table {
+    width: 100%;
+    table-layout: fixed;
+    /* 实测各列内容的自然宽度合计约 750px（IP/MAC 85 + 连接数 36 + 四个速率列
+       约 220 + 类型厂商 80 + 名称 193 + 操作 36，加上 9 列的内边距）。
+       低于这个宽度还硬按百分比压缩，IP 会折行、操作列会被截成「Detai」——
+       窄屏宁可横向滚动，也不要一列一列挤成碎片。外层容器已是
+       overflow-x:auto，故这里给一个下限即可。 */
+    min-width: 860px;
+}
+/* 所有单元格禁止撑破列宽（fixed 布局下这是必需的：否则长文本会画出列外）。 */
+.table.tc-table .th,
+.table.tc-table .td {
+    overflow: hidden;
+    text-overflow: ellipsis;
+}
+/* 列宽**在 JS 里按每列的最小可用宽度算**（见 buildSummaryTable 的 COL_MIN_PX），
+   这里不再写 width。原因：CSS 百分比是「占表宽的比例」，用户在「可见列」里
+   把隐藏列打开后最多 20 列，比例被摊薄 —— 实测图表 / 限制 / 丢弃 / 队列四列
+   被压到 11px、MAC 折成三行。
+   JS 的做法是给每列一个像素预算，总和作为表的 min-width，各列百分比按
+   「预算 / 总和」得出，并以**内联样式**写到表头上（内联优先，故原先这里的
+   width 规则已全部失效并删除，避免留下两处互相矛盾的定义）：
+     · 容器窄于总和 → 表取 min-width，每列恰好拿到预算，外层横向滚动；
+     · 容器宽于总和 → 表铺满容器，各列按同一比例变大。
+   两种情形都不会出现「某列被摊到 11px」或「MAC 折三行」。 */
+
+/* 操作列：两行链接，紧凑无默认下划线，hover 才提示可点。
+   【关键】必须 `display:block`。这两个子元素都是 <a>，即 inline ——
+   而 .tc-cell-stack 的 flex 列布局会被 `.table.tc-table .td { display:
+   table-cell }` 覆盖（td 自身就是表格单元格，不能同时是 flex 容器），
+   于是"两行"实际只有靠子元素是块级才成立：IP/MAC 列第二个子是 <div>（block）
+   故天然换行，操作列两个全是 <a> 就并成了一行「Details限制」。 */
+.tc-actions a { display: block; text-decoration: none; font-size: 11px; white-space: nowrap; }
+.tc-actions a:hover { text-decoration: underline; }
+
+/* ── 分页条（v0.6.3）────────────────────────────────────────────────── */
+.tc-pager {
+    display: flex;
+    align-items: center;
+    justify-content: space-between;
+    flex-wrap: wrap;
+    gap: 8px;
+    margin-top: 8px;
+    padding: 6px 2px;
+    font-size: 12px;
+    color: var(--tc-muted);
+}
+.tc-pager__right {
+    display: inline-flex;
+    align-items: center;
+    gap: 2px;
+}
+.tc-page-btn {
+    display: inline-block;
+    min-width: 22px;
+    padding: 2px 6px;
+    margin: 0 1px;
+    text-align: center;
+    border: 1px solid var(--tc-border);
+    border-radius: 3px;
+    cursor: pointer;
+    user-select: none;
+    color: inherit;
+}
+.tc-page-btn:hover { background: var(--tc-hover); }
+/* 选中页：用主题的主色填充，文字用 --tc-on-accent（深色主题下会翻成深色，
+   硬编码 #fff 会在浅色强调色的主题里看不清）。 */
+.tc-page-btn--active {
+    background: var(--tc-speed);
+    border-color: var(--tc-speed);
+    color: var(--tc-on-accent);
+    font-weight: 600;
+}
+.tc-page-btn--disabled { cursor: default; }
 
 /* ── Speed indicator in table ────────────────────────────────────── */
 .tc-speed-active { color: var(--tc-speed); font-weight: 600; }
@@ -160,6 +442,93 @@
     border-color: var(--tc-warn);
     background: var(--tc-bg);
 }
+/* 【本仓库改动】嵌入速率限制卡片时的形态：去掉自己的外框、底色与下边距，
+   改用一条上分隔线区分两个功能区。这样它不再作为并列的独立卡片占一整行。 */
+.tc-cut--embedded {
+    margin: 12px 0 0;
+    padding: 12px 0 0;
+    border-width: 0;
+    border-top: 1px solid var(--tc-border);
+    border-radius: 0;
+    background: transparent;
+}
+/* 状态色改为只染图标所在的那一行，避免整块底色与卡片底色叠在一起。 */
+.tc-cut--embedded.tc-cut--on,
+.tc-cut--embedded.tc-cut--broken {
+    background: transparent;
+}
+.tc-cut--embedded.tc-cut--on > .tc-cut__row > .tc-cut__icon { color: var(--tc-err); }
+.tc-cut--embedded.tc-cut--broken > .tc-cut__row > .tc-cut__icon { color: var(--tc-warn); }
+
+/* ── 速率限制面板内的设备选择行（v0.6.2）──────────────────────────────
+   搜索框 + 「所有设备」+ 最近设备 chip 原先是面板之外的独立两行；
+   现与「目标」同处一行：左侧选设备、右侧设限制。
+   【关键】三个子块都**不换行**（flex-wrap: nowrap），否则搜索框与「所有设备」
+   会被拆到两行 —— 那正是本次要消除的。整行放不下时由**外层** .tc-picker-row
+   统一换行，而不是块内各自换行；块内换行会让「所有设备」孤零零掉到第二行。 */
+.tc-picker-row {
+    display: flex;
+    align-items: center;
+    gap: 12px;
+    flex-wrap: wrap;
+    margin-bottom: 8px;
+}
+.tc-picker-row__device {
+    display: flex;
+    align-items: center;
+    gap: 8px;
+    flex-wrap: nowrap;
+    min-width: 0;
+}
+/* 搜索框在 flex 行内需要有明确宽度：.tc-search-wrapper 本身是 inline-block
+   （为下拉浮层定位而设），不撑开时会被压到内容宽度。 */
+.tc-picker-row__device .tc-search-wrapper {
+    width: 240px;
+    flex: 0 1 240px;
+}
+.tc-picker-row__device .tc-quick-bar {
+    flex: 0 0 auto;
+}
+/* 「目标 / 共享 / 网段」段：与设备选择同排。 */
+.tc-picker-row__scope {
+    display: flex;
+    align-items: center;
+    gap: 8px;
+    flex-wrap: nowrap;
+}
+.tc-picker-row__actions {
+    display: flex;
+    align-items: center;
+    gap: 8px;
+    flex: 0 0 auto;
+}
+/* 该行内的 quickBar 不再自占一行（外层由 .tc-picker-row 负责间距） */
+.tc-picker-row .tc-quick-bar {
+    margin-bottom: 0;
+}
+/* 「视图与表格」并入速率限制面板后的尾部：去掉自己的外框与底色，
+   改用一条上分隔线 —— 与 .tc-cut--embedded 同一做法。 */
+.tc-rate-panel__tail {
+    margin-top: 12px;
+    padding-top: 12px;
+    border-top: 1px solid var(--tc-border);
+}
+.tc-rate-panel__tail .tc-card {
+    border: 0;
+    border-radius: 0;
+    background: transparent;
+}
+.tc-rate-panel__tail .tc-card--open {
+    border-left: 0;
+}
+.tc-rate-panel__tail .tc-collapsible-head {
+    padding-left: 0 !important;
+    padding-right: 0 !important;
+}
+
+/* （原 .tc-table-speed-bar 平铺条已由 .tc-speed-menu 的 ☰ 浮层取代，
+   v0.6.4 —— 这里的规则一并删除，避免留下无人引用的死样式。） */
+
 .tc-cut__row {
     display: flex;
     align-items: flex-start;
@@ -269,7 +638,16 @@
 }
 
 /* ── Subnet target: the each/shared explanation and its warning ──── */
+/* v0.6.2：本行已并入 .tc-picker-row，与设备搜索框同排，故自身是 flex 行内元素
+   （原来它是块级、独占一行）。 */
 .tc-scope-row {
+    display: flex;
+    align-items: center;
+    gap: 8px;
+    flex-wrap: wrap;
+    margin: 0;
+}
+.tc-scope-note {
     margin-bottom: 6px;
 }
 /* Full sentences rather than a tooltip: "5 Mbit each" and "5 Mbit between
@@ -365,15 +743,54 @@
 .tc-col-chip--on  { background: var(--tc-speed); color: var(--tc-on-accent); border: 1px solid var(--tc-speed); }
 .tc-col-chip--off { background: var(--tc-bg); color: var(--tc-muted); border: 1px solid var(--tc-border); }
 
+/* ── 可见列复选框（v0.6.8）──────────────────────────────────────────────
+   原先是圆形 chip 挤在弹层里（最多 20 个、铺成五行、每行长短不一），
+   要在一堆同色小圆里找某一列。改为**一行一个复选框**：命中区域大、
+   左边缘对齐、勾选状态一眼可读。
+   清单只含**默认隐藏**的列 —— 默认就显示的那些不再列进来（它们本来就
+   看得见，再给个开关只会让人以为「没勾上就是没有」）。 */
+.tc-col-checks {
+    display: flex;
+    flex-direction: column;
+    gap: 2px;
+    min-width: 150px;
+}
+.tc-col-check {
+    display: flex;
+    align-items: center;
+    gap: 7px;
+    padding: 3px 6px;
+    border-radius: 4px;
+    font-size: 12px;
+    cursor: pointer;
+    user-select: none;
+}
+.tc-col-check:hover { background: var(--tc-hover); }
+/* 复选框本身用主题强调色。accent-color 是标准属性，一个声明即可覆盖
+   浏览器默认的蓝色/灰色，无需自绘（自绘要额外维护 :checked 与 focus 两态）。 */
+.tc-col-check__box {
+    flex: 0 0 auto;
+    width: 14px;
+    height: 14px;
+    margin: 0;
+    accent-color: var(--tc-speed);
+    cursor: pointer;
+}
+.tc-col-check__label {
+    flex: 1 1 auto;
+    white-space: nowrap;
+}
+
 /* ── Settings panel ───────────────────────────────────────────────────
    【本仓库补丁（相对上游 1.21.4）】
    上游把整个设置区包在可折叠容器内且初始隐藏（.tc-settings-toggle +
    .tc-settings-body.tc-hidden），用户必须点标题才能看到设置项。
    本仓库改为：常显标题栏 + 内容始终可见。
 
-   Telegram Bot 已提升为**页面级独立 tab**（telegram.js，由 menu.d 生成，
-   与「设备」「端口转发」并列），故这里不再有内层 tab —— 两级 tab 会让人
-   分不清哪一层在切页。相关样式（.tc-settings-tabs / .tc-stab）已移除。
+   v0.7.0 起 Telegram 全链路移除（视图 / menu.d 登记 / acl.d 授权 /
+   rpcd 方法 / init.d 服务 / 两个脚本 / hotplug 通知），故这里也不再有
+   Telegram 内层 tab，其专用样式已删除。相关样式（.tc-settings-tabs /
+   .tc-stab）更早已移除。
    ─────────────────────────────────────────────────────────────────── */
 .tc-settings-panel {
     border-radius: 6px;
@@ -400,32 +817,37 @@
     font-size: 11px;
     color: var(--tc-faint, var(--tc-muted));
 }
-/* 卡片瀑布流：卡片高度不一，用 CSS 多列让浏览器自动均衡分列，
-   避免网格「按行取最高卡片」留下的大片空白。 */
+/* 【本仓库改动】原为 `column-count: 2` 多列瀑布流。多列会把**每张卡片压成半宽**，
+   于是「表格与速率」里 4 组档位 + 保存按钮被迫折成两行、控件挤在一起 ——
+   这正是「多余换行」的来源。改为 grid：列数确定、宽度可预期，且宽度不够的
+   卡片能用 .tc-card--wide 独占整行（多列做不到「单个子项跨列」）。
+   【为何不用 auto-fit minmax(430px,1fr)】2560px 宽的屏幕上它会算出 5–6 列，
+   每列反而比原来的两列更窄 —— 换行只会更多，与目标相反。故显式两列。 */
 .tc-settings-body {
     padding: 12px 14px 14px;
-    column-count: 2;
-    column-gap: 12px;
+    display: grid;
+    grid-template-columns: repeat(2, minmax(0, 1fr));
+    gap: 12px;
+    align-items: start;
 }
-@media (max-width: 760px) {
-    .tc-settings-body { column-count: 1; }
+@media (max-width: 1100px) {
+    .tc-settings-body { grid-template-columns: minmax(0, 1fr); }
 }
-
-/* Telegram 独立页：内容较长，单列铺满，不做多列（表单需要整行宽度）。 */
-.tg-page {
-    margin-top: 4px;
+/* 档位多、需要整行宽度的卡片（如「表格与速率」） */
+.tc-card--wide {
+    grid-column: 1 / -1;
 }
 
 /* ── Settings cards ──────────────────────────────────────────────────
-   卡片高度不一（Telegram 1.2k px、显示 ~100 px），由 .tc-settings-body 上的
-   column-count 让浏览器自动均衡分列，避免网格「按行取最高卡片」留下空白。 */
+   容器 .tc-settings-body 在 v0.6.0 已改为 grid（见上）。此处不能再写
+   `display: inline-block`：那是为多列瀑布流准备的，进入 grid 后会让卡片
+   撑不出列宽、相邻卡片错位。grid 子项默认就是块级、自动铺满列宽。 */
 .tc-card {
     break-inside: avoid;
-    -webkit-column-break-inside: avoid;
     page-break-inside: avoid;
-    display: inline-block;
-    width: 100%;
-    margin: 0 0 12px;
+    /* grid 子项默认 min-width:auto，长内容（长代码、长 URL）会撑破列宽 */
+    min-width: 0;
+    margin: 0;
     border: 1px solid var(--tc-border);
     border-radius: 5px;
     background: var(--tc-bg);
@@ -619,18 +1041,46 @@
 /* ── Extended stats panel ────────────────────────────────────────── */
 .tc-offload-row {
     display: flex;
-    align-items: center;
+    align-items: baseline;
     gap: 8px;
     margin-top: 6px;
+    flex-wrap: wrap;
 }
 .tc-offload-row--hw {
     margin-top: 10px;
 }
+/* 【本仓库改动】说明改为与开关同一行（占剩余宽度），不再另起一行。
+   原写法 margin-left: 32px 是为「独立成行」准备的缩进，同行时反而挤掉空间。 */
 .tc-offload-desc {
     font-size: 11px;
     color: var(--tc-muted);
-    margin: 2px 0 0 32px;
+    margin: 0;
     line-height: 1.5;
+}
+
+/* ── 设置页（v0.6.0 独立 tab）───────────────────────────────────────
+   设置页复用 status.css（LuCI 只自动加载与视图同名的样式，而 htdocs 下
+   没有 settings.css），故这些类定义在此。页面本身的卡片瀑布流仍走
+   .tc-settings-body。 */
+.tc-settings-page-head {
+    display: flex;
+    align-items: center;
+    gap: 10px;
+    margin-bottom: 10px;
+}
+.tc-save-flag {
+    font-size: 12px;
+    color: var(--tc-ok);
+}
+/* 「表格与速率」卡片内的一行：档位多，必须允许换行，否则在窄屏溢出。 */
+.tc-table-speed-row {
+    display: flex;
+    align-items: center;
+    gap: 10px;
+    flex-wrap: wrap;
+}
+.tc-table-speed-inner .tc-sep {
+    margin: 0 2px;
 }
 
 .tc-device-graph {
@@ -768,53 +1218,28 @@
     z-index: 200; padding: 4px 0; white-space: nowrap;
 }
 
-/* ── Telegram settings section ───────────────────────────────────── */
-.tg-section  { border-left: 3px solid var(--tg-primary); padding-left: 12px; margin-top: 4px; }
-.tg-row      { display: flex; flex-wrap: wrap; align-items: center; gap: 8px; }
-.tg-row + .tg-row { margin-top: 8px; }
-.tg-input {
+/* ── 通用表单件（原 .tg-*，v0.7.0 随 Telegram 移除而改名）─────────────
+   这三个类从来不是 Telegram 专属：设备页的「保存为路由器默认值」按钮与
+   保存状态、设置页「新设备默认限速」的数字输入都在用。Telegram 移除后
+   把它们从 .tg-* 改为中性的 .tc-*，避免「类名指向一个已不存在的功能」。
+   原先其余 .tg-* （气泡、内联键盘预览、分段控件、状态点等）全是 Telegram
+   专用，已随 telegram.js 一并删除。 */
+.tc-input {
     font-size: 12px; padding: 4px 8px;
     background: var(--tc-bg); color: inherit;
     border: 1px solid var(--tc-border); border-radius: 4px;
     outline: none; transition: border-color .2s;
 }
-.tg-input:focus { border-color: var(--tg-primary); }
-.tg-input--token    { width: 240px; }
-.tg-input--chat     { width: 120px; }
-.tg-input--template { width: 100%; min-height: 60px; resize: vertical; font-family: monospace; font-size: 11px; }
-.tg-btn {
+.tc-input:focus { border-color: var(--tc-speed); }
+.tc-input--num { width: 120px; }
+.tc-btn {
     font-size: 11px; padding: 3px 10px;
     border: 1px solid var(--tc-border); border-radius: 4px;
     background: var(--tc-bg); color: inherit;
     cursor: pointer; transition: background .15s;
 }
-.tg-btn:hover { background: var(--tc-hover); }
-.tg-btn--primary { background: var(--tg-primary); color: var(--tc-on-accent); border-color: var(--tg-primary); }
-.tg-btn--primary:hover { background: #006fa3; }
-.tg-label      { font-size: 11px; color: var(--tc-muted); font-weight: 500; }
-.tg-status-dot { display: inline-block; width: 8px; height: 8px; border-radius: 50%; margin-left: 6px; vertical-align: middle; }
-.tg-status-dot--on  { background: var(--tc-ok); }
-.tg-status-dot--off { background: var(--tc-faint); }
-.tg-segmented { display: inline-flex; border: 1px solid var(--tc-border); border-radius: 4px; overflow: hidden; font-size: 12px; }
-.tg-segmented__item {
-    padding: 5px 14px; cursor: pointer;
-    background: var(--tc-bg); color: var(--tc-muted);
-    transition: background .15s, color .15s; user-select: none;
-    border-right: 1px solid var(--tc-border);
-    border-top: none; border-bottom: none; border-left: none;
-    font-family: inherit; font-size: inherit; line-height: inherit; outline: none;
-}
-.tg-segmented__item:last-child { border-right: none; }
-.tg-segmented__item--active { background: var(--tg-primary); color: var(--tc-on-accent); }
-.tg-divider { font-size: 11px; font-weight: 600; color: var(--tc-muted); margin-top: 12px; margin-bottom: 6px; padding-bottom: 4px; border-bottom: 1px solid var(--tc-border); }
-.tg-bubble { background: var(--tc-bg-alt); border: 1px solid var(--tc-border); border-radius: 12px 12px 12px 4px; padding: 10px 14px; max-width: 280px; font-size: 12px; line-height: 1.5; box-shadow: 0 1px 2px var(--tc-shadow); }
-.tg-bubble--kbd { text-align: center; border-radius: 12px; }
-.tg-kbd-row { display: flex; gap: 2px; justify-content: center; margin-top: 4px; }
-.tg-kbd-btn { background: var(--tg-primary); color: var(--tc-on-accent); border-radius: 6px; padding: 5px 10px; font-size: 11px; flex: 1; text-align: center; min-width: 0; }
-.tg-commands { background: var(--tc-bg-alt); border: 1px solid var(--tc-border); border-radius: 4px; padding: 8px 12px; font-family: monospace; font-size: 11px; line-height: 1.8; }
-.tg-eye { cursor: pointer; font-size: 14px; user-select: none; line-height: 1; }
-.tg-template-hint { font-size: 10px; color: var(--tc-faint); margin-top: 2px; }
-.tg-save-status { font-size: 11px; margin-left: 8px; transition: opacity .3s; }
+.tc-btn:hover { background: var(--tc-hover); }
+.tc-save-status { font-size: 11px; margin-left: 8px; transition: opacity .3s; }
 
 /* ── Spinner ─────────────────────────────────────────────────────── */
 @keyframes tc-spin { to { transform: rotate(360deg); } }
@@ -883,6 +1308,22 @@
 	padding: 12px;
 	margin: 8px 0;
 }
+/* 这张卡片现在同时装「统计条」（活跃/已阻断/WiFi）与「上联概览」两段。
+   统计条原先是独立的 .alert-message 窄条，自带背景与边框 —— 放进卡片里
+   就会套出第二层框。这里把它压成卡片的**抬头行**：去掉外框与底色，
+   只用一条分隔线与下面的概览隔开。 */
+.tc-overview > .alert-message {
+	margin: 0 0 10px;
+	padding: 0 0 10px;
+	border: none;
+	border-bottom: 1px solid var(--tc-border);
+	border-radius: 0;
+	background: none;
+	font-size: 12px;
+}
+/* 卡片里只剩概览、没有统计条时（统计关掉），抬头行不存在，
+   概览顶上不该多出一段空白。 */
+.tc-ov-body { margin: 0; }
 
 .tc-ov-tiles {
 	display: flex;
@@ -976,8 +1417,7 @@
 .tc-ov-empty { font-size: 12px; padding: 8px 0; }
 
 /* Top talkers — a bar per device, scaled to the busiest one, so the shape of
-   "one device is saturating the line" is visible without reading numbers. */
-.tc-ov-talkers { display: flex; flex-direction: column; gap: 6px; }
+   "one device is saturating the line" is visible without reading numbers. */.tc-ov-talkers { display: flex; flex-direction: column; gap: 6px; }
 .tc-ov-talker-head {
 	display: flex;
 	justify-content: space-between;
@@ -993,6 +1433,8 @@
 }
 .tc-ov-talker-rate { font-size: 11px; white-space: nowrap; flex: 0 0 auto; }
 .tc-ov-talker-up { margin-left: 8px; }
+/* IP 跟在主机名之后作为第二个入口；名字已等于 IP 时它不会被渲染。 */
+.tc-ov-talker-ip { margin-left: 6px; font-size: 11px; }
 .tc-ov-bar {
 	height: 5px;
 	border-radius: 3px;
@@ -1001,6 +1443,63 @@
 	margin-top: 2px;
 }
 .tc-ov-bar-fill { height: 100%; background: var(--tc-speed); }
+
+/* 设备表里的「进入主机详情」入口。原设备名保持纯文本，链接只作为其后的小图标，
+   以免给整张表加满下划线噪声。 */
+.tc-host-link {
+	margin-left: 6px;
+	font-size: 11px;
+	color: var(--tc-muted);
+	text-decoration: none;
+	border-bottom: 1px dotted var(--tc-faint);
+}
+.tc-host-link:hover { color: var(--tc-speed); border-bottom-style: solid; }
+
+/* ── 主机实时连接详情页（view/trafficctl/host.js） ───────────────────── */
+.tc-host-head { display: flex; align-items: baseline; gap: 10px; flex-wrap: wrap; }
+.tc-host-head .tc-host-h2 { margin: 0; }
+.tc-host-title { font-weight: 700; }
+.tc-host-subline { font-size: 12px; }
+.tc-host-back { font-size: 12px; }
+.tc-host-toolbar {
+	display: flex;
+	align-items: center;
+	gap: 8px;
+	flex-wrap: wrap;
+	margin: 8px 0;
+}
+.tc-host-table { overflow-x: auto; }
+/* 13 列必须横排。设备表靠 LuCI 的 .table/.tr/.th 级联布局，而在 shadcn 主题下
+   这些元素被算成 display:block —— 表头会逐个竖着堆成一列（本页 13 列尤其明显）。
+   这里只在本页范围内显式用 grid 定列，既有页面一律不受影响。
+   列宽与 host.js 里 cols 的顺序一一对应。 */
+.tc-host-table .tc-table .tr {
+	display: grid;
+	grid-template-columns:
+		88px   /* 应用 */
+		64px   /* 协议 */
+		84px   /* 线路 */
+		132px  /* 外网地址 */
+		minmax(140px, 320px) /* 域名：长 PTR 名常见，给上限避免独占整行 */
+		72px   /* 源端口 */
+		132px  /* 目的地址 */
+		72px   /* 目的端口 */
+		104px  /* 上行速率 */
+		104px  /* 下行速率 */
+		104px  /* 累计上行 */
+		104px  /* 累计下行 */
+		126px; /* 连接状态 */
+	align-items: center;
+}
+.tc-host-table .tc-table .th,
+.tc-host-table .tc-table .td { white-space: nowrap; overflow: hidden; text-overflow: ellipsis; }
+.tc-host-table .tc-table .th { padding: 6px 6px; }
+.tc-host-table .tc-table .td { padding: 5px 6px; }
+/* 窄屏允许横向滚动，而不是把列挤成不可读的宽度。
+   取值 = 上面 13 列固定宽度之和（1506px），留一点余量，避免内容溢出表格盒子
+   之外、滚动宽度算不准。 */
+.tc-host-table .tc-table { min-width: 1520px; }
+.tc-host-note { font-size: 11px; margin-top: 8px; }
 
 @media (max-width: 560px) {
 	.tc-ov-total { display: none; }

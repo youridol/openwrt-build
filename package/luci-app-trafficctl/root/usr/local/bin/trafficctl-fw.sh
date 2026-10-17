@@ -1088,7 +1088,6 @@ tctl_log() {
         block|unblock|cut|uncut) category="blocks" ;;
         ratelimit*) category="ratelimits" ;;
         shape*) category="shapes" ;;
-        telegram*) category="telegram" ;;
         config*) category="config" ;;
         *) category="config" ;;
     esac

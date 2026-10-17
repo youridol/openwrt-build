@@ -19,8 +19,10 @@
 | `0001-*.patch` | nftables 字节计数后端重写（功能性修复） |
 | `0002-*.patch` | 设置区 tab 化、默认自动刷新、卡片瀑布流布局 |
 | `0003-*.patch` | 中文翻译（新增 `po/zh-cn/` + 同步 pot 模板） |
+| `0004-*.patch` | 主机实时连接详情页（13 列表格）+ conntrack 回复方向字段 |
+| `0005-*.patch` | 设置独立成 tab + 页面共用模块 `common.js` + 设备页去重与重排 |
 
-## 三个 patch 各自为什么存在
+## 五个 patch 各自为什么存在
 
 ### 0001 — 重写 nft 字节计数后端（**不改就功能失效**）
 
@@ -99,7 +101,64 @@ JSON 契约与上游保持一致（`ip` / `bytes_in` / `bytes_out` / `bytes_tcp`
   `zh_Hans`，故 `po/zh-cn/` 可被正确识别（CI 已实测
   `CONFIG_PACKAGE_luci-i18n-trafficctl-zh-cn=y` 通过）。
 - 覆盖情况由 `tools/check-trafficctl-i18n.py` 校验；CI 会在译文缺失时失败。
-- `.pot` 模板一并重生成（上游只带了 121 条，实际需要 403 条）。
+- `.pot` 模板一并重生成（上游只带了 121 条，实际需要 425 条）。
+
+### 0004 — 主机实时连接详情页
+
+新增 `htdocs/.../view/trafficctl/host.js`（新页面）与 `menu.d` 的
+`admin/status/trafficctl/host/*` 路由，并让 `status.js` 的「流量排行」与设备表
+IP/主机名指向它。后端 `trafficctl-device.sh` 补出 conntrack **回复方向**元组的字段。
+
+三个容易在同步上游时被抹掉、且抹掉后**不报错**的要点：
+
+1. **路由不设 `title`**：`ui.menu.getChildren` 会跳过无 title 的节点，因此该页
+   可直达/可收藏/可后退，但**不进侧边栏**。加回 title 就多出一个菜单项。
+2. **回复方向元组**：一行 conntrack 有两个元组，`sport`/`wan`（外网地址）与
+   分开的 `bytes_up`/`bytes_down` 都来自第二个。只读第一个 →
+   源端口与外网地址全空、上下行变成同一个数。
+3. **13 列用 grid 定列**：shadcn 主题下 LuCI 的 `.table/.tr/.th` 是 `display:block`，
+   表头会竖着堆成一列。样式限定在 `.tc-host-table` 内，不改动既有页面。
+
+「外网地址」在两种情况下**留空而不是硬填**：`proxy=true`（出口地址由代理节点决定）、
+以及 `wan == 客户端自身 IP`（访问路由器本身不经 NAT）。填上都会被读成
+「一个恰好是私网/本机的公网地址」。
+
+「应用」列需要 netifyd DPI（本固件未装），无数据时显示 `—` 并以 tooltip 说明原因。
+
+### 0005 — 设置独立成 tab + 页面共用模块 + 设备页去重
+
+上游把**配置项**（轮询/窗口/平均算法、路由端默认值、流量卸载、新设备默认值、
+日志与持久化）与**监控数据**放在同一页，实测该配置区块高 580px，把设备表压到
+折叠线以下。本 patch 按职责拆开：
+
+- 新增 `htdocs/.../view/trafficctl/settings.js`，成为页面级 tab「设置」
+  （`menu.d` 登记 `admin/status/trafficctl/settings`，顺序 2；
+  Telegram 与端口转发顺延为 3、4）。顶部行为
+  **设备 | 设置 | Telegram机器人 | 端口转发**。
+- 新增 `htdocs/luci-static/resources/trafficctl/common.js`：rpc 声明、
+  localStorage 选项（`loadOpts`/`optRefresh` 等）、格式化函数、
+  开关/chip/折叠卡片控件。此前这些定义在 `status.js` 里、被 `telegram.js`
+  复制一份，再加设置页就是第三份，三份各自漂移。
+- 设备页只保留「视图与表格」（本页显示开关 + 列可见性），并移到页面最后；
+  整页高度由 **2915px 降到 1541px**（实测）。
+- 移除软件流量卸载的橙黄色公告横幅。软件卸载不损失任何功能，却每次开页都公告
+  一遍；模式本身在设置页「流量卸载」卡片里有常驻的 `Current mode` 显示。
+  **硬件卸载的告警保留** —— 该模式下 conntrack 字节计数器确实不更新。
+- `rpcd` 的 `config_set` 签名补上 `refresh_interval`（此前只有读写代码、
+  没有声明；ubus 实测仍放行，但参数不受类型校验，且与 `config_get` 输出不对称）。
+
+四个容易在同步上游时被抹掉、且抹掉后**不报错**的要点：
+
+1. **`common.js` 必须 `return baseclass.extend({…})`**：LuCI 前端 require 在
+   `luci.js` 里对工厂返回值做 `Class.isSubclass(_class)` 断言，普通对象会抛
+   `TypeError: "…" factory yields invalid constructor` 并令整页加载失败。
+2. **软件卸载横幅必须保持移除**（`mkOffloadBanner` 对 `software` /
+   `software-counter` 直接 `return null`），但硬件卸载告警必须保留。
+3. **设备页不得再定义** `refreshPick` / `pollIntervalPick` / `avgWindowPick` /
+   `avgMethodPick` / `defaultsSaveBtn`，否则与设置页形成两份副本。
+4. **`connFiltersRow` 的定义必须先于引用**：它是「连接表筛选」（协议/分组），
+   迁配置区时极易被一并删掉，而 `viewSection` 与 `updateTableSectionMode`
+   仍引用它 → `ReferenceError` 令设备页整页空白。
 
 ## 维护流程
 
@@ -118,7 +177,8 @@ sh tools/sync-trafficctl.sh v1.21.5   # 覆盖包目录 + 重算 patch
 
 该脚本会覆盖 `package/luci-app-trafficctl/`（保留 `LICENSE`、`README.md`、
 `po/zh-cn/`），然后用当前工作树重算 patch，并在干净基线上回放校验。
-**升级后必须逐项确认本文件列出的本地改动是否仍在** —— 被覆盖掉的功能
+**升级后必须逐项确认本文件列出的本地改动是否仍在**（当前共六项，其中第 6 项
+另含 `settings.js` + `common.js`）—— 被覆盖掉的功能
 不会报错，只会静默失效；CI 的
 `Verify luci-app-trafficctl local invariants` 步骤会兜住大部分情况。
 

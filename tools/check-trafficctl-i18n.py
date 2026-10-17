@@ -21,7 +21,14 @@ PKG = ROOT / 'package' / 'luci-app-trafficctl'
 JS_FILES = [
     PKG / 'htdocs/luci-static/resources/view/trafficctl/status.js',
     PKG / 'htdocs/luci-static/resources/view/trafficctl/portfw.js',
-    PKG / 'htdocs/luci-static/resources/view/trafficctl/telegram.js',
+    # 主机实时连接详情页（本仓库新增）。必须列入，否则该页的中文缺译
+    # 不会被这个校验发现，表现为详情页中英混排。
+    PKG / 'htdocs/luci-static/resources/view/trafficctl/host.js',
+    # 设置页（本仓库新增，v0.6.0）：配置项从设备页迁到这里。
+    PKG / 'htdocs/luci-static/resources/view/trafficctl/settings.js',
+    # 页面共用件：所有 rpc/控件/格式化。设置页与设备页共用同一份，
+    # 其字符串同样要覆盖，否则共用的控件标签会中英混排。
+    PKG / 'htdocs/luci-static/resources/trafficctl/common.js',
 ]
 PO = PKG / 'po/zh-cn/luci-app-trafficctl.po'
 POT = PKG / 'po/templates/luci-app-trafficctl.pot'

@@ -3,32 +3,13 @@
 # Triggered by dnsmasq on DHCP events (add/old/del).
 # Available env vars: ACTION, MACADDR, IPADDR, HOSTNAME
 #
-# Two consumers sit on "this MAC is new":
-#   * the Telegram bot, which wants a notification
-#   * the default-limit feature, which applies a rate limit or shape
-#
-# They are deliberately independent — either can be on without the other —
-# and they use different notions of "known". The bot has always keyed off its
-# own telegram_known.json, which the bot itself rewrites; the limiter uses the
-# seen-MAC ledger in trafficctl-fw.sh, because applying a limit is not an
-# action that may be repeated or misfired.
+# 【本仓库改动 v0.7.0】原先这里有两个消费者：「新设备」Telegram 通知，
+#   与「新设备默认限速」。Telegram 全链路已移除，故只剩默认限速一家。
+#   它用 trafficctl-fw.sh 里的 seen-MAC 台账判断「新」，与应用限速这个
+#   不可重复、不可误触的动作相配。
 
 [ "$ACTION" = "add" ] || exit 0
 [ -n "$MACADDR" ] || exit 0
-
-# ── Telegram notification ──────────────────────────────────────────────────
-
-KNOWN_FILE="/etc/trafficctl/telegram_known.json"
-NOTIFY_FLAG="/tmp/trafficctl_tg_newdev"
-
-if [ "$(uci -q get trafficctl.telegram.enabled)" = "1" ] &&
-    ! grep -q "\"$MACADDR\"" "$KNOWN_FILE" 2>/dev/null; then
-    mkdir -p "$(dirname "$NOTIFY_FLAG")"
-    # HOSTNAME comes from the dnsmasq dhcp hotplug environment (see header),
-    # not a POSIX shell builtin — shellcheck's SC3028 is a false positive.
-    # shellcheck disable=SC3028
-    printf '%s\t%s\t%s\n' "$MACADDR" "${IPADDR:-?}" "${HOSTNAME:-unknown}" >> "$NOTIFY_FLAG"
-fi
 
 # ── Default limit for a device seen for the first time ─────────────────────
 

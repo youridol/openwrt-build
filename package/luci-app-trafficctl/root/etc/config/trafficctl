@@ -33,10 +33,15 @@ config trafficctl 'main'
 	# poll_interval: seconds between live samples; 0 disables polling.
 	#   A smaller number costs a conntrack read per tick on the router, which
 	#   is the overhead the request was about.
+	#   【本仓库补丁】默认 1（上游 2）：本页核心用途是实时监看，1 秒是起步值。
+	#   代价是每秒一次 conntrack 读取，故 status.js 的三处字节轮询都加了防重入闸
+	#   （单次 RPC 最坏实测 1.9s，无闸时 1 秒档位 30 秒内重叠 3 次）。
+	#   下行慢的设备可把它调回 2 或更大。
 	# avg_window: seconds of history the displayed speed is averaged over.
 	#   Samples kept per device are avg_window/poll_interval, so a long window
-	#   with a short poll is the expensive combination.
-	option poll_interval '2'
+	#   with a short poll is the expensive combination. 1 秒轮询配 15 秒窗口
+	#   即每设备保留 15 个样本。
+	option poll_interval '1'
 	option avg_window '15'
 	#
 	# 【本仓库补丁】refresh_interval: 整张设备表的自动刷新间隔（秒），
@@ -89,22 +94,12 @@ config logging 'logging'
 	option log_blocks '1'
 	option log_ratelimits '1'
 	option log_shapes '1'
-	option log_telegram '1'
 	option log_config '1'
 
-config telegram 'telegram'
-	option enabled '0'
-	option bot_token ''
-	option chat_id ''
-	option poll_interval '3'
-	option notify_new_device '1'
-	option notify_known_device '0'
-	option control_enabled '1'
-	option notify_template ''
-	option btn_block_inet '1'
-	option btn_block_wifi '1'
-	option btn_limiter '1'
-	option btn_shaper '1'
+# 【本仓库改动 v0.7.0】config telegram 段已随 Telegram 全链路移除
+#   （视图 / menu.d / acl.d / rpcd / init.d / 两个脚本 / hotplug 通知）。
+#   它曾保存 bot_token 与 chat_id —— 在界面上已无处可填，留着只会
+#   保存一个永不生效的令牌。旧路由器上的残留段由 uci-defaults 清掉。
 
 config metrics 'metrics'
 	# Prometheus/OpenMetrics exporter. Off by default: it exposes device

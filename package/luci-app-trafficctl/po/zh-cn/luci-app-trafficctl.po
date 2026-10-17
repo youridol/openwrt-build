@@ -109,6 +109,9 @@ msgstr "点击查看"
 msgid "Click to toggle column visibility"
 msgstr "点击切换列可见性"
 
+msgid "Show this column in the device table"
+msgstr "在设备表中显示该列"
+
 msgid "changes are saved automatically"
 msgstr "更改会自动保存"
 
@@ -526,12 +529,6 @@ msgstr "TCP传输字节"
 msgid "Table & Speed"
 msgstr "表格与速率"
 
-msgid "Telegram"
-msgstr "Telegram"
-
-msgid "Telegram Bot"
-msgstr "Telegram机器人"
-
 msgid "Test"
 msgstr "测试"
 
@@ -758,6 +755,12 @@ msgstr "限速器（丢弃）"
 
 msgid "Mode"
 msgstr "模式"
+
+msgid "Mode:"
+msgstr "模式："
+
+msgid "Set this device's speed limit"
+msgstr "设置该设备的限速"
 
 msgid "No active devices."
 msgstr "无活跃设备。"
@@ -1339,5 +1342,176 @@ msgstr " 标志（Linux 5.7+，由 fw4/nftables 自动设置）会周期性把�
 msgid "If your current firmware uses fw3 (iptables) or ships a kernel older than 5.7, a router with modern OpenWrt and fw4 support will have this working out of the box."
 msgstr "若当前固件使用 fw3（iptables）或内核低于 5.7，则换用支持 fw4 的新版 OpenWrt 路由器即可开箱可用。"
 
-msgid "Notifications and remote control over Telegram. Changes are saved automatically."
-msgstr "通过 Telegram 接收通知与远程控制。更改会自动保存。"
+msgid "Active connections"
+msgstr "活跃连接"
+
+msgid "Back to overview"
+msgstr "返回概览"
+
+msgid "Behind the proxy the outgoing address is chosen by the node, so this connection has no external address of its own."
+msgstr "该连接由代理转发，出口地址取决于代理节点，因此这条连接本身没有可报告的外网地址。"
+
+msgid "Connection state"
+msgstr "连接状态"
+
+msgid "Direct"
+msgstr "直连"
+
+msgid "Domain"
+msgstr "域名"
+
+msgid "Download rate"
+msgstr "下行速率"
+
+msgid "Dst port"
+msgstr "目的端口"
+
+msgid "Every row is one live conntrack entry. Upload is what this host sent; download is what it received. Rates are computed between two samples."
+msgstr "每一行对应一条运行中的 conntrack 连接记录。上行是本机发出的字节，下行是本机收到的字节；速率由两次采样差分得到。"
+
+msgid "Host details"
+msgstr "主机详情"
+
+msgid "Intercepted by the transparent proxy."
+msgstr "该连接被透明代理接管。"
+
+msgid "Line"
+msgstr "线路"
+
+msgid "Needs the netifyd DPI agent, which is not installed on this router."
+msgstr "需要 netifyd 深度包检测（DPI）代理，本路由器未安装。"
+
+msgid "No active connections for this host."
+msgstr "该主机当前没有活跃连接。"
+
+msgid "No valid host address in the URL."
+msgstr "URL 中没有有效的主机地址。"
+
+msgid "Open host details"
+msgstr "打开主机详情"
+
+msgid "Proxy"
+msgstr "代理"
+
+msgid "Source port"
+msgstr "源端口"
+
+msgid "Total download"
+msgstr "累计下行"
+
+msgid "Total upload"
+msgstr "累计上行"
+
+msgid "Upload rate"
+msgstr "上行速率"
+
+msgid "WAN address"
+msgstr "外网地址"
+
+msgid "Auto-refresh interval for the device table"
+msgstr "设备表自动刷新间隔"
+
+msgid "Connection table"
+msgstr "连接表"
+
+msgid "Flow offloading is active."
+msgstr "流量卸载已启用。"
+
+msgid "Saved — takes effect on the Devices tab"
+msgstr "已保存 — 在「设备」页生效"
+
+msgid "Speed monitoring and traffic shaping may be bypassed for offloaded flows."
+msgstr "对已卸载的流，速率监测与流量整形可能被绕过。"
+
+msgid "View & Table"
+msgstr "视图与表格"
+
+msgid "Choose which columns the device table and the connection table show"
+msgstr "选择设备表与连接表显示哪些列"
+
+msgid "Store the current Poll, Window and Refresh as this router's defaults, for browsers that have not set their own"
+msgstr "把当前「轮询」「窗口」「刷新」保存为本路由器的默认值，供尚未自行设置的浏览器使用"
+
+msgid "Actions"
+msgstr "操作"
+
+msgid "Camera"
+msgstr "摄像头"
+
+msgid "Desktop"
+msgstr "台式机"
+
+msgid "Details"
+msgstr "详情"
+
+msgid "Detected device type, with the vendor looked up from the MAC address below it"
+msgstr "识别到的终端类型，下方为由 MAC 地址查得的设备厂商"
+
+msgid "Device hostname from DHCP lease, or the name you set"
+msgstr "来自 DHCP 租约的主机名，或你自行设置的名称"
+
+msgid "Laptop"
+msgstr "笔记本"
+
+msgid "Local IP address — the hardware MAC is shown below it"
+msgstr "本机 IP 地址 —— 下方显示其硬件 MAC"
+
+msgid "Network"
+msgstr "网络设备"
+
+msgid "Open the host detail page, or target this device with the speed limit"
+msgstr "打开主机详情页，或把下方速率限制施加到该设备"
+
+msgid "Per page"
+msgstr "每页"
+
+msgid "Phone"
+msgstr "手机"
+
+msgid "Printer"
+msgstr "打印机"
+
+msgid "Private MAC"
+msgstr "随机 MAC"
+
+msgid "Speaker"
+msgstr "音箱"
+
+msgid "TV"
+msgstr "电视"
+
+msgid "Tablet"
+msgstr "平板"
+
+msgid "Target this device with the speed limit below"
+msgstr "把下方的速率限制施加到该设备"
+
+msgid "This MAC is randomized by the client, so no vendor can be looked up."
+msgstr "该 MAC 由客户端随机生成，无法据此查出厂商。"
+
+msgid "Total"
+msgstr "共"
+
+msgid "Total DL"
+msgstr "累计下行"
+
+msgid "Total UL"
+msgstr "累计上行"
+
+msgid "Total bytes this device has downloaded, accumulated on the router. Resets on reboot; hover a cell for the start time"
+msgstr "该设备累计下载的字节数，在路由器上累加。重启后清零；把鼠标停在单元格上可看到起始时间"
+
+msgid "Total bytes this device has uploaded, accumulated on the router. Resets on reboot; hover a cell for the start time"
+msgstr "该设备累计上传的字节数，在路由器上累加。重启后清零；把鼠标停在单元格上可看到起始时间"
+
+msgid "Type / Vendor"
+msgstr "终端类型 / 厂商"
+
+msgid "items"
+msgstr "条"
+
+msgid "showing"
+msgstr "当前显示"
+
+msgid "Polling interval, averaging window and method, and table refresh"
+msgstr "轮询间隔、平均窗口与算法，以及整表刷新"

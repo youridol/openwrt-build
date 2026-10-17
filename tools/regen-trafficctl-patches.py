@@ -34,8 +34,6 @@ GROUPS = [
       'Makefile',
       'htdocs/luci-static/resources/view/trafficctl/status.js',
       'htdocs/luci-static/resources/view/trafficctl/status.css',
-      # Telegram Bot 提升为页面级独立 tab（新增视图 + menu.d 登记 + 排序）
-      'htdocs/luci-static/resources/view/trafficctl/telegram.js',
       'root/usr/share/luci/menu.d/luci-app-trafficctl.json',
       # refresh_interval 的路由端默认值：config 定义 + rpcd 读写
       'root/etc/config/trafficctl',
@@ -44,11 +42,68 @@ GROUPS = [
      'add zh-cn translation',
      ['po/zh-cn/luci-app-trafficctl.po',
       'po/templates/luci-app-trafficctl.pot']),
+    ('0004-host-connection-detail-page.patch',
+     'per-host live connection detail page (13-column table)',
+     [# 概览「流量排行」与设备表 IP/主机名 → 主机实时连接详情页
+      'htdocs/luci-static/resources/view/trafficctl/host.js',
+      'htdocs/luci-static/resources/view/trafficctl/status.js',
+      'htdocs/luci-static/resources/view/trafficctl/status.css',
+      'root/usr/share/luci/menu.d/luci-app-trafficctl.json',
+      # conntrack 的回复方向字段（源端口 / 上下行分开 / 外网地址 / 是否走代理）
+      'root/usr/local/bin/trafficctl-device.sh']),
+    ('0005-settings-tab-and-layout-cleanup.patch',
+     'dedicated Settings tab, shared common.js module, layout cleanup',
+     [# 页面共用件：rpc 声明、选项存取、格式化、开关/chip/折叠卡片控件。
+      # 设备页与设置页共用同一份，避免同一开关在两页行为不一致。
+      'htdocs/luci-static/resources/trafficctl/common.js',
+      # 设置页：配置项从设备页迁到这里，成为独立页面级 tab
+      'htdocs/luci-static/resources/view/trafficctl/settings.js',
+      # 设备页：删掉与设置页重复的五个配置项、移除软件卸载橙黄横幅、重排顺序
+      'htdocs/luci-static/resources/view/trafficctl/status.js',
+      'htdocs/luci-static/resources/view/trafficctl/status.css',
+      # 登记 settings tab 并重排四项顺序
+      'root/usr/share/luci/menu.d/luci-app-trafficctl.json',
+      # 新增/变更字符串的中文译文与模板
+      'po/zh-cn/luci-app-trafficctl.po',
+      'po/templates/luci-app-trafficctl.pot']),
+    # v0.7.0：Telegram 全链路移除（用户要求完整下线，含日志分类开关）。
+    # 本组既改文件、也**删文件** —— 删除是移除功能的一半：只清引用不删实现，
+    # 「移除」就只停留在界面上，脚本与 init.d 仍会在固件里跑。
+    ('0006-remove-telegram.patch',
+     'remove Telegram end to end',
+     [# 变更的引用点
+      'Makefile',
+      'README.md',
+      'htdocs/luci-static/resources/trafficctl/common.js',
+      'htdocs/luci-static/resources/view/trafficctl/settings.js',
+      'htdocs/luci-static/resources/view/trafficctl/status.css',
+      'root/etc/config/trafficctl',
+      'root/etc/hotplug.d/dhcp/99-trafficctl-newdevice',
+      'root/usr/libexec/rpcd/luci.trafficctl',
+      'root/usr/share/luci/menu.d/luci-app-trafficctl.json',
+      'root/usr/share/rpcd/acl.d/luci-app-trafficctl.json',
+      'root/usr/local/bin/trafficctl-fw.sh',
+      'po/zh-cn/luci-app-trafficctl.po',
+      'po/templates/luci-app-trafficctl.pot'],
+     [# 删除**上游存在**的实现。这三个必须显式删除：patch 是对上游基线的
+      # 差分，只把引用清掉而在文件清单里不动它们，重放结果里它们仍然存在。
+      # 【反例】telegram.js 是本仓库新增的视图（上游没有），故它**不能**
+      # 写在这里 —— 对上游做「删除一个不存在的文件」会直接套用失败。
+      # 它只需不再出现在 0002 的新增清单里；重放后自然不存在，与本地一致。
+      'root/etc/init.d/trafficctl-telegram',
+      'root/usr/local/bin/trafficctl-telegram.sh',
+      'root/usr/local/bin/trafficctl-telegram-test.sh']),
 ]
 
 
 def run(cmd, cwd=None, check=True):
-    r = subprocess.run(cmd, cwd=cwd, capture_output=True, text=True)
+    # 必须显式指定编码：`text=True` 默认用系统区域编码解码子进程输出，
+    # 在中文 Windows（GBK）上读取含非 GBK 字节的 git diff 会抛
+    # UnicodeDecodeError，而该异常发生在读取线程里，表现为 stdout 为 None，
+    # 最终在 write_text 处报「data must be str, not NoneType」，与真正的原因
+    # （编码）毫无关系 —— 会让人往错误方向排查。
+    r = subprocess.run(cmd, cwd=cwd, capture_output=True, text=True,
+                       encoding='utf-8', errors='replace')
     if check and r.returncode != 0:
         raise RuntimeError(f'命令失败: {" ".join(map(str, cmd))}\n{r.stdout}\n{r.stderr}')
     return r
@@ -183,7 +238,12 @@ def main():
             print(f'  警告：基线工作树不干净，可能有 mode 漂移：\n{st}')
 
         print('\n=== 生成 patch ===')
-        for out, desc, files in GROUPS:
+        for grp in GROUPS:
+            out, desc = grp[0], grp[1]
+            # 兼容两种分组：三元组 = 只改文件；四元组 = 改文件 + 删文件
+            # （Telegram 移除需要删掉实现，否则「移除」只停在界面上）。
+            files = grp[2]
+            deletes = grp[3] if len(grp) > 3 else []
             for rel in files:
                 s = PKG / rel
                 if not s.is_file():
@@ -192,6 +252,14 @@ def main():
                 d = w / rel
                 d.parent.mkdir(parents=True, exist_ok=True)
                 shutil.copy2(s, d)
+            # 删除同样只是「让工作树与目标状态一致」：删掉后 git add -A 会
+            # 记成 deleted file mode，套用时即删除，无需额外 git rm。
+            for rel in deletes:
+                d = w / rel
+                if d.is_file():
+                    d.unlink()
+                else:
+                    print(f'  警告：基线里没有 {rel}，删除不会产生差异')
             # 拷贝进来的文件同样会被 DrvFs 报成 0777，逐个钉回目标模式
             # （新增文件不在 MODES 里，apply_modes 会统一去掉执行位）
             apply_modes(w, MODES)
@@ -200,7 +268,8 @@ def main():
             diff = run([*G, 'diff', '--cached', '--binary'], cwd=w).stdout
             (PATCHDIR / out).write_text(diff, encoding='utf-8', newline='\n')
             run([*G, 'commit', '-qm', desc], cwd=w)
-            print(f'  {out:<56} {len(diff.splitlines()):>5} 行')
+            print(f'  {out:<56} {len(diff.splitlines()):>5} 行'
+                  + (f'  (含 {len(deletes)} 处删除)' if deletes else ''))
 
         print('\n=== 验证：干净基线上重新套用 ===')
         v = Path(td) / 'verify'
@@ -229,9 +298,13 @@ def main():
         # 说明：本地可能比上游基线多出文件（如新增的 po/zh-cn、或 vendored
         # 时一并拷入的 LICENSE/README）。这些新增文件同样应进入相应 patch，
         # 故这里只提示「不属于任何 patch 分组」的文件，便于发现遗漏。
-        grouped = {rel for _, _, files in GROUPS for rel in files}
-        local_files = {str(f.relative_to(PKG)) for f in PKG.rglob('*') if f.is_file()}
-        up_files = {str(f.relative_to(src)) for f in src.rglob('*') if f.is_file()}
+        # 路径统一成正斜杠再比较：Windows 上 str(Path) 用反斜杠，而 GROUPS
+        # 里写的是正斜杠，不归一化会把已登记的新文件误报成「未登记」。
+        grouped = {rel for grp in GROUPS for rel in grp[2] + (grp[3] if len(grp) > 3 else [])}
+        local_files = {str(f.relative_to(PKG)).replace('\\', '/')
+                       for f in PKG.rglob('*') if f.is_file()}
+        up_files = {str(f.relative_to(src)).replace('\\', '/')
+                    for f in src.rglob('*') if f.is_file()}
         ungrouped = sorted(local_files - up_files - grouped - {'LICENSE', 'README.md'})
         if ungrouped:
             print(f'\n注意：以下文件本地有、上游基线没有，且未归入任何 patch 分组：'
@@ -239,7 +312,7 @@ def main():
             print('      若它们是本地改动，请在 GROUPS 中登记，否则不会生成 patch。')
 
         ok = True
-        for rel in {str(f.relative_to(v)) for f in v.rglob('*')
+        for rel in {str(f.relative_to(v)).replace('\\', '/') for f in v.rglob('*')
                     if f.is_file() and '.git' not in f.parts}:
             a = (v / rel).read_bytes()
             b = (PKG / rel).read_bytes()

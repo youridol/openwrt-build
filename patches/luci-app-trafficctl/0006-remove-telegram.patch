@@ -1,0 +1,1599 @@
+diff --git a/README.md b/README.md
+new file mode 100644
+index 0000000..30afb68
+--- /dev/null
++++ b/README.md
+@@ -0,0 +1,586 @@
++# luci-app-trafficctl
++
++[![CI](https://github.com/YusDyr/luci-app-trafficctl/actions/workflows/ci.yml/badge.svg)](https://github.com/YusDyr/luci-app-trafficctl/actions/workflows/ci.yml)
++[![Release](https://github.com/YusDyr/luci-app-trafficctl/actions/workflows/auto-release.yml/badge.svg)](https://github.com/YusDyr/luci-app-trafficctl/actions/workflows/auto-release.yml)
++[![CodeQL](https://github.com/YusDyr/luci-app-trafficctl/actions/workflows/github-code-scanning/codeql/badge.svg)](https://github.com/YusDyr/luci-app-trafficctl/security/code-scanning)
++[![Latest Release](https://img.shields.io/github/v/release/YusDyr/luci-app-trafficctl)](https://github.com/YusDyr/luci-app-trafficctl/releases/latest)
++[![License](https://img.shields.io/github/license/YusDyr/luci-app-trafficctl)](LICENSE)
++
++Per-device traffic monitoring and control for OpenWrt routers. Monitor connections, limit bandwidth, shape traffic, block internet access, and manage WiFi MAC filtering -- all from a single LuCI page.
++
++---
++
++I built this because I wanted a reliable one-click way to cut my kids off the internet — and found that doing it properly on OpenWrt is surprisingly awkward. Most approaches either miss already-established connections (so the device stays online until the session times out on its own), or require navigating across several LuCI pages just to get something done.
++
++Custom shell scripts solved the immediate problem. But once I had something working, I wanted to actually *see* what was happening on the network — who was online, how much traffic each device was generating, where they were connecting to. So I added a live traffic table.
++
++That opened the door to more: which interface is each device on? What's the TCP state breakdown? What are the top destinations? One thing led to another, and the connection detail view followed.
++
++A hard internet block also felt heavy-handed for everyday use — sometimes slowing a device down is better than cutting it off entirely. So I added rate limiting and traffic shaping via tc/HTB, with persistence across reboots.
++
++After that, the focus shifted to making the whole thing convenient to live with: a recent-devices bar for one-click access, live sparkline graphs with a hover popup, a searchable device picker, configurable columns, activity logging.
++
++The latest addition is live per-host connection details — click any IP in the ranking or device table to see that host's active conversations.
++
++I hope it turns out as useful for you as it has been for me.
++
++---
++
++| | |
++|---|---|
++| **Monitoring** | Live bandwidth sparklines · TCP state breakdown · Per-connection detail · rDNS lookup |
++| **Control** | Internet block · WiFi MAC deny · Rate limiter (nft policer) · Traffic shaper (tc/HTB) |
++| **Visibility** | WiFi band (2.4G/5G/6G) · LAN port detection · Reachability indicator · Extended stats |
++| **UX** | Searchable device picker · Column toggles · Colorblind-safe · Dark + light theme |
++| **Automation** | Activity logging · Boot persistence · DHCP hotplug new-device alerts |
++
++---
++
++## Table of Contents
++
++- [Screenshots](#screenshots)
++- [Features](#features)
++- [System Requirements](#system-requirements)
++- [Compatibility](#compatibility)
++- [IPv6 coverage](#ipv6-coverage)
++- [Installation](#installation)
++- [Quick Start](#quick-start)
++- [Configuration](#configuration)
++- [Architecture](#architecture)
++- [Project Layout](#project-layout)
++- [Documentation](#documentation)
++- [Contributing](#contributing)
++- [License](#license)
++
++---
++
++## Screenshots
++
++<table>
++<tr>
++<td align="center"><b>Dashboard — live speed graph</b></td>
++<td align="center"><b>Block / Unblock Internet</b></td>
++</tr>
++<tr>
++<td><img src="docs/img/speed-graph-dark.gif" alt="Speed graph" width="480"/></td>
++<td><img src="docs/img/block-internet-dark.gif" alt="Block internet" width="480"/></td>
++</tr>
++<tr>
++<td align="center"><b>Rate Limiting &amp; Traffic Shaping</b></td>
++<td align="center"><b>Interactive speed graph popup</b></td>
++</tr>
++<tr>
++<td><img src="docs/img/rate-limit-dark.gif" alt="Rate limiting" width="480"/></td>
++<td><img src="docs/img/graph-popup-dark.gif" alt="Graph popup" width="480"/></td>
++</tr>
++</table>
++
++<details>
++<summary>More screenshots — light theme, settings, activity log…</summary>
++<br/>
++
++<table>
++<tr>
++<td align="center"><b>Overview — light theme</b></td>
++<td align="center"><b>Per-device connections</b></td>
++</tr>
++<tr>
++<td><img src="docs/img/light/01-overview.png" alt="Overview light" width="480"/></td>
++<td><img src="docs/img/dark/02-device-detail.png" alt="Device detail" width="480"/></td>
++</tr>
++<tr>
++<td align="center"><b>WiFi blocked</b></td>
++<td align="center"><b>Link / band column</b></td>
++</tr>
++<tr>
++<td><img src="docs/img/dark/05-wifi-blocked.png" alt="WiFi blocked" width="480"/></td>
++<td><img src="docs/img/dark/17-link-band.png" alt="Link band column" width="480"/></td>
++</tr>
++<tr>
++<td align="center"><b>Extended statistics (all devices)</b></td>
++<td align="center"><b>Extended statistics (per device)</b></td>
++</tr>
++<tr>
++<td><img src="docs/img/dark/12-extended-stats-all.png" alt="Extended stats all" width="480"/></td>
++<td><img src="docs/img/dark/13-extended-stats-device.png" alt="Extended stats device" width="480"/></td>
++</tr>
++<tr>
++<td align="center"><b>Group connections by service</b></td>
++<td align="center"><b>Group connections by hostname</b></td>
++</tr>
++<tr>
++<td><img src="docs/img/dark/14-group-by-service.png" alt="Group by service" width="480"/></td>
++<td><img src="docs/img/dark/15-group-by-host.png" alt="Group by hostname" width="480"/></td>
++</tr>
++<tr>
++<td align="center"><b>Searchable device picker</b></td>
++<td align="center"><b>Unreachable device indicator</b></td>
++</tr>
++<tr>
++<td><img src="docs/img/dark/16-search-filter.png" alt="Search" width="480"/></td>
++<td><img src="docs/img/dark/18-unreachable-tooltip.png" alt="Unreachable tooltip" width="480"/></td>
++</tr>
++<tr>
++<td align="center"><b>Settings walkthrough</b></td>
++<td align="center"><b>Column toggles</b></td>
++</tr>
++<tr>
++<td><img src="docs/img/settings-walkthrough-dark.gif" alt="Settings walkthrough" width="480"/></td>
++<td><img src="docs/img/column-toggle-dark.gif" alt="Column toggle" width="480"/></td>
++</tr>
++<tr>
++<td align="center"><b>Logging &amp; Persistence settings</b></td>
++<td align="center"><b>Activity Log panel</b></td>
++</tr>
++<tr>
++<td><img src="docs/img/dark/20-logging-settings.png" alt="Logging settings" width="480"/></td>
++<td><img src="docs/img/dark/22-activity-log.png" alt="Activity log" width="480"/></td>
++</tr>
++</table>
++
++</details>
++
++---
++
++## Features
++
++- **Real-time Per-device Monitoring** -- View active connections per device with TCP/UDP counts, TCP state breakdown, destination IPs, and live bandwidth speed (sparkline graphs with rate limit overlay).
++- **Global Overview** -- Optional whole-router panel (the **Overview** toggle in Settings > Display): uplink throughput graph, per-interface breakdown with WAN/LAN/VPN roles and sparklines, and a live top-talkers list. Reads per-interface kernel counters and the speed map the device table already computes, and polls on the existing Poll interval rather than a timer of its own.
++- **Interactive Speed Graphs** -- Hover any sparkline for a full-size popup graph with: download + upload dual lines, gradient area fill, min/max band, crosshair with precise values, rate limit line, nice-value Y axis (multiples of 100/500 Kbit/s). Full history from page load.
++- **Traffic Shaping (Queue)** -- tc/HTB classes on the LAN bridge with fq_codel leaf qdiscs. Queues excess traffic instead of dropping, providing smoother throughput.
++- **Rate Limiting (Policer)** -- nftables or iptables-based packet dropping when a device exceeds the configured rate. Instant enforcement, no queuing. Unlike the shaper it owns no qdisc, so it works on a router already running SQM/cake — where the shaper deliberately declines rather than tear down somebody else's QoS, and says so.
++- **Subnet / VLAN Limits** -- A limit can target a whole subnet (`192.168.20.0/24`) or the entire network, not only one device. Two readings of "20 Mbit for the IoT VLAN" are both available and are chosen explicitly: **each** gives every device its own 20 Mbit bucket, **shared** gives the whole VLAN one 20 Mbit bucket *between them* — the aggregate cap. Pick a monitored subnet from the target chips in the Speed Limit panel (select "All active devices" first); active subnet limits are listed there with their drop counters and a Remove button. Subnets the router does not monitor are flagged rather than silently accepted: a firewall zone other than `lan` with `masq=1` — the usual way to isolate a guest VLAN — is excluded from monitoring, and a limit on it would never match a packet. From the CLI: `trafficctl-ratelimit.sh 192.168.20.0/24 20000 "iot-cap" shared`.
++- **Internet Blocking** -- Layer 3 drop rules per device. Connections are killed immediately and counter stats are tracked.
++- **Global Internet Cut** -- One control that takes every device off the internet while the LAN keeps working, for plugging in a new device and configuring it locally before it is allowed out. Timed by default (15 min / 1 h / 4 h, or until you switch it back), so it reverts by itself. Devices keep reaching each other and the router, so LuCI stays available from the LAN; remote access that lands on a LAN host first (Tailscale on a NAS, a tunnel from a LAN box) stops while it is on. Traffic is stopped on the way in, at prerouting, so a transparent proxy running on the router (podkop/sing-box, passwall) cannot carry it out either — and the router's own traffic, including that proxy's outbound path, is untouched. It does **not** survive a reboot unless you tick "Keep after reboot".
++- **WiFi MAC Filtering** -- Block any device from associating with WiFi via hostapd_cli deny ACL. Only the target client is deauthenticated -- no wifi reload, other clients stay connected. Works across all radio interfaces (2.4 GHz, 5 GHz, 6 GHz) automatically.
++- **Interface Detection** -- Shows actual connection interface: WiFi band (2.4G/5G/6G), LAN port name (lan2/lan3/lan4), or `routed` for clients behind a downstream router.
++- **Downstream Routers** -- Devices on subnets behind a second router are monitored too: subnets with a route via a LAN next-hop are detected automatically, any flow this router NATs is attributed to its original source, and additional CIDRs can be listed in `trafficctl.main.extra_subnets`.
++- **Port Forwards tab** -- Inbound traffic control for DNAT port forwards and router-local open ports: live connection/client/byte stats per forward, instant pause/resume (drop rule, no firewall reload) and inbound rate limiting.
++- **Live Speed Polling** -- Optional polling with configurable interval (Off/1/2/5/10/30s) and averaging window (5s-5min); shows sparkline per device with spike filtering. Both can be stored as router-wide defaults via UCI (`poll_interval`, `avg_window`) for browsers that have not chosen their own.
++- **Reverse DNS** -- Optional hostname resolution for external destination IPs with in-memory cache (no repeated lookups).
++- **Searchable Device Picker** -- Command palette (search by name, IP, or MAC).
++- **New Device Detection** -- Discovers new devices via three sources: ARP table, DHCP leases, Wi-Fi station list. Instant DHCP hotplug trigger for near-realtime alerts.
++- **Activity Logging** -- Configurable logging of all actions (blocks, ratelimits, shapes, config changes) to a local file and/or syslog. Includes source IP, username, and trigger (LuCI/CLI).
++- **Default Limit for New Devices** -- Optionally rate-limit or shape a device the first time it appears on the network (Settings > New Device Defaults). Off by default. Switching it on records the devices already present, so only genuinely new ones are affected, and a device that already carries a limit is never overridden.
++- **Reboot Persistence** -- Shaping, block, and rate-limit rules optionally survive reboot via hotplug restore. Configurable per UCI option `persist_rules`. A rate limit keeps its bucket layout across the restore, so a subnet limited "5 Mbit each" does not come back as 5 Mbit for the whole subnet.
++
++---
++
++## System Requirements
++
++### Hardware
++
++|               | Minimum              | Recommended          |
++|---------------|----------------------|----------------------|
++| **RAM**       | 64 MB free           | 128+ MB free         |
++| **Flash**     | 300 KB (package)     | 1 MB (with all deps) |
++| **CPU**       | Any (MIPS/ARM/x86)   | ARM Cortex-A53+      |
++
++### Software
++
++| Package | Required for | Notes |
++|---------|-------------|-------|
++| `conntrack` | Core monitoring | Always required |
++| `luci-base` | Web interface | Always required |
++| `rpcd` | Backend RPC | Always required |
++| `tc-full` + `kmod-sched-core` + `kmod-sched-htb` | Traffic shaping | For HTB/fq_codel queues |
++| `kmod-ifb` | Upload shaping | Without it the shaper applies to download only, and reports that |
++| `iw-full` | Interface detection | WiFi band identification |
++| `bridge-utils` | Interface detection | LAN port identification (brctl) |
++| `curl` + `jsonfilter` | Port forwards, shaping | jsonfilter is part of base OpenWrt |
++| `rpcd-mod-rrdns` | Reverse DNS | Included with `rpcd`; enables rDNS in LuCI and CLI |
++
++## Compatibility
++
++[![OpenWrt Compatibility](https://github.com/YusDyr/luci-app-trafficctl/actions/workflows/compat.yml/badge.svg?event=pull_request)](https://github.com/YusDyr/luci-app-trafficctl/actions/workflows/compat.yml)
++
++Runs on all architectures (no compiled code, pure shell + LuCI JavaScript).
++
++| OpenWrt Version | Firewall | Status |
++|-----------------|----------|--------|
++| 25.12 (latest)  | fw4 / nftables | Fully supported |
++| 24.10           | fw4 / nftables | Fully supported |
++| 23.05           | fw4 / nftables | Fully supported |
++| 22.03           | fw4 / nftables | Fully supported |
++| 21.02           | fw3 / iptables | Supported (auto-detected) |
++
++**CI-tested on 52 combinations** — every push is verified against real OpenWrt rootfs containers:
++
++| | x86‑64 | x86‑generic | mips\_24kc | aarch64 | arm\_a9 | arm\_a15 | armsr | armvirt32 | i386 |
++|---|:---:|:---:|:---:|:---:|:---:|:---:|:---:|:---:|:---:|
++| **21.02.6** | ✓ | | | ✓ | | ✓ | | ✓ | |
++| **22.03.7** | ✓ | | | ✓ | | ✓ | | ✓ | |
++| **23.05.6** | ✓ | ✓ | ✓ | ✓ | ✓ | ✓ | ✓ | | ✓ |
++| **24.10.1** | ✓ | ✓ | ✓ | ✓ | ✓ | ✓ | ✓ | | ✓ |
++| **24.10.6** | ✓ | ✓ | ✓ | ✓ | ✓ | ✓ | ✓ | | ✓ |
++| **25.12.0** | ✓ | ✓ | ✓ | ✓ | ✓ | ✓ | ✓ | | ✓ |
++| **25.12.4** | ✓ | ✓ | ✓ | ✓ | ✓ | ✓ | ✓ | | ✓ |
++| **snapshot** | ✓ | | ✓ | ✓ | | | ✓ | | |
++
++Each test builds the `.ipk`, runs `opkg install --force-depends` inside the real OpenWrt rootfs container for that version/arch, then verifies all files are present and all scripts pass `ash -n` syntax check.
++
++---
++
++## IPv6 coverage
++
++Everything here is keyed on a device's IPv4 address, so **IPv6 coverage is
++partial and this table is the whole of it.** Read it before relying on any of
++these controls on a dual-stack network.
++
++| Control | IPv4 | IPv6 | Keyed on |
++|---|:---:|:---:|---|
++| Global internet cut (all devices) | ✅ | ✅ | interface (`oifname`/`fib`) — family-independent |
++| WiFi block (MAC deny) | ✅ | ✅ | MAC — the client cannot associate at all |
++| Block internet (per device) | ✅ | ✅ | address for v4, **MAC** for v6 |
++| Rate limit — **upload** | ✅ | ✅ | address for v4, **MAC** for v6 |
++| Rate limit — **download** | ✅ | ❌ | address only |
++| Traffic shaping (tc/HTB), both directions | ✅ | ❌ | address only |
++| Port-forward pause / limit | ✅ | ❌ | address only |
++| Byte counters, speed graphs, totals, Prometheus | ✅ | ❌ | address only |
++
++**Why not simply match `ip6 saddr` as well?** Because a client's IPv6 addresses
++are not stable. With SLAAC and privacy extensions a device holds several at
++once and rotates them on a timer, so a rule written against the address seen
++today stops matching tomorrow — silently, which is worse than not having the
++rule. The MAC does not rotate, so the rules that *can* be keyed on it are.
++
++**Where a MAC cannot be used, and what happens then:**
++
++- **Download** cannot be. By the time a reply is on its way to the client the
++  destination MAC is the next hop's, and the rule sits on an address-matching
++  hook. Doing this properly needs a named nft set per device, populated from
++  `ip -6 neigh`/DHCPv6 and refreshed as addresses rotate — a data-model change,
++  not a one-line match. A stale set is a silent bypass, so it is being done
++  separately rather than quickly.
++- **A device with no DHCP lease and no neighbour entry** — a client behind a
++  downstream router, reached through `extra_subnets` or a static route — has no
++  MAC this router can see. Its IPv4 rules are applied as before and the reply
++  says **"IPv4 only"** in the message and in the LuCI status line, rather than
++  reporting an unqualified success.
++- **A downstream router itself** is excluded on purpose. Its MAC is the source
++  address of every packet it forwards, so a MAC-keyed rule aimed at it would
++  black-hole or throttle every client behind it. It too is reported as
++  "IPv4 only", naming the reason.
++- **fw3 / iptables (OpenWrt 21.02)** stays IPv4-only throughout.
++
++If a device must be cut off completely and its IPv6 cannot be covered, the
++**WiFi block** (for wireless clients) and the **global internet cut** (for all
++devices) are family-independent and work regardless.
++
++---
++
++## Installation
++
++> **Which file do I need?**
++> - **Recommended**: v1.6.5+ (earlier releases are broken — missing status.css, invalid APK format)
++> - OpenWrt **21.02 — 24.10** → download `.ipk` (opkg)
++> - OpenWrt **25.12+** and snapshot → download `.apk` (apk)
++
++Each release includes multiple filenames for the same package:
++
++| Asset name | Purpose |
++|-----------|---------|
++| `luci-app-trafficctl.ipk` | Stable download URL (opkg) |
++| `luci-app-trafficctl_all.ipk` | Same file, OpenWrt naming convention |
++| `luci-app-trafficctl_X.Y.Z-1_all.ipk` | Same file, version-pinned |
++| `luci-app-trafficctl.apk` | Stable download URL (apk) |
++| `luci-app-trafficctl_noarch.apk` | Same file, OpenWrt naming convention |
++| `luci-app-trafficctl_X.Y.Z-r1_noarch.apk` | Same file, version-pinned |
++
++The "stable URL" links below always download from the latest release — the filename stays constant across versions.
++
++### OpenWrt 25.12+ (.apk)
++
++**Option A — LuCI web UI:**
++1. Download [`luci-app-trafficctl.apk`](https://github.com/YusDyr/luci-app-trafficctl/releases/latest/download/luci-app-trafficctl.apk) to your computer
++2. In LuCI: **System → Software → Upload Package...**
++3. Select the downloaded file and click **OK**
++
++**Option B — SSH (recommended):**
++
++```sh
++cd /tmp && wget -O luci-app-trafficctl.apk https://github.com/YusDyr/luci-app-trafficctl/releases/latest/download/luci-app-trafficctl.apk && apk add --allow-untrusted luci-app-trafficctl.apk
++# If you get "modified conffile" on upgrade, add `--force-maintainer` to override
++```
++
++> **Why `--allow-untrusted`?** OpenWrt does not sign individual `.apk` files —
++> package signatures apply to a repository *index*, not to a standalone file
++> downloaded from a GitHub release. Upstream removed per-package apk signing
++> outright in October 2025. `--allow-untrusted` is therefore the normal way to
++> install a single package file, not a security workaround being suggested
++> lightly. If you want to pin what you install, download the version-stamped
++> asset (`luci-app-trafficctl_X.Y.Z-r1_noarch.apk`) rather than the floating
++> `latest` URL, so the file cannot change under you between download and
++> install.
++
++### OpenWrt 21.02 — 24.10 (.ipk)
++
++**Option A — LuCI web UI:**
++1. Download [`luci-app-trafficctl.ipk`](https://github.com/YusDyr/luci-app-trafficctl/releases/latest/download/luci-app-trafficctl.ipk) to your computer
++2. In LuCI: **System → Software → Upload Package...**
++3. Select the downloaded file and click **OK**
++
++**Option B — SSH** (requires HTTPS support — `libustream-wolfssl` or `libustream-openssl`):
++
++```sh
++opkg install https://github.com/YusDyr/luci-app-trafficctl/releases/latest/download/luci-app-trafficctl.ipk
++```
++
++**Option C — SSH from your machine:**
++
++```sh
++ssh root@router 'opkg install https://github.com/YusDyr/luci-app-trafficctl/releases/latest/download/luci-app-trafficctl.ipk'
++```
++
++### Uninstalling
++
++```sh
++# OpenWrt 25.12+ (apk)
++apk del luci-app-trafficctl
++
++# OpenWrt 21.02 - 24.10 (opkg)
++opkg remove luci-app-trafficctl
++
++# either way, reload the LuCI backend afterwards
++/etc/init.d/rpcd restart
++```
++
++Removing the package deletes its scripts and the LuCI page but leaves
++`/etc/config/trafficctl` in place, so your settings survive a reinstall. Delete
++it yourself if you want a clean slate:
++
++```sh
++rm -f /etc/config/trafficctl
++```
++
++Any blocks, rate limits or shapers that were active are **not** persistent
++firewall/tc state — they disappear on the next reboot. To clear them
++immediately before removing the package, unblock/unlimit the affected devices
++from the dashboard first, or reboot the router after uninstalling.
++
++### From source (OpenWrt build system)
++
++```sh
++# Add to your feeds.conf (the package depends on luci, so make sure
++# luci is also configured — it is by default in feeds.conf.default):
++echo "src-git trafficctl https://github.com/YusDyr/luci-app-trafficctl.git" >> feeds.conf
++
++# Update both feeds (luci must be updated before trafficctl is scanned):
++./scripts/feeds update luci trafficctl
++./scripts/feeds install -p trafficctl luci-app-trafficctl
++
++# Enable and build:
++echo 'CONFIG_PACKAGE_luci-app-trafficctl=m' >> .config
++make defconfig
++make package/luci-app-trafficctl/compile V=s
++```
++
++### Manual installation
++
++Copy the `luci-app-trafficctl/root/` tree to the router's filesystem, then restart rpcd:
++
++```sh
++scp -r luci-app-trafficctl/root/* root@router:/
++scp -r luci-app-trafficctl/htdocs/luci-static root@router:/www/
++ssh root@router 'chmod +x /usr/local/bin/trafficctl-*.sh /usr/libexec/rpcd/luci.trafficctl && /etc/init.d/rpcd restart'
++```
++
++### Required packages
++
++<details>
++<summary>OpenWrt 25.12+ (apk)</summary>
++
++```sh
++# Core (always required)
++apk add conntrack luci-base rpcd
++
++# For traffic shaping
++apk add tc-full kmod-sched-core kmod-sched-htb
++
++# For upload shaping — without it the shaper applies download only and says so
++# (upload is redirected into an IFB device via act_mirred, which ships with the
++# sched core package above)
++apk add kmod-ifb
++
++# For interface detection (WiFi band + LAN port)
++apk add iw-full bridge-utils
++
++# For WiFi MAC deny / deauthenticate
++apk add hostapd-utils
++
++# rpcd-mod-rrdns is included with rpcd (no extra install needed)
++
++# For port forwards and shaping (jsonfilter + curl)
++apk add curl
++```
++
++</details>
++
++<details>
++<summary>OpenWrt 21.02 — 24.10 (opkg)</summary>
++
++```sh
++# Core (always required)
++opkg install conntrack luci-base rpcd
++
++# For traffic shaping
++opkg install tc-full kmod-sched-core kmod-sched-htb
++
++# For upload shaping — without it the shaper applies download only and says so
++# (upload is redirected into an IFB device via act_mirred, which ships with the
++# sched core package above)
++opkg install kmod-ifb
++
++# For interface detection (WiFi band + LAN port)
++opkg install iw-full bridge-utils
++
++# For WiFi MAC deny / deauthenticate
++opkg install hostapd-utils
++
++# rpcd-mod-rrdns is included with rpcd (no extra install needed)
++
++# For port forwards and shaping (jsonfilter + curl)
++opkg install curl
++```
++
++</details>
++
++---
++
++## Quick Start
++
++1. Install the package (see above).
++2. Navigate to **Status > Traffic Control** in LuCI.
++3. The summary table shows all active devices with connection counts, traffic, speed limits, and connection interface.
++4. Use the search bar to find a device by name, IP, or MAC.
++5. Select a device to see its per-connection detail table.
++6. Use the action buttons to pause internet, block WiFi, or set a speed limit.
++
++---
++
++## Configuration
++
++### Speed Limit Modes
++
++| Mode | Mechanism | Behavior | Best For |
++|------|-----------|----------|----------|
++| **Shaper** | tc/HTB + fq_codel | Queues excess packets | Smooth streaming, lower jitter |
++| **Limiter** | nft `limit rate` / iptables `hashlimit` | Drops excess packets | Quick enforcement, low overhead |
++
++### Persistence
++
++**Note**: As of v1.6.5+, the runtime data directory is `/etc/trafficctl/` (previously `/etc/trafficmon/`).
++
++- Shaping rules are always saved to `/etc/trafficctl/shapes.json` and restored on boot.
++- Block and rate-limit rules are optionally persistent when `persist_rules` is enabled in Settings > Logging & Persistence (saved to `/etc/trafficctl/rules.json`).
++- On reboot, the hotplug script at `/etc/hotplug.d/iface/99-trafficctl-shapes` restores all saved rules (shapes, blocks, ratelimits) when the LAN interface comes up.
++
++### Activity Logging
++
++- All mutable actions are logged with timestamp, source IP, username, trigger (luci/cli), and target.
++- Log file: `/tmp/trafficctl/activity.log` (volatile; survives until reboot). Path and max lines are configurable via UCI.
++- Optionally duplicates to syslog (`logger -t trafficctl`) for remote log collection.
++- Per-category toggles: blocks, ratelimits, shapes, config changes.
++
++### WiFi MAC Filtering
++
++When a device is WiFi-blocked:
++- Its MAC is added to the deny list on **all** wifi-iface sections via UCI.
++- `macfilter=deny` is set on each interface that has no ACL policy yet. An interface already using `allow` (whitelist) keeps it, and blocking there means removing the MAC from the accept list.
++- At runtime, `hostapd_cli deny_acl ADD_MAC` adds the MAC to the deny ACL and `deauthenticate` disconnects only that client. No wifi reload -- other clients stay connected.
++- The ACL is then **read back** to confirm the entry landed. The UCI entry is durable but only applies at the next wifi restart, so a runtime step that did not happen is reported as a failure rather than as a block -- see `enforcement` in [docs/API.md](docs/API.md).
++
++This needs the `hostapd-utils` package (pulled in by `LUCI_DEPENDS`). If it is
++missing, trafficctl falls back to a temporary hostapd ban over ubus, says so,
++and tells you to install it -- a device on the deny list that is still
++connected is shown in the table as **not applied** rather than as blocked.
++
++---
++
++## Architecture
++
++```mermaid
++flowchart LR
++    A((LuCI\nBrowser)) -->|JSON-RPC| B[rpcd backend]
++
++    B --> C{Query or\nAction?}
++
++    C -->|query| D[/Monitoring/]
++    C -->|action| E[/Control/]
++
++    D --> F[(conntrack)]
++    D --> G[(iw / brctl)]
++    D --> N[(ARP / DHCP)]
++
++    E --> H[Firewall\nabstraction]
++    E --> I[tc / HTB]
++    E --> J[hostapd]
++
++    H --> K[(nftables)]
++    H --> L[(iptables)]
++
++    I --> M[(shapes.json)]
++    H --> R[(rules.json)]
++    M -.->|boot restore| I
++    R -.->|boot restore| H
++
++    E --> LOG[Activity Log]
++    LOG --> S[(file)]
++    LOG --> SL[(syslog)]
++```
++
++The frontend talks to a thin rpcd dispatcher over ubus. Backend shell scripts split into two groups: **monitoring** (read-only, pulls data from conntrack, ARP, DHCP leases, and wireless subsystems) and **control** (writes firewall rules, tc classes, or WiFi MAC filters). A firewall abstraction layer auto-detects nft vs iptables at runtime. All mutable actions are logged to a local file and optionally syslog. Rules optionally persist across reboots via hotplug scripts.
++
++---
++
++## Project Layout
++
++| Path | Role |
++|------|------|
++| `luci-app-trafficctl/htdocs/.../view/trafficctl/status.js` | Frontend — single ES5 file, no deps |
++| `luci-app-trafficctl/htdocs/.../view/trafficctl/status.css` | Frontend styles |
++| `luci-app-trafficctl/root/usr/libexec/rpcd/luci.trafficctl` | rpcd backend — JSON-RPC dispatch |
++| `luci-app-trafficctl/root/usr/local/bin/trafficctl-*.sh` | Backend scripts (monitoring + control) |
++| `luci-app-trafficctl/root/usr/local/bin/trafficctl-fw.sh` | Firewall abstraction layer (sourced) |
++| `luci-app-trafficctl/root/etc/hotplug.d/iface/99-trafficctl-shapes` | Boot persistence for tc + block + ratelimit rules |
++| `luci-app-trafficctl/root/etc/hotplug.d/dhcp/99-trafficctl-newdevice` | Instant new-device detection via DHCP events |
++| `luci-app-trafficctl/root/usr/share/rpcd/acl.d/` | ACL permissions |
++| `Makefile` | OpenWrt package build |
++| `docs/` | Extended docs (architecture, API, compat) |
++
++---
++
++## Documentation
++
++| Document | Description |
++|----------|-------------|
++| [ARCHITECTURE.md](docs/ARCHITECTURE.md) | Component diagram, data flow sequences, tc/HTB hierarchy, security model |
++| [API.md](docs/API.md) | All rpcd methods, script arguments, JSON output formats |
++| [COMPATIBILITY.md](docs/COMPATIBILITY.md) | OpenWrt version matrix, nft/iptables feature parity, known limitations |
++| [DEVELOPMENT.md](docs/DEVELOPMENT.md) | Dev setup, deploy commands, code style, debugging |
++
++---
++
++## Contributing
++
++Contributions are welcome. Please:
++
++1. Fork the repository and create a feature branch.
++2. Test on at least one real OpenWrt device.
++3. Ensure both nftables and iptables code paths work if your change touches firewall logic.
++4. Keep the single-file JavaScript approach -- no bundlers, no npm, no transpilation.
++5. Shell scripts must be POSIX sh compatible (BusyBox ash/dash).
++6. All scripts emit JSON to stdout.
++
++### Code Style
++
++- **JavaScript**: ES5 syntax (LuCI compatibility), `'use strict'`, no external dependencies.
++- **Shell**: POSIX `/bin/sh`, validate all IP input, output JSON only.
++
++---
++
++## License
++
++Licensed under the Apache License, Version 2.0. See [LICENSE](LICENSE) for the full text.
++
++Copyright 2024-2026 Denis Iusupov.
+diff --git a/root/etc/hotplug.d/dhcp/99-trafficctl-newdevice b/root/etc/hotplug.d/dhcp/99-trafficctl-newdevice
+index eeb7a13..8f39c8d 100644
+--- a/root/etc/hotplug.d/dhcp/99-trafficctl-newdevice
++++ b/root/etc/hotplug.d/dhcp/99-trafficctl-newdevice
+@@ -3,33 +3,14 @@
+ # Triggered by dnsmasq on DHCP events (add/old/del).
+ # Available env vars: ACTION, MACADDR, IPADDR, HOSTNAME
+ #
+-# Two consumers sit on "this MAC is new":
+-#   * the Telegram bot, which wants a notification
+-#   * the default-limit feature, which applies a rate limit or shape
+-#
+-# They are deliberately independent — either can be on without the other —
+-# and they use different notions of "known". The bot has always keyed off its
+-# own telegram_known.json, which the bot itself rewrites; the limiter uses the
+-# seen-MAC ledger in trafficctl-fw.sh, because applying a limit is not an
+-# action that may be repeated or misfired.
++# 【本仓库改动 v0.7.0】原先这里有两个消费者：「新设备」Telegram 通知，
++#   与「新设备默认限速」。Telegram 全链路已移除，故只剩默认限速一家。
++#   它用 trafficctl-fw.sh 里的 seen-MAC 台账判断「新」，与应用限速这个
++#   不可重复、不可误触的动作相配。
+ 
+ [ "$ACTION" = "add" ] || exit 0
+ [ -n "$MACADDR" ] || exit 0
+ 
+-# ── Telegram notification ──────────────────────────────────────────────────
+-
+-KNOWN_FILE="/etc/trafficctl/telegram_known.json"
+-NOTIFY_FLAG="/tmp/trafficctl_tg_newdev"
+-
+-if [ "$(uci -q get trafficctl.telegram.enabled)" = "1" ] &&
+-    ! grep -q "\"$MACADDR\"" "$KNOWN_FILE" 2>/dev/null; then
+-    mkdir -p "$(dirname "$NOTIFY_FLAG")"
+-    # HOSTNAME comes from the dnsmasq dhcp hotplug environment (see header),
+-    # not a POSIX shell builtin — shellcheck's SC3028 is a false positive.
+-    # shellcheck disable=SC3028
+-    printf '%s\t%s\t%s\n' "$MACADDR" "${IPADDR:-?}" "${HOSTNAME:-unknown}" >> "$NOTIFY_FLAG"
+-fi
+-
+ # ── Default limit for a device seen for the first time ─────────────────────
+ 
+ [ "$(uci -q get trafficctl.newdevice.enabled 2>/dev/null)" = "1" ] || exit 0
+diff --git a/root/etc/init.d/trafficctl-telegram b/root/etc/init.d/trafficctl-telegram
+deleted file mode 100644
+index 9c556cd..0000000
+--- a/root/etc/init.d/trafficctl-telegram
++++ /dev/null
+@@ -1,31 +0,0 @@
+-#!/bin/sh /etc/rc.common
+-# shellcheck shell=dash
+-# START/STOP/USE_PROCD are consumed by the sourced /etc/rc.common framework.
+-# shellcheck disable=SC2034
+-START=99
+-STOP=10
+-USE_PROCD=1
+-
+-start_service() {
+-	local enabled
+-	config_load trafficctl
+-	config_get enabled telegram enabled 0
+-	[ "$enabled" = "1" ] || return 0
+-
+-	procd_open_instance telegram
+-	procd_set_param command /usr/local/bin/trafficctl-telegram.sh
+-	procd_set_param stdout 1
+-	procd_set_param stderr 1
+-	procd_set_param respawn 3600 5 5
+-	procd_set_param file /etc/config/trafficctl
+-	procd_close_instance
+-}
+-
+-service_triggers() {
+-	procd_add_reload_trigger "trafficctl"
+-}
+-
+-reload_service() {
+-	stop
+-	start
+-}
+diff --git a/root/usr/local/bin/trafficctl-fw.sh b/root/usr/local/bin/trafficctl-fw.sh
+index 2c6e853..b6fb44a 100755
+--- a/root/usr/local/bin/trafficctl-fw.sh
++++ b/root/usr/local/bin/trafficctl-fw.sh
+@@ -1088,7 +1088,6 @@ tctl_log() {
+         block|unblock|cut|uncut) category="blocks" ;;
+         ratelimit*) category="ratelimits" ;;
+         shape*) category="shapes" ;;
+-        telegram*) category="telegram" ;;
+         config*) category="config" ;;
+         *) category="config" ;;
+     esac
+diff --git a/root/usr/local/bin/trafficctl-telegram-test.sh b/root/usr/local/bin/trafficctl-telegram-test.sh
+deleted file mode 100644
+index 0ad61af..0000000
+--- a/root/usr/local/bin/trafficctl-telegram-test.sh
++++ /dev/null
+@@ -1,94 +0,0 @@
+-#!/bin/sh
+-# shellcheck shell=dash
+-# Test Telegram bot connection by sending a test message.
+-# Usage: trafficctl-telegram-test.sh <token> <chat_id> [message]
+-#        TCTL_TG_TOKEN=<token> trafficctl-telegram-test.sh - <chat_id> [message]
+-#
+-# Prefer the environment form: an argument is visible in ps to every local user.
+-
+-CHAT_ID="$2"
+-CUSTOM_MSG="$3"
+-if [ -n "$TCTL_TG_TOKEN" ]; then
+-	TOKEN="$TCTL_TG_TOKEN"
+-else
+-	TOKEN="$1"
+-fi
+-
+-if [ -z "$TOKEN" ] || [ -z "$CHAT_ID" ]; then
+-	echo '{"ok":false,"msg":"token and chat_id required"}'
+-	exit 0
+-fi
+-
+-echo "$CHAT_ID" | grep -qE '^-?[0-9]+$' || {
+-	echo '{"ok":false,"msg":"chat_id must be numeric"}'
+-	exit 0
+-}
+-
+-echo "$TOKEN" | grep -qE '^[0-9]+:[A-Za-z0-9_-]+$' || {
+-	echo '{"ok":false,"msg":"invalid token format"}'
+-	exit 0
+-}
+-
+-_fill_template() {
+-	ROUTER=$(uci -q get system.@system[0].hostname 2>/dev/null || echo "OpenWrt")
+-	DATE_NOW=$(date '+%Y-%m-%d')
+-	TIME_NOW=$(date '+%H:%M')
+-	_SEC=$(cut -d. -f1 /proc/uptime 2>/dev/null || echo "0")
+-	UPTIME_STR="$((_SEC / 86400))d $(((_SEC % 86400) / 3600))h"
+-	LOAD=$(cut -d' ' -f1 /proc/loadavg 2>/dev/null || echo "0.00")
+-	WAN_IP=$(ubus call network.interface.wan status 2>/dev/null | jsonfilter -e '@.ipv4-address[0].address' 2>/dev/null)
+-	[ -z "$WAN_IP" ] && WAN_IP=$(ip route get 1.1.1.1 2>/dev/null | grep -o 'src [0-9.]*' | cut -d' ' -f2)
+-	[ -z "$WAN_IP" ] && WAN_IP="unknown"
+-	SSID=$(uci -q get wireless.@wifi-iface[0].ssid 2>/dev/null || echo "WiFi")
+-
+-	sed \
+-		-e "s|{{ *name *}}|TestDevice|g" \
+-		-e "s|{{ *ip *}}|192.168.0.100|g" \
+-		-e "s|{{ *mac *}}|aa:bb:cc:dd:ee:ff|g" \
+-		-e "s|{{ *link *}}|5G|g" \
+-		-e "s|{{ *router *}}|$ROUTER|g" \
+-		-e "s|{{ *date *}}|$DATE_NOW|g" \
+-		-e "s|{{ *time *}}|$TIME_NOW|g" \
+-		-e "s|{{ *datetime *}}|$DATE_NOW $TIME_NOW|g" \
+-		-e "s|{{ *ssid *}}|$SSID|g" \
+-		-e "s|{{ *signal *}}|-52|g" \
+-		-e "s|{{ *freq *}}|5GHz|g" \
+-		-e "s|{{ *iface *}}|wlan1|g" \
+-		-e "s|{{ *clients *}}|12|g" \
+-		-e "s|{{ *uptime *}}|$UPTIME_STR|g" \
+-		-e "s|{{ *wan_ip *}}|$WAN_IP|g" \
+-		-e "s|{{ *load *}}|$LOAD|g" \
+-		-e "s|{{ *conns *}}|5|g"
+-}
+-
+-_json_encode() {
+-	# Escape backslashes, quotes, then fold real newlines back to \n for JSON
+-	printf '%s' "$1" \
+-		| sed 's/\\/\\\\/g; s/"/\\"/g' \
+-		| awk 'NR==1{printf "%s",$0} NR>1{printf "\\n%s",$0} END{printf ""}'
+-}
+-
+-if [ -n "$CUSTOM_MSG" ]; then
+-	# Convert literal \n escape sequences, then fill template variables
+-	MSG=$(printf '%s' "$CUSTOM_MSG" | sed 's/\\n/\n/g' | _fill_template)
+-else
+-	ROUTER=$(uci -q get system.@system[0].hostname 2>/dev/null || echo "OpenWrt")
+-	MSG=$(printf '✅ TrafficCtl bot connected from %s' "$ROUTER")
+-fi
+-
+-MSG_JSON=$(_json_encode "$MSG")
+-
+-# The URL carries the bot token, so it goes through a curl config file on stdin
+-# rather than argv, which is world-readable via ps and /proc.
+-RESULT=$(printf 'url = "https://api.telegram.org/bot%s/sendMessage"\n' "$TOKEN" | \
+-	curl -s -m 10 -X POST \
+-	-H "Content-Type: application/json" \
+-	-d "{\"chat_id\":\"${CHAT_ID}\",\"text\":\"${MSG_JSON}\",\"parse_mode\":\"HTML\"}" \
+-	--config - 2>/dev/null)
+-
+-if echo "$RESULT" | jsonfilter -e '@.ok' 2>/dev/null | grep -q "true"; then
+-	echo '{"ok":true,"msg":"test message sent"}'
+-else
+-	ERR=$(echo "$RESULT" | jsonfilter -e '@.description' 2>/dev/null)
+-	printf '{"ok":false,"msg":"API error: %s"}\n' "${ERR:-unknown}"
+-fi
+diff --git a/root/usr/local/bin/trafficctl-telegram.sh b/root/usr/local/bin/trafficctl-telegram.sh
+deleted file mode 100644
+index 34589c5..0000000
+--- a/root/usr/local/bin/trafficctl-telegram.sh
++++ /dev/null
+@@ -1,789 +0,0 @@
+-#!/bin/sh
+-# shellcheck shell=dash
+-# Telegram bot daemon for trafficctl.
+-# Runs under procd. Uses curl + jsonfilter to talk to Telegram Bot API.
+-# Only responds to the authorized chat_id configured in UCI.
+-
+-. /lib/functions.sh
+-
+-SCRIPTS="/usr/local/bin"
+-KNOWN_FILE="/etc/trafficctl/telegram_known.json"
+-OFFSET_FILE="/tmp/trafficctl_tg_offset"
+-CACHE_FILE="/tmp/trafficctl_tg_devices.json"
+-CACHE_TTL=5
+-# How often to scan for new devices. discover_macs forks ip/iw/awk, so running
+-# it on every short poll loop wastes CPU continuously; 30s is plenty for a
+-# "new device joined" alert. Real-time joins still arrive via DHCP hotplug
+-# triggers (process_dhcp_triggers), which stay on every loop.
+-NEWDEV_INTERVAL=30
+-
+-TG_ENABLED=0
+-TG_TOKEN=""
+-TG_CHAT_ID=""
+-TG_POLL=3
+-TG_NOTIFY_NEW=1
+-TG_NOTIFY_KNOWN=0
+-TG_CONTROL=1
+-TG_NOTIFY_TEMPLATE=""
+-TG_BTN_INET=1
+-TG_BTN_WIFI=1
+-TG_BTN_LIMIT=1
+-TG_BTN_SHAPE=1
+-
+-# ── config ──────────────────────────────────────────────────────────────────
+-
+-load_config() {
+-	config_load trafficctl
+-	config_get TG_ENABLED telegram enabled 0
+-	config_get TG_TOKEN telegram bot_token ""
+-	config_get TG_CHAT_ID telegram chat_id ""
+-	config_get TG_POLL telegram poll_interval 3
+-	config_get TG_NOTIFY_NEW telegram notify_new_device 1
+-	config_get TG_NOTIFY_KNOWN telegram notify_known_device 0
+-	config_get TG_CONTROL telegram control_enabled 1
+-	config_get TG_NOTIFY_TEMPLATE telegram notify_template ""
+-	config_get TG_BTN_INET telegram btn_block_inet 1
+-	config_get TG_BTN_WIFI telegram btn_block_wifi 1
+-	config_get TG_BTN_LIMIT telegram btn_limiter 1
+-	config_get TG_BTN_SHAPE telegram btn_shaper 1
+-	[ "$TG_POLL" -ge 2 ] 2>/dev/null || TG_POLL=3
+-}
+-
+-validate_config() {
+-	if [ "$TG_ENABLED" != "1" ]; then
+-		logger -t trafficctl-tg "Telegram bot disabled"
+-		exit 0
+-	fi
+-	if [ -z "$TG_TOKEN" ] || [ -z "$TG_CHAT_ID" ]; then
+-		logger -t trafficctl-tg "Missing bot_token or chat_id"
+-		exit 1
+-	fi
+-}
+-
+-# ── telegram API ────────────────────────────────────────────────────────────
+-
+-# The URL carries the bot token, so it is fed through a curl config file on stdin
+-# instead of argv — a command line is world-readable via ps and /proc.
+-tg_api() {
+-	local method="$1" body="$2"
+-	printf 'url = "https://api.telegram.org/bot%s/%s"\n' "$TG_TOKEN" "$method" | \
+-		curl -s -m 30 -X POST \
+-			-H "Content-Type: application/json" \
+-			-d "$body" \
+-			--config - 2>/dev/null
+-}
+-
+-# Escape a string for embedding in a JSON body: backslashes, quotes, tabs,
+-# and real newlines (raw newlines are invalid inside JSON strings and make
+-# Telegram reject the whole request with a 400).
+-tg_json_escape() {
+-	printf '%s' "$1" | sed 's/\\/\\\\/g;s/"/\\"/g;s/	/\\t/g' | \
+-		awk 'NR==1{printf "%s",$0} NR>1{printf "\\n%s",$0}'
+-}
+-
+-tg_send() {
+-	local text="$1" markup="$2"
+-	local body
+-	text=$(tg_json_escape "$text")
+-	if [ -n "$markup" ]; then
+-		body=$(printf '{"chat_id":"%s","text":"%s","parse_mode":"HTML","reply_markup":%s}' \
+-			"$TG_CHAT_ID" "$text" "$markup")
+-	else
+-		body=$(printf '{"chat_id":"%s","text":"%s","parse_mode":"HTML"}' \
+-			"$TG_CHAT_ID" "$text")
+-	fi
+-	tg_api "sendMessage" "$body" >/dev/null
+-}
+-
+-tg_answer_cb() {
+-	local cb_id="$1" text="$2"
+-	# The Bot API caps a callback toast at 200 characters and rejects the whole
+-	# call when it is longer — so an over-long message does not get trimmed, it
+-	# vanishes. Backend results carrying remediation advice can reach that
+-	# length, and a silently missing answer is exactly the failure mode this
+-	# plugin is being fixed for.
+-	if [ "${#text}" -gt 200 ]; then
+-		text="$(printf '%.196s' "$text")..."
+-	fi
+-	text=$(tg_json_escape "$text")
+-	tg_api "answerCallbackQuery" \
+-		"$(printf '{"callback_query_id":"%s","text":"%s"}' "$cb_id" "$text")" >/dev/null
+-}
+-
+-tg_edit_msg() {
+-	local msg_id="$1" text="$2" markup="$3"
+-	text=$(tg_json_escape "$text")
+-	local body
+-	if [ -n "$markup" ]; then
+-		body=$(printf '{"chat_id":"%s","message_id":%s,"text":"%s","parse_mode":"HTML","reply_markup":%s}' \
+-			"$TG_CHAT_ID" "$msg_id" "$text" "$markup")
+-	else
+-		body=$(printf '{"chat_id":"%s","message_id":%s,"text":"%s","parse_mode":"HTML"}' \
+-			"$TG_CHAT_ID" "$msg_id" "$text")
+-	fi
+-	tg_api "editMessageText" "$body" >/dev/null
+-}
+-
+-# ── device helpers ──────────────────────────────────────────────────────────
+-
+-get_devices() {
+-	local now mtime age
+-	now=$(date +%s)
+-	if [ -f "$CACHE_FILE" ]; then
+-		mtime=$(date -r "$CACHE_FILE" +%s 2>/dev/null || echo 0)
+-		age=$((now - mtime))
+-		if [ "$age" -lt "$CACHE_TTL" ]; then
+-			cat "$CACHE_FILE"
+-			return
+-		fi
+-	fi
+-	"$SCRIPTS/trafficctl-summary.sh" > "$CACHE_FILE" 2>/dev/null
+-	cat "$CACHE_FILE"
+-}
+-
+-invalidate_cache() { rm -f "$CACHE_FILE"; }
+-
+-get_device_field() {
+-	local json="$1" ip="$2" field="$3"
+-	echo "$json" | jsonfilter -e "@[@.ip='$ip'].$field" 2>/dev/null
+-}
+-
+-# ── known devices ───────────────────────────────────────────────────────────
+-
+-seed_known() {
+-	local mac info name ip
+-	for mac in $(discover_macs); do
+-		[ -z "$mac" ] && continue
+-		info=$(resolve_mac_info "$mac")
+-		name=$(printf '%s' "$info" | cut -f1)
+-		ip=$(printf '%s' "$info" | cut -f2)
+-		add_known_mac "$mac" "${name:-unknown}" "${ip:-?}"
+-	done
+-	logger -t trafficctl-tg "Seeded known devices from current state"
+-}
+-
+-load_known() {
+-	if [ ! -f "$KNOWN_FILE" ] || [ "$(cat "$KNOWN_FILE" 2>/dev/null)" = "[]" ]; then
+-		mkdir -p "$(dirname "$KNOWN_FILE")"
+-		[ -f "$KNOWN_FILE" ] || echo '[]' > "$KNOWN_FILE"
+-		seed_known
+-	fi
+-}
+-
+-lock_known() { while ! mkdir /tmp/.trafficctl_known.lock 2>/dev/null; do sleep 0.1; done; }
+-unlock_known() { rmdir /tmp/.trafficctl_known.lock 2>/dev/null; }
+-
+-is_known_mac() {
+-	grep -q "\"$1\"" "$KNOWN_FILE" 2>/dev/null
+-}
+-
+-add_known_mac() {
+-	local mac="$1" name="$2" ip="$3"
+-	local now
+-	now=$(date +%s)
+-	# Sanitize inputs: strip anything that could break JSON or sed
+-	mac=$(printf '%s' "$mac" | tr -cd 'a-fA-F0-9:')
+-	name=$(printf '%s' "$name" | tr -cd 'a-zA-Z0-9 _.-')
+-	ip=$(printf '%s' "$ip" | tr -cd '0-9.')
+-	local tmp="${KNOWN_FILE}.tmp"
+-	local entry
+-	entry=$(printf '{"mac":"%s","name":"%s","ip":"%s","first_seen":%d}' \
+-		"$mac" "$name" "$ip" "$now")
+-	lock_known
+-	if [ "$(cat "$KNOWN_FILE" 2>/dev/null)" = "[]" ]; then
+-		printf '[%s]' "$entry" > "$tmp"
+-	else
+-		awk -v e="$entry" '{sub(/\]$/,","e"]")}1' "$KNOWN_FILE" > "$tmp"
+-	fi
+-	mv "$tmp" "$KNOWN_FILE"
+-	unlock_known
+-}
+-
+-discover_macs() {
+-	local seen_file="/tmp/trafficctl_tg_seen.tmp"
+-	: > "$seen_file"
+-
+-	# Source 1: ARP table (covers any device that communicated at L2)
+-	ip neigh show 2>/dev/null | awk '/lladdr/ {print tolower($5)}' >> "$seen_file"
+-
+-	# Source 2: DHCP leases (covers any device that requested an IP)
+-	if [ -f /tmp/dhcp.leases ]; then
+-		awk '{print tolower($2)}' /tmp/dhcp.leases >> "$seen_file"
+-	fi
+-
+-	# Source 3: Wi-Fi associated stations (covers connected Wi-Fi clients even without traffic)
+-	for iface in $(iw dev 2>/dev/null | awk '/Interface/{print $2}'); do
+-		iw dev "$iface" station dump 2>/dev/null | awk '/Station/{print tolower($2)}'
+-	done >> "$seen_file"
+-
+-	# Deduplicate, filter valid MACs
+-	sort -u "$seen_file" | grep -E '^([0-9a-f]{2}:){5}[0-9a-f]{2}$'
+-	rm -f "$seen_file"
+-}
+-
+-resolve_mac_info() {
+-	local mac="$1" name="" ip="" conn_type="?"
+-
+-	# Try DHCP leases first
+-	if [ -f /tmp/dhcp.leases ]; then
+-		ip=$(awk -v m="$mac" 'tolower($2)==m {print $3; exit}' /tmp/dhcp.leases)
+-		name=$(awk -v m="$mac" 'tolower($2)==m {print $4; exit}' /tmp/dhcp.leases)
+-	fi
+-
+-	# Fallback: ARP for IP
+-	if [ -z "$ip" ]; then
+-		ip=$(ip neigh show 2>/dev/null | awk -v m="$mac" 'tolower($5)==m {print $1; exit}')
+-	fi
+-
+-	# Determine connection type
+-	for iface in $(iw dev 2>/dev/null | awk '/Interface/{print $2}'); do
+-		if iw dev "$iface" station get "$mac" >/dev/null 2>&1; then
+-			conn_type="wifi"
+-			break
+-		fi
+-	done
+-	if [ "$conn_type" = "?" ] && [ -n "$ip" ]; then
+-		conn_type="ethernet"
+-	fi
+-
+-	[ -z "$name" ] || [ "$name" = "*" ] && name="unknown"
+-	printf '%s\t%s\t%s' "${name}" "${ip:-?}" "${conn_type}"
+-}
+-
+-ONLINE_STATE_FILE="/tmp/trafficctl_tg_online"
+-DHCP_TRIGGER_FILE="/tmp/trafficctl_tg_newdev"
+-
+-get_wifi_info() {
+-	local mac="$1" iw_out="" iface="" cand="" ssid="" signal="" freq=""
+-	# Iterate all wireless interfaces via iw (covers phy0-ap0 style names,
+-	# not just wlan*).
+-	for cand in $(iw dev 2>/dev/null | awk '/Interface/{print $2}'); do
+-		iw_out=$(iw dev "$cand" station get "$mac" 2>/dev/null)
+-		if [ -n "$iw_out" ]; then
+-			iface="$cand"
+-			break
+-		fi
+-	done
+-	if [ -n "$iw_out" ]; then
+-		signal=$(echo "$iw_out" | awk '/signal:/{print $2; exit}')
+-		# channel line: "channel 36 (5180 MHz), width: 80 MHz, ..." — find the
+-		# first field that parses to a plausible frequency in MHz (the channel
+-		# number itself is < 2400, so it never matches)
+-		freq=$(iw dev "$iface" info 2>/dev/null | \
+-			awk '/channel/{
+-				for (i = 2; i <= NF; i++) {
+-					v = $i; gsub(/[^0-9]/, "", v)
+-					if (v + 0 >= 2400 && v + 0 <= 7200) { f = v + 0; break }
+-				}
+-				if (f >= 5925) print "6GHz"
+-				else if (f >= 5000) print "5GHz"
+-				else if (f > 0) print "2.4GHz"
+-				exit
+-			}')
+-		ssid=$(iw dev "$iface" info 2>/dev/null | awk '/ssid/{print $2; exit}')
+-	fi
+-	printf '%s\t%s\t%s\t%s' "$iface" "$ssid" "$signal" "$freq"
+-}
+-
+-get_device_conns() {
+-	local ip="$1" n
+-	# grep -c prints 0 itself on no match (with exit status 1), so an
+-	# "|| echo 0" here would emit a second line and corrupt the value.
+-	n=$(grep -c "src=$ip " /proc/net/nf_conntrack 2>/dev/null)
+-	echo "${n:-0}"
+-}
+-
+-get_router_vars() {
+-	local uptime_s up_d up_h up_m __ip
+-	uptime_s=$(awk '{print int($1)}' /proc/uptime)
+-	up_d=$((uptime_s / 86400))
+-	up_h=$(( (uptime_s % 86400) / 3600 ))
+-	up_m=$(( (uptime_s % 3600) / 60 ))
+-	if [ "$up_d" -gt 0 ]; then
+-		TVAR_UPTIME="${up_d}d ${up_h}h"
+-	elif [ "$up_h" -gt 0 ]; then
+-		TVAR_UPTIME="${up_h}h ${up_m}m"
+-	else
+-		TVAR_UPTIME="${up_m}m"
+-	fi
+-	TVAR_DATE=$(date '+%Y-%m-%d')
+-	TVAR_TIME=$(date '+%H:%M')
+-	TVAR_DATETIME=$(date '+%Y-%m-%d %H:%M')
+-	TVAR_ROUTER=$(uci -q get system.@system[0].hostname || cat /proc/sys/kernel/hostname)
+-	. /lib/functions/network.sh
+-	network_get_ipaddr __ip wan
+-	TVAR_WAN_IP="$__ip"
+-	TVAR_LOAD=$(awk '{print $1}' /proc/loadavg)
+-	TVAR_CLIENTS=$(wc -l < /tmp/dhcp.leases 2>/dev/null || echo 0)
+-}
+-
+-format_new_device_msg() {
+-	local name="$1" ip="$2" mac="$3" link="$4"
+-	if [ -n "$TG_NOTIFY_TEMPLATE" ]; then
+-		get_router_vars
+-		local wifi_info iface ssid signal freq conns
+-		wifi_info=$(get_wifi_info "$mac")
+-		iface=$(printf '%s' "$wifi_info" | cut -f1)
+-		ssid=$(printf '%s' "$wifi_info" | cut -f2)
+-		signal=$(printf '%s' "$wifi_info" | cut -f3)
+-		freq=$(printf '%s' "$wifi_info" | cut -f4)
+-		conns=$(get_device_conns "$ip")
+-
+-		printf '%s' "$TG_NOTIFY_TEMPLATE" | \
+-			awk -v n="$name" -v i="$ip" -v m="$mac" -v l="$link" \
+-			    -v dt="$TVAR_DATE" -v tm="$TVAR_TIME" -v dtm="$TVAR_DATETIME" \
+-			    -v rtr="$TVAR_ROUTER" -v ssid="$ssid" -v sig="$signal" \
+-			    -v freq="$freq" -v iface="$iface" -v clients="$TVAR_CLIENTS" \
+-			    -v up="$TVAR_UPTIME" -v wan="$TVAR_WAN_IP" -v ld="$TVAR_LOAD" \
+-			    -v conns="$conns" '{
+-				# [ \t]* instead of \s* — BusyBox awk has no \s class
+-				gsub(/\{\{[ \t]*name[ \t]*\}\}/, n)
+-				gsub(/\{\{[ \t]*ip[ \t]*\}\}/, i)
+-				gsub(/\{\{[ \t]*mac[ \t]*\}\}/, m)
+-				gsub(/\{\{[ \t]*link[ \t]*\}\}/, l)
+-				gsub(/\{\{[ \t]*date[ \t]*\}\}/, dt)
+-				gsub(/\{\{[ \t]*time[ \t]*\}\}/, tm)
+-				gsub(/\{\{[ \t]*datetime[ \t]*\}\}/, dtm)
+-				gsub(/\{\{[ \t]*router[ \t]*\}\}/, rtr)
+-				gsub(/\{\{[ \t]*ssid[ \t]*\}\}/, ssid)
+-				gsub(/\{\{[ \t]*signal[ \t]*\}\}/, sig)
+-				gsub(/\{\{[ \t]*freq[ \t]*\}\}/, freq)
+-				gsub(/\{\{[ \t]*iface[ \t]*\}\}/, iface)
+-				gsub(/\{\{[ \t]*clients[ \t]*\}\}/, clients)
+-				gsub(/\{\{[ \t]*uptime[ \t]*\}\}/, up)
+-				gsub(/\{\{[ \t]*wan_ip[ \t]*\}\}/, wan)
+-				gsub(/\{\{[ \t]*load[ \t]*\}\}/, ld)
+-				gsub(/\{\{[ \t]*conns[ \t]*\}\}/, conns)
+-				gsub(/\\n/, "\n")
+-				print
+-			}'
+-	else
+-		printf '🆕 <b>New device</b>\n%s (%s)\nMAC: <code>%s</code>\nLink: %s' \
+-			"$name" "$ip" "$mac" "$link"
+-	fi
+-}
+-
+-process_dhcp_triggers() {
+-	[ -f "$DHCP_TRIGGER_FILE" ] || return 0
+-	local tmpf="${DHCP_TRIGGER_FILE}.proc"
+-	mv "$DHCP_TRIGGER_FILE" "$tmpf" 2>/dev/null || return 0
+-
+-	local mac ip name
+-	while IFS='	' read -r mac ip name; do
+-		[ -z "$mac" ] && continue
+-		mac=$(printf '%s' "$mac" | tr 'A-F' 'a-f')
+-		if ! is_known_mac "$mac"; then
+-			add_known_mac "$mac" "${name:-unknown}" "${ip:-?}"
+-			if [ "$TG_NOTIFY_NEW" = "1" ]; then
+-				tg_send "$(format_new_device_msg "${name:-unknown}" "${ip:-?}" "$mac" "dhcp")"
+-			fi
+-		fi
+-	done < "$tmpf"
+-	rm -f "$tmpf"
+-}
+-
+-check_new_devices() {
+-	local mac info name ip conn_type
+-	local current_macs="/tmp/trafficctl_tg_cur.tmp"
+-
+-	discover_macs > "$current_macs"
+-
+-	while read -r mac; do
+-		[ -z "$mac" ] && continue
+-		if ! is_known_mac "$mac"; then
+-			info=$(resolve_mac_info "$mac")
+-			name=$(printf '%s' "$info" | cut -f1)
+-			ip=$(printf '%s' "$info" | cut -f2)
+-			conn_type=$(printf '%s' "$info" | cut -f3)
+-			add_known_mac "$mac" "${name:-unknown}" "${ip:-?}"
+-			if [ "$TG_NOTIFY_NEW" = "1" ]; then
+-				tg_send "$(format_new_device_msg "${name:-unknown}" "${ip:-?}" "$mac" "${conn_type:-?}")"
+-			fi
+-		elif [ "$TG_NOTIFY_KNOWN" = "1" ]; then
+-			if [ -f "$ONLINE_STATE_FILE" ] && ! grep -q "$mac" "$ONLINE_STATE_FILE" 2>/dev/null; then
+-				info=$(resolve_mac_info "$mac")
+-				name=$(printf '%s' "$info" | cut -f1)
+-				ip=$(printf '%s' "$info" | cut -f2)
+-				conn_type=$(printf '%s' "$info" | cut -f3)
+-				tg_send "$(printf '📱 <b>Device online</b>\n%s (%s)\nLink: %s' \
+-					"${name:-unknown}" "${ip:-?}" "${conn_type:-?}")"
+-			fi
+-		fi
+-	done < "$current_macs"
+-
+-	mv "$current_macs" "$ONLINE_STATE_FILE"
+-}
+-
+-# ── keyboard builders ───────────────────────────────────────────────────────
+-
+-build_device_keyboard() {
+-	local devices="$1"
+-	local tmpkb="/tmp/trafficctl_tg_kb.tmp"
+-	local ip name btn col=0 first=1
+-
+-	printf '{"inline_keyboard":[' > "$tmpkb"
+-
+-	for ip in $(echo "$devices" | jsonfilter -e '@[*].ip' 2>/dev/null); do
+-		name=$(echo "$devices" | jsonfilter -e "@[@.ip='$ip'].name" 2>/dev/null)
+-		# Keep button labels JSON-safe: drop quotes/backslashes and anything
+-		# non-ASCII, then truncate. A %.12s cut through a multi-byte character
+-		# would produce invalid UTF-8 and Telegram would reject the keyboard.
+-		name=$(printf '%s' "$name" | tr -cd 'a-zA-Z0-9 _.()-')
+-		btn=$(printf '{"text":"%.12s %s","callback_data":"act:menu:%s"}' \
+-			"${name:-$ip}" "$ip" "$ip")
+-		if [ "$col" -eq 0 ]; then
+-			if [ "$first" -eq 1 ]; then
+-				first=0
+-			else
+-				printf '],' >> "$tmpkb"
+-			fi
+-			printf '[%s' "$btn" >> "$tmpkb"
+-			col=1
+-		else
+-			printf ',%s' "$btn" >> "$tmpkb"
+-			col=0
+-		fi
+-	done
+-
+-	printf ']]}' >> "$tmpkb"
+-	cat "$tmpkb"
+-	rm -f "$tmpkb"
+-}
+-
+-build_action_keyboard() {
+-	local ip="$1" devices="$2"
+-	local blocked wifi_blocked rl_kbit shape_kbit
+-	blocked=$(get_device_field "$devices" "$ip" "blocked")
+-	wifi_blocked=$(get_device_field "$devices" "$ip" "wifi_blocked")
+-	rl_kbit=$(get_device_field "$devices" "$ip" "rate_limit_kbit")
+-	shape_kbit=$(get_device_field "$devices" "$ip" "shape_kbit")
+-	conn_type=$(get_device_field "$devices" "$ip" "conn_type")
+-
+-	local kb='{"inline_keyboard":['
+-	local rows=""
+-
+-	# internet block/unblock
+-	if [ "$TG_BTN_INET" = "1" ]; then
+-		if [ "$blocked" = "true" ] || [ "$blocked" = "1" ]; then
+-			rows="${rows}[{\"text\":\"▶️ Unblock Internet\",\"callback_data\":\"act:unblock:${ip}\"}],"
+-		else
+-			rows="${rows}[{\"text\":\"⏸ Block Internet\",\"callback_data\":\"act:block:${ip}\"}],"
+-		fi
+-	fi
+-
+-	# wifi block/unblock (only for wifi devices)
+-	if [ "$TG_BTN_WIFI" = "1" ]; then
+-		case "$conn_type" in
+-			*wifi*|*2.4G*|*5G*|*6G*|*WiFi*)
+-				if [ "$wifi_blocked" = "true" ] || [ "$wifi_blocked" = "1" ]; then
+-					rows="${rows}[{\"text\":\"📶 Unblock WiFi\",\"callback_data\":\"act:wunblock:${ip}\"}],"
+-				else
+-					rows="${rows}[{\"text\":\"📵 Block WiFi\",\"callback_data\":\"act:wblock:${ip}\"}],"
+-				fi
+-				;;
+-		esac
+-	fi
+-
+-	# limiter
+-	if [ "$TG_BTN_LIMIT" = "1" ]; then
+-		if [ "${rl_kbit:-0}" -gt 0 ] 2>/dev/null; then
+-			rows="${rows}[{\"text\":\"⚡ Limit: ${rl_kbit} kbit/s — Remove\",\"callback_data\":\"act:unlimit:${ip}\"}],"
+-		else
+-			rows="${rows}[{\"text\":\"⚡ 1M\",\"callback_data\":\"act:limit:${ip}:1000\"},{\"text\":\"⚡ 2M\",\"callback_data\":\"act:limit:${ip}:2000\"},{\"text\":\"⚡ 5M\",\"callback_data\":\"act:limit:${ip}:5000\"}],"
+-			rows="${rows}[{\"text\":\"⚡ 10M\",\"callback_data\":\"act:limit:${ip}:10000\"},{\"text\":\"⚡ 25M\",\"callback_data\":\"act:limit:${ip}:25000\"},{\"text\":\"⚡ 50M\",\"callback_data\":\"act:limit:${ip}:50000\"},{\"text\":\"⚡ 100M\",\"callback_data\":\"act:limit:${ip}:100000\"}],"
+-		fi
+-	fi
+-
+-	# shaper
+-	if [ "$TG_BTN_SHAPE" = "1" ]; then
+-		if [ "${shape_kbit:-0}" -gt 0 ] 2>/dev/null; then
+-			rows="${rows}[{\"text\":\"🔧 Shape: ${shape_kbit} kbit/s — Remove\",\"callback_data\":\"act:unshape:${ip}\"}],"
+-		else
+-			rows="${rows}[{\"text\":\"🔧 1M\",\"callback_data\":\"act:shape:${ip}:1000\"},{\"text\":\"🔧 2M\",\"callback_data\":\"act:shape:${ip}:2000\"},{\"text\":\"🔧 5M\",\"callback_data\":\"act:shape:${ip}:5000\"}],"
+-			rows="${rows}[{\"text\":\"🔧 10M\",\"callback_data\":\"act:shape:${ip}:10000\"},{\"text\":\"🔧 25M\",\"callback_data\":\"act:shape:${ip}:25000\"},{\"text\":\"🔧 50M\",\"callback_data\":\"act:shape:${ip}:50000\"},{\"text\":\"🔧 100M\",\"callback_data\":\"act:shape:${ip}:100000\"}],"
+-		fi
+-	fi
+-
+-	# back button
+-	rows="${rows}[{\"text\":\"⬅️ Back\",\"callback_data\":\"act:back\"}]"
+-
+-	printf '%s%s]}' "$kb" "$rows"
+-}
+-
+-# ── command handlers ────────────────────────────────────────────────────────
+-
+-handle_help() {
+-	if [ "$TG_CONTROL" = "1" ]; then
+-		tg_send "$(printf '<b>TrafficCtl Bot</b>\n\n/devices — active devices with action buttons\n/status — blocked/limited summary\n/help — this message')"
+-	else
+-		tg_send "$(printf '<b>TrafficCtl Bot</b> (notifications only)\n\n/devices — active devices list\n/status — blocked/limited summary\n/help — this message\n\n<i>Control disabled — enable in LuCI settings</i>')"
+-	fi
+-}
+-
+-handle_devices() {
+-	local devices
+-	devices=$(get_devices)
+-	if [ -z "$devices" ] || [ "$devices" = "[]" ]; then
+-		tg_send "No active devices"
+-		return
+-	fi
+-	local count
+-	count=$(echo "$devices" | jsonfilter -e '@[*].ip' 2>/dev/null | wc -l)
+-	if [ "$TG_CONTROL" = "1" ]; then
+-		local kb
+-		kb=$(build_device_keyboard "$devices")
+-		tg_send "$(printf '<b>Active devices: %d</b>\nSelect a device:' "$count")" "$kb"
+-	else
+-		local list="" ip name
+-		for ip in $(echo "$devices" | jsonfilter -e '@[*].ip' 2>/dev/null); do
+-			name=$(get_device_field "$devices" "$ip" "name")
+-			list="${list}• ${name:-?} (${ip})\n"
+-		done
+-		tg_send "$(printf '<b>Active devices: %d</b>\n%b' "$count" "$list")"
+-	fi
+-}
+-
+-handle_devices_edit() {
+-	local msg_id="$1"
+-	invalidate_cache
+-	local devices
+-	devices=$(get_devices)
+-	local count
+-	count=$(echo "$devices" | jsonfilter -e '@[*].ip' 2>/dev/null | wc -l)
+-	local kb
+-	kb=$(build_device_keyboard "$devices")
+-	tg_edit_msg "$msg_id" "$(printf '<b>Active devices: %d</b>\nSelect a device:' "$count")" "$kb"
+-}
+-
+-handle_status() {
+-	local devices ip name rl_kbit shape_kbit blocked wifi_blocked
+-	local result=""
+-	devices=$(get_devices)
+-	[ -z "$devices" ] || [ "$devices" = "[]" ] && { tg_send "No active devices"; return; }
+-
+-	for ip in $(echo "$devices" | jsonfilter -e '@[*].ip' 2>/dev/null); do
+-		blocked=$(get_device_field "$devices" "$ip" "blocked")
+-		wifi_blocked=$(get_device_field "$devices" "$ip" "wifi_blocked")
+-		rl_kbit=$(get_device_field "$devices" "$ip" "rate_limit_kbit")
+-		shape_kbit=$(get_device_field "$devices" "$ip" "shape_kbit")
+-		name=$(get_device_field "$devices" "$ip" "name")
+-
+-		local flags=""
+-		[ "$blocked" = "true" ] || [ "$blocked" = "1" ] && flags="${flags} 🚫inet"
+-		[ "$wifi_blocked" = "true" ] || [ "$wifi_blocked" = "1" ] && flags="${flags} 📵wifi"
+-		[ "${rl_kbit:-0}" -gt 0 ] 2>/dev/null && flags="${flags} ⚡${rl_kbit}k"
+-		[ "${shape_kbit:-0}" -gt 0 ] 2>/dev/null && flags="${flags} 🔧${shape_kbit}k"
+-
+-		[ -n "$flags" ] && result="${result}${name:-?} (${ip}):${flags}\n"
+-	done
+-
+-	if [ -z "$result" ]; then
+-		tg_send "All devices are clean — no blocks or limits"
+-	else
+-		tg_send "$(printf '<b>Active restrictions:</b>\n%b' "$result")"
+-	fi
+-}
+-
+-# ── callback handler ────────────────────────────────────────────────────────
+-
+-handle_callback() {
+-	local cb_id="$1" data="$2" msg_id="$3"
+-	local verb ip param result msg devices name
+-
+-	if [ "$TG_CONTROL" != "1" ]; then
+-		tg_answer_cb "$cb_id" "Control disabled"
+-		return
+-	fi
+-
+-	verb=$(echo "$data" | cut -d: -f2)
+-	ip=$(echo "$data" | cut -d: -f3)
+-	param=$(echo "$data" | cut -d: -f4)
+-
+-	# Validate IP from callback data
+-	if [ -n "$ip" ] && [ "$verb" != "back" ]; then
+-		if ! echo "$ip" | grep -qE '^[0-9]{1,3}\.[0-9]{1,3}\.[0-9]{1,3}\.[0-9]{1,3}$'; then
+-			tg_answer_cb "$cb_id" "invalid IP"
+-			return
+-		fi
+-	fi
+-	# Validate rate param is numeric
+-	if [ -n "$param" ]; then
+-		case "$param" in *[!0-9]*) tg_answer_cb "$cb_id" "invalid param"; return ;; esac
+-	fi
+-
+-	case "$verb" in
+-	menu)
+-		invalidate_cache
+-		devices=$(get_devices)
+-		name=$(get_device_field "$devices" "$ip" "name")
+-		local blocked wifi_blocked rl_kbit shape_kbit
+-		blocked=$(get_device_field "$devices" "$ip" "blocked")
+-		wifi_blocked=$(get_device_field "$devices" "$ip" "wifi_blocked")
+-		rl_kbit=$(get_device_field "$devices" "$ip" "rate_limit_kbit")
+-		shape_kbit=$(get_device_field "$devices" "$ip" "shape_kbit")
+-
+-		local status_line=""
+-		[ "$blocked" = "true" ] || [ "$blocked" = "1" ] && status_line="${status_line}🚫 Internet blocked\n"
+-		[ "$wifi_blocked" = "true" ] || [ "$wifi_blocked" = "1" ] && status_line="${status_line}📵 WiFi blocked\n"
+-		[ "${rl_kbit:-0}" -gt 0 ] 2>/dev/null && status_line="${status_line}⚡ Limiter: ${rl_kbit} kbit/s\n"
+-		[ "${shape_kbit:-0}" -gt 0 ] 2>/dev/null && status_line="${status_line}🔧 Shaper: ${shape_kbit} kbit/s\n"
+-		[ -z "$status_line" ] && status_line="✅ No restrictions\n"
+-
+-		local text
+-		text=$(printf '<b>%s</b> (%s)\n%b' "${name:-?}" "$ip" "$status_line")
+-		local kb
+-		kb=$(build_action_keyboard "$ip" "$devices")
+-		tg_edit_msg "$msg_id" "$text" "$kb"
+-		tg_answer_cb "$cb_id" ""
+-		;;
+-	block)
+-		result=$("$SCRIPTS/trafficctl-block.sh" "$ip" "tg")
+-		msg=$(echo "$result" | jsonfilter -e '@.msg' 2>/dev/null)
+-		tg_answer_cb "$cb_id" "${msg:-done}"
+-		invalidate_cache
+-		handle_callback "$cb_id" "act:menu:$ip" "$msg_id"
+-		;;
+-	unblock)
+-		result=$("$SCRIPTS/trafficctl-unblock.sh" "$ip" "tg")
+-		msg=$(echo "$result" | jsonfilter -e '@.msg' 2>/dev/null)
+-		tg_answer_cb "$cb_id" "${msg:-done}"
+-		invalidate_cache
+-		handle_callback "$cb_id" "act:menu:$ip" "$msg_id"
+-		;;
+-	wblock)
+-		result=$("$SCRIPTS/trafficctl-macfilter-add.sh" "$ip")
+-		msg=$(echo "$result" | jsonfilter -e '@.msg' 2>/dev/null)
+-		tg_answer_cb "$cb_id" "${msg:-done}"
+-		invalidate_cache
+-		handle_callback "$cb_id" "act:menu:$ip" "$msg_id"
+-		;;
+-	wunblock)
+-		result=$("$SCRIPTS/trafficctl-macfilter-remove.sh" "$ip")
+-		msg=$(echo "$result" | jsonfilter -e '@.msg' 2>/dev/null)
+-		tg_answer_cb "$cb_id" "${msg:-done}"
+-		invalidate_cache
+-		handle_callback "$cb_id" "act:menu:$ip" "$msg_id"
+-		;;
+-	limit)
+-		result=$("$SCRIPTS/trafficctl-ratelimit.sh" "$ip" "$param" "tg")
+-		msg=$(echo "$result" | jsonfilter -e '@.msg' 2>/dev/null)
+-		tg_answer_cb "$cb_id" "${msg:-done}"
+-		invalidate_cache
+-		handle_callback "$cb_id" "act:menu:$ip" "$msg_id"
+-		;;
+-	unlimit)
+-		result=$("$SCRIPTS/trafficctl-ratelimit.sh" "$ip" "0" "tg")
+-		msg=$(echo "$result" | jsonfilter -e '@.msg' 2>/dev/null)
+-		tg_answer_cb "$cb_id" "${msg:-done}"
+-		invalidate_cache
+-		handle_callback "$cb_id" "act:menu:$ip" "$msg_id"
+-		;;
+-	shape)
+-		result=$("$SCRIPTS/trafficctl-shape.sh" add "$ip" "$param" "tg")
+-		msg=$(echo "$result" | jsonfilter -e '@.msg' 2>/dev/null)
+-		tg_answer_cb "$cb_id" "${msg:-done}"
+-		invalidate_cache
+-		handle_callback "$cb_id" "act:menu:$ip" "$msg_id"
+-		;;
+-	unshape)
+-		result=$("$SCRIPTS/trafficctl-shape.sh" remove "$ip")
+-		msg=$(echo "$result" | jsonfilter -e '@.msg' 2>/dev/null)
+-		tg_answer_cb "$cb_id" "${msg:-done}"
+-		invalidate_cache
+-		handle_callback "$cb_id" "act:menu:$ip" "$msg_id"
+-		;;
+-	back)
+-		handle_devices_edit "$msg_id"
+-		tg_answer_cb "$cb_id" ""
+-		;;
+-	*)
+-		tg_answer_cb "$cb_id" "Unknown action"
+-		;;
+-	esac
+-}
+-
+-# ── main loop ───────────────────────────────────────────────────────────────
+-
+-main() {
+-	load_config
+-	validate_config
+-	load_known
+-
+-	export TCTL_VIA="telegram"
+-	export TCTL_SRC="telegram:${TG_CHAT_ID}"
+-	export TCTL_USER="telegram-bot"
+-
+-	logger -t trafficctl-tg "Bot started, chat_id=$TG_CHAT_ID"
+-
+-	local offset response ok i
+-	local update update_id msg_chat_id msg_text cb_id cb_data cb_msg_id
+-	local config_reload_at newdev_check_at
+-	config_reload_at=$(($(date +%s) + 60))
+-	newdev_check_at=0
+-
+-	offset=$(cat "$OFFSET_FILE" 2>/dev/null || echo "0")
+-
+-	while true; do
+-		# Periodic full device scan (rate-limited); hotplug path stays real-time.
+-		if [ "$(date +%s)" -ge "$newdev_check_at" ]; then
+-			check_new_devices
+-			newdev_check_at=$(($(date +%s) + NEWDEV_INTERVAL))
+-		fi
+-		process_dhcp_triggers
+-
+-		response=$(tg_api "getUpdates" \
+-			"$(printf '{"offset":%s,"timeout":%d,"allowed_updates":["message","callback_query"]}' \
+-				"$offset" "$TG_POLL")")
+-
+-		ok=$(echo "$response" | jsonfilter -e '@.ok' 2>/dev/null)
+-		[ "$ok" = "true" ] || { sleep 5; continue; }
+-
+-		# Iterate results by index until one comes back empty. Do NOT use
+-		# `jsonfilter -l '@.result'` to get a count: on newer jsonfilter
+-		# (OpenWrt 25.12 / APK and snapshot) it returns an empty string, which
+-		# left update_count empty and turned `[ "$i" -lt "$update_count" ]` into
+-		# a BusyBox "sh: out of range" loop that never processed commands (#22).
+-		i=0
+-		while update=$(echo "$response" | jsonfilter -e "@.result[$i]" 2>/dev/null); [ -n "$update" ]; do
+-			update_id=$(echo "$update" | jsonfilter -e '@.update_id' 2>/dev/null)
+-			[ -n "$update_id" ] && offset=$((update_id + 1))
+-			echo "$offset" > "$OFFSET_FILE"
+-
+-			# try message first
+-			msg_chat_id=$(echo "$update" | jsonfilter -e '@.message.chat.id' 2>/dev/null)
+-			if [ -n "$msg_chat_id" ]; then
+-				if [ "$msg_chat_id" = "$TG_CHAT_ID" ]; then
+-					msg_text=$(echo "$update" | jsonfilter -e '@.message.text' 2>/dev/null)
+-					case "$msg_text" in
+-						/start*|/help*) handle_help ;;
+-						/devices*)      handle_devices ;;
+-						/status*)       handle_status ;;
+-					esac
+-				fi
+-				i=$((i + 1))
+-				continue
+-			fi
+-
+-			# try callback_query
+-			cb_id=$(echo "$update" | jsonfilter -e '@.callback_query.id' 2>/dev/null)
+-			if [ -n "$cb_id" ]; then
+-				msg_chat_id=$(echo "$update" | jsonfilter -e '@.callback_query.message.chat.id' 2>/dev/null)
+-				if [ "$msg_chat_id" = "$TG_CHAT_ID" ]; then
+-					cb_data=$(echo "$update" | jsonfilter -e '@.callback_query.data' 2>/dev/null)
+-					cb_msg_id=$(echo "$update" | jsonfilter -e '@.callback_query.message.message_id' 2>/dev/null)
+-					handle_callback "$cb_id" "$cb_data" "$cb_msg_id"
+-				fi
+-			fi
+-
+-			i=$((i + 1))
+-		done
+-
+-		# reload config periodically
+-		if [ "$(date +%s)" -ge "$config_reload_at" ]; then
+-			load_config
+-			config_reload_at=$(($(date +%s) + 60))
+-		fi
+-	done
+-}
+-
+-main
+diff --git a/root/usr/share/rpcd/acl.d/luci-app-trafficctl.json b/root/usr/share/rpcd/acl.d/luci-app-trafficctl.json
+index 018d23d..274d2ba 100644
+--- a/root/usr/share/rpcd/acl.d/luci-app-trafficctl.json
++++ b/root/usr/share/rpcd/acl.d/luci-app-trafficctl.json
+@@ -9,7 +9,7 @@
+ 					"ratelimit_stats", "shape_stats", "rdns", "subnets",
+ 					"portfw_list", "names_list", "netify_status", "netify_list",
+ 					"shape_status",
+-					"config_get", "telegram_config_get",
++					"config_get",
+ 					"logging_config_get", "newdevice_config_get"
+ 				],
+ 				"file": [ "read" ]
+@@ -27,7 +27,6 @@
+ 					"ratelimit", "shape_add", "shape_remove",
+ 					"portfw_ctl", "name_set", "name_clear", "netify_collect",
+ 					"config_set",
+-					"telegram_config_set", "telegram_test",
+ 					"logging_config_set", "activity_log",
+ 					"newdevice_config_set",
+ 					"cut_status", "cut_set"

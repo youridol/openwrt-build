@@ -60,14 +60,16 @@ list)
 	printf '"portfw_list":{},'
 	printf '"portfw_ctl":{"action":"str","scope":"str","proto":"str","ip":"str","port":"str","rate_kbit":"int"},'
 	printf '"config_get":{},'
-	printf '"config_set":{"enabled":"bool","default_mode":"str","sw":"bool","hw":"bool","poll_interval":"int","avg_window":"int"},'
-	printf '"telegram_config_get":{},'
-	printf '"telegram_config_set":{"enabled":"bool","bot_token":"str","chat_id":"str","poll_interval":"int","notify_new_device":"bool","notify_known_device":"bool","control_enabled":"bool","notify_template":"str","btn_block_inet":"bool","btn_block_wifi":"bool","btn_limiter":"bool","btn_shaper":"bool"},'
-	printf '"telegram_test":{"bot_token":"str","chat_id":"str","message":"str"},'
+	# 【本仓库补丁】refresh_interval 必须在签名里声明：它由
+	# uci-defaults 写入、被 config_get 读出、也是「保存为路由器默认值」
+	# 要写的字段。此前只加了读写代码而漏了签名 —— 少声明时 ubus 仍会
+	# 放行（实测能写），但参数不受类型校验，与 config_get 的输出字段
+	# 也不对称，属易漏且难查的隐性不一致。
+	printf '"config_set":{"enabled":"bool","default_mode":"str","sw":"bool","hw":"bool","poll_interval":"int","avg_window":"int","refresh_interval":"int"},'
 	printf '"newdevice_config_get":{},'
 	printf '"newdevice_config_set":{"enabled":"bool","limit_kbit":"int","limit_mode":"str"},'
 	printf '"logging_config_get":{},'
-	printf '"logging_config_set":{"enabled":"bool","log_file":"str","max_lines":"int","syslog":"bool","log_blocks":"bool","log_ratelimits":"bool","log_shapes":"bool","log_telegram":"bool","log_config":"bool"},'
+	printf '"logging_config_set":{"enabled":"bool","log_file":"str","max_lines":"int","syslog":"bool","log_blocks":"bool","log_ratelimits":"bool","log_shapes":"bool","log_config":"bool"},'
 	printf '"cut_status":{},'
 	printf '"cut_set":{"active":"bool","duration":"int","persist":"bool"},'
 	printf '"activity_log":{"lines":"int"},'
@@ -312,7 +314,7 @@ call)
 			"$offload" \
 			"$([ "$sw" = "1" ] && echo true || echo false)" \
 			"$([ "$hw" = "1" ] && echo true || echo false)" \
-			"${poll:-2}" \
+			"${poll:-1}" \
 			"${window:-15}" \
 			"${refresh:-5}"
 		;;
@@ -376,86 +378,6 @@ call)
 		fi
 		echo '{"ok":true}'
 		;;
-	telegram_config_get)
-		uci -q get trafficctl.telegram >/dev/null 2>&1 || {
-			echo '{"enabled":false,"bot_token":"","bot_token_set":false,"chat_id":"","poll_interval":3,"notify_new_device":true,"notify_known_device":false,"control_enabled":true,"notify_template":"","btn_block_inet":true,"btn_block_wifi":true,"btn_limiter":true,"btn_shaper":true,"bot_running":false}'
-			exit 0
-		}
-		tg_enabled=$(uci -q get trafficctl.telegram.enabled)
-		tg_token=$(uci -q get trafficctl.telegram.bot_token)
-		tg_chat_id=$(uci -q get trafficctl.telegram.chat_id)
-		tg_poll=$(uci -q get trafficctl.telegram.poll_interval)
-		tg_nn=$(uci -q get trafficctl.telegram.notify_new_device)
-		tg_nk=$(uci -q get trafficctl.telegram.notify_known_device)
-		tg_ctrl=$(uci -q get trafficctl.telegram.control_enabled)
-		tg_tmpl=$(uci -q get trafficctl.telegram.notify_template)
-		tg_bi=$(uci -q get trafficctl.telegram.btn_block_inet)
-		tg_bw=$(uci -q get trafficctl.telegram.btn_block_wifi)
-		tg_bl=$(uci -q get trafficctl.telegram.btn_limiter)
-		tg_bs=$(uci -q get trafficctl.telegram.btn_shaper)
-		tg_token_set=false
-		tg_token_display=""
-		if [ -n "$tg_token" ]; then
-			tg_token_set=true
-			tg_token_display="***"
-		fi
-		tg_running=false
-		pgrep -f "trafficctl-telegram.sh" >/dev/null 2>&1 && tg_running=true
-		tg_tmpl_esc=$(printf '%s' "${tg_tmpl:-}" | sed 's/\\/\\\\/g;s/"/\\"/g;s/	/\\t/g')
-		printf '{"enabled":%s,"bot_token":"%s","bot_token_set":%s,"chat_id":"%s","poll_interval":%d,"notify_new_device":%s,"notify_known_device":%s,"control_enabled":%s,"notify_template":"%s","btn_block_inet":%s,"btn_block_wifi":%s,"btn_limiter":%s,"btn_shaper":%s,"bot_running":%s}' \
-			"$([ "$tg_enabled" = "1" ] && echo true || echo false)" \
-			"$tg_token_display" "$tg_token_set" "${tg_chat_id:-}" \
-			"${tg_poll:-3}" \
-			"$([ "${tg_nn:-1}" != "0" ] && echo true || echo false)" \
-			"$([ "$tg_nk" = "1" ] && echo true || echo false)" \
-			"$([ "${tg_ctrl:-1}" != "0" ] && echo true || echo false)" \
-			"$tg_tmpl_esc" \
-			"$([ "${tg_bi:-1}" != "0" ] && echo true || echo false)" \
-			"$([ "${tg_bw:-1}" != "0" ] && echo true || echo false)" \
-			"$([ "${tg_bl:-1}" != "0" ] && echo true || echo false)" \
-			"$([ "${tg_bs:-1}" != "0" ] && echo true || echo false)" \
-			"$tg_running"
-		;;
-	telegram_config_set)
-		read -r input
-		uci -q get trafficctl.telegram >/dev/null 2>&1 || uci set trafficctl.telegram=telegram
-		val=$(echo "$input" | jsonfilter -e '@.enabled' 2>/dev/null)
-		[ -n "$val" ] && uci set trafficctl.telegram.enabled="$([ "$val" = "true" ] && echo 1 || echo 0)"
-		val=$(echo "$input" | jsonfilter -e '@.bot_token' 2>/dev/null)
-		if [ -n "$val" ] && [ "$val" != "***" ]; then
-			uci set trafficctl.telegram.bot_token="$val"
-		elif [ -z "$val" ]; then
-			uci -q delete trafficctl.telegram.bot_token
-		fi
-		val=$(echo "$input" | jsonfilter -e '@.chat_id' 2>/dev/null)
-		[ -n "$val" ] && uci set trafficctl.telegram.chat_id="$val"
-		val=$(echo "$input" | jsonfilter -e '@.poll_interval' 2>/dev/null)
-		[ -n "$val" ] && uci set trafficctl.telegram.poll_interval="$val"
-		val=$(echo "$input" | jsonfilter -e '@.notify_template' 2>/dev/null)
-		uci set trafficctl.telegram.notify_template="$val"
-		for opt in notify_new_device notify_known_device control_enabled btn_block_inet btn_block_wifi btn_limiter btn_shaper; do
-			val=$(echo "$input" | jsonfilter -e "@.$opt" 2>/dev/null)
-			[ -n "$val" ] && uci set "trafficctl.telegram.$opt=$([ "$val" = "true" ] && echo 1 || echo 0)"
-		done
-		tctl_commit
-		tctl_log "telegram_config_change" "" "" "luci" "${TCTL_SRC:-local}"
-		/etc/init.d/trafficctl-telegram reload 2>/dev/null &
-		echo '{"ok":true}'
-		;;
-	telegram_test)
-		read -r input
-		token=$(echo "$input" | jsonfilter -e '@.bot_token' 2>/dev/null)
-		chat_id=$(echo "$input" | jsonfilter -e '@.chat_id' 2>/dev/null)
-		msg=$(echo "$input" | jsonfilter -e '@.message' 2>/dev/null)
-		if [ "$token" = "***" ] || [ -z "$token" ]; then
-			token=$(uci -q get trafficctl.telegram.bot_token)
-		fi
-		if [ -z "$token" ] || [ -z "$chat_id" ]; then
-			echo '{"ok":false,"msg":"token and chat_id required"}'
-		else
-			TCTL_TG_TOKEN="$token" "$SCRIPTS/trafficctl-telegram-test.sh" - "$chat_id" "$msg"
-		fi
-		;;
 	logging_config_get)
 		log_enabled=$(uci -q get trafficctl.logging.enabled)
 		log_file=$(uci -q get trafficctl.logging.log_file)
@@ -464,10 +386,9 @@ call)
 		log_blocks=$(uci -q get trafficctl.logging.log_blocks)
 		log_ratelimits=$(uci -q get trafficctl.logging.log_ratelimits)
 		log_shapes=$(uci -q get trafficctl.logging.log_shapes)
-		log_telegram=$(uci -q get trafficctl.logging.log_telegram)
 		log_config=$(uci -q get trafficctl.logging.log_config)
 		persist=$(uci -q get trafficctl.main.persist_rules)
-		printf '{"enabled":%s,"log_file":"%s","max_lines":%d,"syslog":%s,"log_blocks":%s,"log_ratelimits":%s,"log_shapes":%s,"log_telegram":%s,"log_config":%s,"persist_rules":%s}' \
+		printf '{"enabled":%s,"log_file":"%s","max_lines":%d,"syslog":%s,"log_blocks":%s,"log_ratelimits":%s,"log_shapes":%s,"log_config":%s,"persist_rules":%s}' \
 			"$([ "${log_enabled:-1}" = "1" ] && echo true || echo false)" \
 			"${log_file:-/tmp/trafficctl/activity.log}" \
 			"${max_lines:-500}" \
@@ -475,14 +396,13 @@ call)
 			"$([ "${log_blocks:-1}" != "0" ] && echo true || echo false)" \
 			"$([ "${log_ratelimits:-1}" != "0" ] && echo true || echo false)" \
 			"$([ "${log_shapes:-1}" != "0" ] && echo true || echo false)" \
-			"$([ "${log_telegram:-1}" != "0" ] && echo true || echo false)" \
 			"$([ "${log_config:-1}" != "0" ] && echo true || echo false)" \
 			"$([ "$persist" = "1" ] && echo true || echo false)"
 		;;
 	logging_config_set)
 		read -r input
 		uci -q get trafficctl.logging >/dev/null 2>&1 || uci set trafficctl.logging=logging
-		for opt in enabled syslog log_blocks log_ratelimits log_shapes log_telegram log_config; do
+		for opt in enabled syslog log_blocks log_ratelimits log_shapes log_config; do
 			val=$(echo "$input" | jsonfilter -e "@.$opt" 2>/dev/null)
 			[ -n "$val" ] && uci set "trafficctl.logging.$opt=$([ "$val" = "true" ] && echo 1 || echo 0)"
 		done

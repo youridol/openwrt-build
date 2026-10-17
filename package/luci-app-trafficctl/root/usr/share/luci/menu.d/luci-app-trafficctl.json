@@ -23,12 +23,12 @@
 		}
 	},
 
-	"admin/status/trafficctl/telegram": {
-		"title": "Telegram Bot",
+	"admin/status/trafficctl/settings": {
+		"title": "Settings",
 		"order": 2,
 		"action": {
 			"type": "view",
-			"path": "trafficctl/telegram"
+			"path": "trafficctl/settings"
 		},
 		"depends": {
 			"acl": [ "luci-app-trafficctl" ]
@@ -41,6 +41,17 @@
 		"action": {
 			"type": "view",
 			"path": "trafficctl/portfw"
+		},
+		"depends": {
+			"acl": [ "luci-app-trafficctl" ]
+		}
+	},
+
+	"admin/status/trafficctl/host/*": {
+		"order": 4,
+		"action": {
+			"type": "view",
+			"path": "trafficctl/host"
 		},
 		"depends": {
 			"acl": [ "luci-app-trafficctl" ]

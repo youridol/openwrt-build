@@ -7,13 +7,7 @@ msgstr ""
 msgid " flag should sync hardware byte counts back to conntrack, but on many platforms (e.g. Mediatek Filogic) the driver does not implement the stats callback, so conntrack counters remain frozen for active flows."
 msgstr ""
 
-msgid "\"all\" for every device, or a CIDR such as 10.0.20.0/24"
-msgstr ""
-
 msgid "%s down / %s up"
-msgstr ""
-
-msgid "%s down and %s up"
 msgstr ""
 
 msgid "1 hour"
@@ -37,7 +31,13 @@ msgstr ""
 msgid "Action"
 msgstr ""
 
+msgid "Actions"
+msgstr ""
+
 msgid "Active"
+msgstr ""
+
+msgid "Active connections"
 msgstr ""
 
 msgid "Active connections in conntrack"
@@ -52,9 +52,6 @@ msgstr ""
 msgid "Active subnet limits"
 msgstr ""
 
-msgid "Activity"
-msgstr ""
-
 msgid "Adding to"
 msgstr ""
 
@@ -65,9 +62,6 @@ msgid "All active devices"
 msgstr ""
 
 msgid "All devices"
-msgstr ""
-
-msgid "All of"
 msgstr ""
 
 msgid "App"
@@ -85,7 +79,7 @@ msgstr ""
 msgid "Applying…"
 msgstr ""
 
-msgid "Auto-refresh interval for summary table"
+msgid "Auto-refresh interval for the device table"
 msgstr ""
 
 msgid "Avg"
@@ -94,7 +88,13 @@ msgstr ""
 msgid "BLOCKED"
 msgstr ""
 
+msgid "Back to overview"
+msgstr ""
+
 msgid "Behind a downstream router (routed subnet)"
+msgstr ""
+
+msgid "Behind the proxy the outgoing address is chosen by the node, so this connection has no external address of its own."
 msgstr ""
 
 msgid "Block Internet"
@@ -116,15 +116,6 @@ msgid "Blocks"
 msgstr ""
 
 msgid "Borrowed"
-msgstr ""
-
-msgid "Bot commands:"
-msgstr ""
-
-msgid "Bot is running"
-msgstr ""
-
-msgid "Bot is stopped"
 msgstr ""
 
 msgid "Bridge port — these bytes are also counted in its bridge"
@@ -154,10 +145,10 @@ msgstr ""
 msgid "Bytes sent back to remote clients"
 msgstr ""
 
-msgid "CPU load (1 min)"
+msgid "Calculating…"
 msgstr ""
 
-msgid "Calculating…"
+msgid "Camera"
 msgstr ""
 
 msgid "Cancel"
@@ -166,10 +157,7 @@ msgstr ""
 msgid "Carries the default route"
 msgstr ""
 
-msgid "Chat ID"
-msgstr ""
-
-msgid "Chat ID:"
+msgid "Choose which columns the device table and the connection table show"
 msgstr ""
 
 msgid "Click a row to inspect that device. Download and upload speeds update every 2 seconds."
@@ -199,13 +187,13 @@ msgstr ""
 msgid "Connection interface (WiFi band, LAN port or routed)"
 msgstr ""
 
+msgid "Connection state"
+msgstr ""
+
 msgid "Connections"
 msgstr ""
 
 msgid "Conns"
-msgstr ""
-
-msgid "Control"
 msgstr ""
 
 msgid "Current download speed (bytes/sec from router to device)"
@@ -223,9 +211,6 @@ msgstr ""
 msgid "Custom"
 msgstr ""
 
-msgid "Customize message"
-msgstr ""
-
 msgid "Custom…"
 msgstr ""
 
@@ -241,13 +226,22 @@ msgstr ""
 msgid "DL Speed"
 msgstr ""
 
+msgid "Desktop"
+msgstr ""
+
 msgid "Destination"
+msgstr ""
+
+msgid "Details"
+msgstr ""
+
+msgid "Detected device type, with the vendor looked up from the MAC address below it"
 msgstr ""
 
 msgid "Device"
 msgstr ""
 
-msgid "Device hostname from DHCP lease"
+msgid "Device hostname from DHCP lease, or the name you set"
 msgstr ""
 
 msgid "Device name"
@@ -262,22 +256,28 @@ msgstr ""
 msgid "Devices on the WiFi deny list that are still connected — those blocks are not in effect on the running radio."
 msgstr ""
 
+msgid "Direct"
+msgstr ""
+
 msgid "Disable hardware offload (keeps software offload): "
 msgstr ""
 
 msgid "Dismiss"
 msgstr ""
 
-msgid "Display"
+msgid "Distinct remote clients"
 msgstr ""
 
-msgid "Distinct remote clients"
+msgid "Domain"
 msgstr ""
 
 msgid "Done"
 msgstr ""
 
 msgid "Download"
+msgstr ""
+
+msgid "Download rate"
 msgstr ""
 
 msgid "Drop"
@@ -298,22 +298,19 @@ msgstr ""
 msgid "Dst IP"
 msgstr ""
 
+msgid "Dst port"
+msgstr ""
+
 msgid "ECN marks"
 msgstr ""
 
 msgid "EWMA"
 msgstr ""
 
-msgid "Enabled"
-msgstr ""
-
 msgid "Enter a custom speed value"
 msgstr ""
 
-msgid "Every device in"
-msgstr ""
-
-msgid "Every device this router forwards for"
+msgid "Every row is one live conntrack entry. Upload is what this host sent; download is what it received. Rates are computed between two samples."
 msgstr ""
 
 msgid "Ext. port"
@@ -337,16 +334,13 @@ msgstr ""
 msgid "Flow offload is active and the kernel does not support the nftables counter maps trafficctl uses in that mode, so byte counters stop updating for offloaded connections. Speeds and totals would be far too low, so they are not shown. Disabling hardware offload in Settings → Flow Offload restores them."
 msgstr ""
 
-msgid "Flow: /devices → select device → inline keyboard with enabled actions above"
+msgid "Flow offloading is active."
 msgstr ""
 
 msgid "Flows"
 msgstr ""
 
 msgid "Forwarded traffic only — this kernel cannot install the prerouting rule, so traffic handled by a transparent proxy on the router would not be caught."
-msgstr ""
-
-msgid "Full control"
 msgstr ""
 
 msgid "Give upload its own ceiling instead of matching download"
@@ -364,9 +358,6 @@ msgstr ""
 msgid "Group connections table rows"
 msgstr ""
 
-msgid "HTML:"
-msgstr ""
-
 msgid "Hardware MAC address"
 msgstr ""
 
@@ -382,6 +373,9 @@ msgstr ""
 msgid "Hardware offload"
 msgstr ""
 
+msgid "Host details"
+msgstr ""
+
 msgid "Hostname"
 msgstr ""
 
@@ -392,9 +386,6 @@ msgid "How often live data is polled: speeds, graphs, drop/backlog counters, and
 msgstr ""
 
 msgid "How to get full functionality without disabling offload:"
-msgstr ""
-
-msgid "IP address"
 msgstr ""
 
 msgid "If your current firmware uses fw3 (iptables) or ships a kernel older than 5.7, a router with modern OpenWrt and fw4 support will have this working out of the box."
@@ -418,7 +409,7 @@ msgstr ""
 msgid "Inet"
 msgstr ""
 
-msgid "Inline keyboard preview:"
+msgid "Intercepted by the transparent proxy."
 msgstr ""
 
 msgid "Interfaces"
@@ -436,10 +427,10 @@ msgstr ""
 msgid "Kept after reboot — undoing it needs LAN or physical access."
 msgstr ""
 
-msgid "Known devices"
+msgid "LAN keeps working"
 msgstr ""
 
-msgid "LAN keeps working"
+msgid "Laptop"
 msgstr ""
 
 msgid "Last seen"
@@ -475,13 +466,16 @@ msgstr ""
 msgid "Limiting"
 msgstr ""
 
+msgid "Line"
+msgstr ""
+
 msgid "Link"
 msgstr ""
 
 msgid "Loading…"
 msgstr ""
 
-msgid "Local IP address"
+msgid "Local IP address — the hardware MAC is shown below it"
 msgstr ""
 
 msgid "Log categories"
@@ -493,9 +487,6 @@ msgstr ""
 msgid "Logging & Persistence"
 msgstr ""
 
-msgid "MAC address"
-msgstr ""
-
 msgid "Max"
 msgstr ""
 
@@ -505,16 +496,22 @@ msgstr ""
 msgid "Method"
 msgstr ""
 
+msgid "Mode:"
+msgstr ""
+
 msgid "Name"
+msgstr ""
+
+msgid "Needs the netifyd DPI agent, which is not installed on this router."
+msgstr ""
+
+msgid "Network"
 msgstr ""
 
 msgid "New Device Defaults"
 msgstr ""
 
-msgid "New devices"
-msgstr ""
-
-msgid "No action buttons enabled"
+msgid "No active connections for this host."
 msgstr ""
 
 msgid "No active connections."
@@ -544,6 +541,9 @@ msgstr ""
 msgid "No port forwards or WAN-open ports are configured in the firewall."
 msgstr ""
 
+msgid "No valid host address in the URL."
+msgstr ""
+
 msgid "None (per-flow)"
 msgstr ""
 
@@ -559,22 +559,10 @@ msgstr ""
 msgid "Note: speed is measured before shaper — bursts above limit are normal"
 msgstr ""
 
-msgid "Notifications"
-msgstr ""
-
-msgid "Notifications and remote control over Telegram. Changes are saved automatically."
-msgstr ""
-
-msgid "Notifications only"
-msgstr ""
-
 msgid "Off"
 msgstr ""
 
 msgid "Offloads routing to the hardware engine (PPE/NPU). Requires software offload. ⚠ On many platforms (e.g. Mediatek Filogic) the driver does not report byte counters back to the kernel — real-time speed monitoring will show zero."
-msgstr ""
-
-msgid "On"
 msgstr ""
 
 msgid "On the WiFi deny list but still connected — the block is NOT in effect on the running radio. Install hostapd-utils so blocks apply immediately, or restart WiFi (disconnects every client)."
@@ -587,6 +575,12 @@ msgid "One bucket per device inside the subnet"
 msgstr ""
 
 msgid "Open DHCP/DNS bindings"
+msgstr ""
+
+msgid "Open host details"
+msgstr ""
+
+msgid "Open the host detail page, or target this device with the speed limit"
 msgstr ""
 
 msgid "Operation failed"
@@ -607,9 +601,6 @@ msgstr ""
 msgid "Overrides the DHCP lease or DNS name. Leave empty to clear the custom name."
 msgstr ""
 
-msgid "Overview"
-msgstr ""
-
 msgid "Packets dropped"
 msgstr ""
 
@@ -619,19 +610,22 @@ msgstr ""
 msgid "Passed"
 msgstr ""
 
-msgid "Paste bot token"
+msgid "Pause"
 msgstr ""
 
-msgid "Pause"
+msgid "Per page"
 msgstr ""
 
 msgid "Persist rules"
 msgstr ""
 
-msgid "Pick a rate to apply it to this target, or Off to remove its limit."
+msgid "Phone"
 msgstr ""
 
 msgid "Poll"
+msgstr ""
+
+msgid "Polling interval, averaging window and method, and table refresh"
 msgstr ""
 
 msgid "Polling is off — set the Poll interval to see throughput."
@@ -643,13 +637,19 @@ msgstr ""
 msgid "Port Forwards & Open Ports"
 msgstr ""
 
-msgid "Preview:"
+msgid "Printer"
+msgstr ""
+
+msgid "Private MAC"
 msgstr ""
 
 msgid "Proto"
 msgstr ""
 
 msgid "Protocol"
+msgstr ""
+
+msgid "Proxy"
 msgstr ""
 
 msgid "Queue"
@@ -718,12 +718,6 @@ msgstr ""
 msgid "Resume"
 msgstr ""
 
-msgid "Routed via"
-msgstr ""
-
-msgid "Running…"
-msgstr ""
-
 msgid "Save"
 msgstr ""
 
@@ -733,13 +727,7 @@ msgstr ""
 msgid "Saving…"
 msgstr ""
 
-msgid "Scanning all devices…"
-msgstr ""
-
 msgid "Search device (name, IP, MAC)…"
-msgstr ""
-
-msgid "Sending…"
 msgstr ""
 
 msgid "Sent by this interface"
@@ -749,6 +737,9 @@ msgid "Service"
 msgstr ""
 
 msgid "Set a rate above 0 — with no rate this does nothing."
+msgstr ""
+
+msgid "Set this device's speed limit"
 msgstr ""
 
 msgid "Settings"
@@ -775,10 +766,7 @@ msgstr ""
 msgid "Shaping"
 msgstr ""
 
-msgid "Share:"
-msgstr ""
-
-msgid "Show/hide token"
+msgid "Show this column in the device table"
 msgstr ""
 
 msgid "Simple"
@@ -790,10 +778,13 @@ msgstr ""
 msgid "Software flow offload"
 msgstr ""
 
-msgid "Software flow offloading is active."
+msgid "Software offload"
 msgstr ""
 
-msgid "Software offload"
+msgid "Source port"
+msgstr ""
+
+msgid "Speaker"
 msgstr ""
 
 msgid "Speed Limit"
@@ -802,13 +793,13 @@ msgstr ""
 msgid "Speed graph. Window = avg time. Orange dashed line = speed limit"
 msgstr ""
 
-msgid "Speed is measured via nftables counters installed at a higher priority (before the flowtable), so graphs are accurate."
-msgstr ""
-
 msgid "Speed limit"
 msgstr ""
 
 msgid "Speed limit: shaper (queue) or limiter (drop)"
+msgstr ""
+
+msgid "Speed monitoring and traffic shaping may be bypassed for offloaded flows."
 msgstr ""
 
 msgid "Speed monitoring — conntrack byte counters are not updated"
@@ -820,13 +811,10 @@ msgstr ""
 msgid "State"
 msgstr ""
 
-msgid "Stats"
-msgstr ""
-
 msgid "Stays off until you switch it back."
 msgstr ""
 
-msgid "Store the current Poll and Window as this router's defaults, for browsers that have not set their own"
+msgid "Store the current Poll, Window and Refresh as this router's defaults, for browsers that have not set their own"
 msgstr ""
 
 msgid "Switch it off"
@@ -838,19 +826,10 @@ msgstr ""
 msgid "TCP bytes transferred, accumulated on the router. Not measurable while flow offload is active"
 msgstr ""
 
-msgid "Table & Speed"
+msgid "TV"
 msgstr ""
 
-msgid "Target:"
-msgstr ""
-
-msgid "Telegram"
-msgstr ""
-
-msgid "Telegram Bot"
-msgstr ""
-
-msgid "Test"
+msgid "Tablet"
 msgstr ""
 
 msgid "The auto-revert helper is not running; this page re-checks the deadline while it is open."
@@ -862,10 +841,10 @@ msgstr ""
 msgid "The internet cut is switched on, but its firewall rule is missing."
 msgstr ""
 
-msgid "The kernel fast-paths established connections through a flowtable, bypassing conntrack byte updates for higher throughput."
+msgid "The router offloads established connections from the CPU to the hardware (NIC/SoC), achieving 2–3× higher throughput and lower CPU usage."
 msgstr ""
 
-msgid "The router offloads established connections from the CPU to the hardware (NIC/SoC), achieving 2–3× higher throughput and lower CPU usage."
+msgid "This MAC is randomized by the client, so no vendor can be looked up."
 msgstr ""
 
 msgid "Throttle removed"
@@ -877,9 +856,6 @@ msgstr ""
 msgid "To restore speed monitoring:"
 msgstr ""
 
-msgid "Token:"
-msgstr ""
-
 msgid "Top application by traffic"
 msgstr ""
 
@@ -889,7 +865,25 @@ msgstr ""
 msgid "Top talkers"
 msgstr ""
 
+msgid "Total"
+msgstr ""
+
+msgid "Total DL"
+msgstr ""
+
+msgid "Total UL"
+msgstr ""
+
+msgid "Total bytes this device has downloaded, accumulated on the router. Resets on reboot; hover a cell for the start time"
+msgstr ""
+
+msgid "Total bytes this device has uploaded, accumulated on the router. Resets on reboot; hover a cell for the start time"
+msgstr ""
+
 msgid "Total bytes transferred (download + upload), accumulated on the router. Resets on reboot; hover a cell for the start time"
+msgstr ""
+
+msgid "Total download"
 msgstr ""
 
 msgid "Total dropped"
@@ -904,6 +898,9 @@ msgstr ""
 msgid "Total since boot (RX / TX)"
 msgstr ""
 
+msgid "Total upload"
+msgstr ""
+
 msgid "Traffic Control"
 msgstr ""
 
@@ -913,7 +910,7 @@ msgstr ""
 msgid "Traffic shaping (tc/HTB) — bypassed for offloaded flows"
 msgstr ""
 
-msgid "Traffic shaping and blocking are not affected."
+msgid "Type / Vendor"
 msgstr ""
 
 msgid "UDP bytes transferred, accumulated on the router. Not measurable while flow offload is active"
@@ -940,16 +937,16 @@ msgstr ""
 msgid "Upload"
 msgstr ""
 
-msgid "Utilization"
+msgid "Upload rate"
 msgstr ""
 
-msgid "Variables"
+msgid "Utilization"
 msgstr ""
 
 msgid "Visible columns"
 msgstr ""
 
-msgid "WAN IP"
+msgid "WAN address"
 msgstr ""
 
 msgid "Waiting for a second sample…"
@@ -964,12 +961,6 @@ msgstr ""
 msgid "WiFi"
 msgstr ""
 
-msgid "WiFi SSID"
-msgstr ""
-
-msgid "WiFi band (2.4/5GHz)"
-msgstr ""
-
 msgid "WiFi block NOT in effect"
 msgstr ""
 
@@ -980,9 +971,6 @@ msgid "WiFi blocking and internet blocking of new connections still work. "
 msgstr ""
 
 msgid "WiFi deny list"
-msgstr ""
-
-msgid "WiFi signal (dBm)"
 msgstr ""
 
 msgid "Window"
@@ -997,16 +985,7 @@ msgstr ""
 msgid "ago"
 msgstr ""
 
-msgid "all active blocks, limits, and shapes"
-msgstr ""
-
 msgid "all devices"
-msgstr ""
-
-msgid "between them — one bucket for the whole subnet."
-msgstr ""
-
-msgid "between them — one bucket per direction for the whole subnet."
 msgstr ""
 
 msgid "blocked"
@@ -1021,34 +1000,13 @@ msgstr ""
 msgid "clear filter"
 msgstr ""
 
-msgid "command list and bot mode"
-msgstr ""
-
 msgid "congestion signals without drop"
-msgstr ""
-
-msgid "connection type (5G, LAN)"
 msgstr ""
 
 msgid "connections"
 msgstr ""
 
 msgid "current speed as percentage of rate limit"
-msgstr ""
-
-msgid "date (2026-05-26)"
-msgstr ""
-
-msgid "date + time"
-msgstr ""
-
-msgid "device connections"
-msgstr ""
-
-msgid "device hostname"
-msgstr ""
-
-msgid "device list → tap device → action buttons"
 msgstr ""
 
 msgid "disabled"
@@ -1063,9 +1021,6 @@ msgstr ""
 msgid "each"
 msgstr ""
 
-msgid "every device"
-msgstr ""
-
 msgid "failed"
 msgstr ""
 
@@ -1075,22 +1030,13 @@ msgstr ""
 msgid "h"
 msgstr ""
 
-msgid "is not one of the subnets this router monitors, so a limit on it would be accepted but never enforced. A firewall zone other than \"lan\" with masq=1 (the usual guest-VLAN setup) is excluded. Check with: uci show firewall | grep -E \"name=|masq=\""
+msgid "items"
 msgstr ""
 
 msgid "kbit/s"
 msgstr ""
 
-msgid "line break"
-msgstr ""
-
-msgid "may use"
-msgstr ""
-
 msgid "min"
-msgstr ""
-
-msgid "network interface"
 msgstr ""
 
 msgid "new"
@@ -1100,9 +1046,6 @@ msgid "not applied"
 msgstr ""
 
 msgid "nothing dropped yet"
-msgstr ""
-
-msgid "of its own."
 msgstr ""
 
 msgid "old"
@@ -1124,9 +1067,6 @@ msgid "packets dropped by queue overflow"
 msgstr ""
 
 msgid "paused"
-msgstr ""
-
-msgid "per device"
 msgstr ""
 
 msgid "percentage of total traffic that was dropped"
@@ -1156,40 +1096,22 @@ msgstr ""
 msgid "router"
 msgstr ""
 
-msgid "router hostname"
-msgstr ""
-
-msgid "router uptime"
-msgstr ""
-
 msgid "s"
-msgstr ""
-
-msgid "saved"
 msgstr ""
 
 msgid "sending or receiving now"
 msgstr ""
 
-msgid "share"
-msgstr ""
-
-msgid "shared"
-msgstr ""
-
 msgid "shared between them"
+msgstr ""
+
+msgid "showing"
 msgstr ""
 
 msgid "these are never limited by this setting."
 msgstr ""
 
-msgid "time (14:32)"
-msgstr ""
-
 msgid "total"
-msgstr ""
-
-msgid "total connected clients"
 msgstr ""
 
 msgid "traffic discarded by nft policer"

@@ -279,6 +279,19 @@ if command -v ip >/dev/null 2>&1; then
     done
 fi
 
+# Per-connection fields. A conntrack line carries TWO tuples:
+#
+#   orig:  src=<client>      dst=<remote>  sport=<cliport> dport=<report> bytes=<up>
+#   reply: src=<post-NAT src> dst=<post-NAT dst> sport=<report> dport=<cliport> bytes=<down>
+#
+# The reply tuple is what makes the newer columns real rather than half-empty:
+#   bytes_up / bytes_down = the two directions separately (only one was emitted
+#                           before, so "upload" and "download" were the same number)
+#   sport  = the client's own source port
+#   wan    = the address this router sent FROM after masquerading
+# `proxy` marks a flow SSR-Plus intercepted: REDIRECT rewrites the destination to
+# this router, so the reply tuple comes from the router's own :1234 instead of
+# the remote host.
 CONNS_OUT=$(echo "$CONNTRACK_DATA" | awk -v ip="$IP" -v pf="$PROTO_FILTER" -v oifmap="$OIF_MAP" '
 BEGIN {
     n=0
@@ -294,23 +307,48 @@ BEGIN {
     }
     if (pf != "all" && proto != pf) next
 
-    dst=""; dport=""; bytes=0; state=""
-    src_key = "src=" ip
-    seen_src=0; got_dst=0
+    # Only flows the device ORIGINATED. A flow where the device is the reply
+    # destination was dialed INTO it; its two direction counters would be
+    # backwards.
+    first_src=""
+    for (i=1; i<=NF; i++) if (index($i, "src=") == 1) { first_src=substr($i, 5); break }
+    if (first_src != ip) next
+
+    dst=""; dport=""; sport=""; up=0; down=0; state=""; wan=""; rport=""
+    nsrc=0; ndst=0; nsport=0; ndport=0; nbytes=0
     for (i=1; i<=NF; i++) {
-        if ($i == src_key && !seen_src) { seen_src=1; continue }
-        if (seen_src && !got_dst && index($i, "dst=") == 1) { dst=substr($i, 5); got_dst=1 }
-        if (seen_src && !got_dst) continue
-        if (seen_src && index($i, "dport=") == 1 && dport == "") dport=substr($i, 7)
-        if (seen_src && index($i, "bytes=") == 1 && bytes == 0) bytes=substr($i, 7)+0
+        if (index($i, "src=") == 1) { nsrc++ }
+        else if (index($i, "dst=") == 1) {
+            ndst++
+            if (ndst == 1) dst=substr($i, 5)
+            else if (ndst == 2) wan=substr($i, 5)
+        }
+        else if (index($i, "sport=") == 1) {
+            nsport++
+            if (nsport == 1) sport=substr($i, 7)
+            else if (nsport == 2) rport=substr($i, 7)
+        }
+        else if (index($i, "dport=") == 1) {
+            ndport++
+            if (ndport == 1) dport=substr($i, 7)
+        }
+        else if (index($i, "bytes=") == 1) {
+            nbytes++
+            if (nbytes == 1) up=substr($i, 7)+0
+            else if (nbytes == 2) down=substr($i, 7)+0
+        }
         if ($i == "ESTABLISHED") state="ESTABLISHED"
         else if ($i == "TIME_WAIT") state="TIME_WAIT"
         else if ($i == "SYN_SENT") state="SYN_SENT"
         else if ($i == "CLOSE_WAIT") state="CLOSE_WAIT"
         else if ($i == "FIN_WAIT") state="FIN_WAIT"
+        else if ($i == "LAST_ACK") state="LAST_ACK"
+        else if ($i == "SYN_RECV") state="SYN_RECV"
+        else if ($i == "CLOSE") state="CLOSE"
     }
     if (dst == "" || dst == ip) next
     if (dport == "") dport = "0"
+    if (sport == "") sport = "0"
 
     # Service name lookup
     svc=""
@@ -327,8 +365,20 @@ BEGIN {
 
     oif = ""
     if (dst in oifdev) oif = oifdev[dst]
+
+    # A REDIRECTed flow answers from the router itself on the proxy port, so its
+    # observed external address belongs to the proxy node and cannot be read off
+    # this tuple — reporting one would be a confident wrong answer.
+    proxy = (rport == "1234") ? 1 : 0
+    if (proxy) wan = ""
+    # A flow to the router itself (DNS, SSH, LuCI) never gets masqueraded, so the
+    # second tuple source is just the device own LAN address. That is not an
+    # external address, and showing 192.168.x.y in a column headed "WAN address"
+    # reads as a public address that happens to be private.
+    if (wan == ip) wan = ""
+
     if (n > 0) printf ","
-    printf "{\"proto\":\"%s\",\"dst\":\"%s\",\"host\":\"\",\"port\":%s,\"service\":\"%s\",\"bytes\":%.0f,\"state\":\"%s\",\"oif\":\"%s\"}", proto, dst, dport, svc, bytes, state, oif
+    printf "{\"proto\":\"%s\",\"dst\":\"%s\",\"host\":\"\",\"port\":%s,\"sport\":%s,\"service\":\"%s\",\"bytes\":%.0f,\"bytes_up\":%.0f,\"bytes_down\":%.0f,\"state\":\"%s\",\"oif\":\"%s\",\"wan\":\"%s\",\"proxy\":%s}", proto, dst, dport, sport, svc, up+down, up, down, state, oif, wan, (proxy ? "true" : "false")
     n++
 }
 ')

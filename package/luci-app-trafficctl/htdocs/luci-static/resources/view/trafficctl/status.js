@@ -3,6 +3,11 @@
 'require rpc';
 'require fs';
 'require ui';
+// 【本仓库改动】rpc 声明、选项存取、格式化与几个小控件统一移到
+// trafficctl/common.js：设置页（settings.js）也要用同一套，若各自复制一份，
+// 同一个开关在不同页面的行为会渐渐不一致。
+// 下面用别名把本文件里原有的调用点全部接过去，故正文一行不需要改动。
+'require trafficctl/common as T';
 
 (function() {
 	if (!document.querySelector('link[href*="trafficctl/status.css"]')) {
@@ -21,9 +26,11 @@ console.log('[trafficctl] build:' + TRAFFICCTL_BUILD);
 // agent isn't running, which is what makes the App column degrade quietly.
 var netifyMap = {};
 
-var STORAGE_KEY = 'trafficctl_opts';
-var RECENT_KEY = 'trafficctl_recent';
-var MAX_RECENT = 6;
+// 【本仓库改动】以下这些此前定义在本文件里，现已移入 trafficctl/common.js
+// （设置页要用同一份）。这里保留同名别名，正文的调用点因此一行都不用改。
+var STORAGE_KEY = T.STORAGE_KEY;
+var RECENT_KEY = T.RECENT_KEY;
+var MAX_RECENT = T.MAX_RECENT;
 var FULL_HISTORY_MAX = 1800;
 // Per-interface history for the overview graph. Deliberately far smaller than
 // FULL_HISTORY_MAX: this is kept for EVERY interface at once (a router with a
@@ -36,23 +43,9 @@ var IFACE_HISTORY_MAX = 600;
 var TOP_TALKERS = 5;
 var _fgGraphIdSeq = 0;
 
-function getRecentDevices() {
-	try {
-		var stored = JSON.parse(window.localStorage.getItem(RECENT_KEY) || '[]');
-		return stored.map(function(r) { return typeof r === 'string' ? {ip: r, name: r} : r; });
-	} catch(e) { return []; }
-}
-function saveRecentDevices(arr) {
-	try { window.localStorage.setItem(RECENT_KEY, JSON.stringify(arr)); } catch(e) {}
-}
-function addRecentDevice(ip, name) {
-	var recent = getRecentDevices();
-	var existing = recent.filter(function(r) { return (r.ip || r) === ip; })[0];
-	recent = recent.filter(function(r) { return (r.ip || r) !== ip; });
-	recent.unshift({ip: ip, name: name || (existing && existing.name) || ip});
-	if (recent.length > MAX_RECENT) recent.length = MAX_RECENT;
-	saveRecentDevices(recent);
-}
+var getRecentDevices    = T.getRecentDevices;
+var saveRecentDevices   = T.saveRecentDevices;
+var addRecentDevice     = T.addRecentDevice;
 
 var SERVICE_PORTS = {
 	20:'ftp-data', 21:'ftp', 22:'ssh', 23:'telnet', 25:'smtp',
@@ -63,176 +56,37 @@ var SERVICE_PORTS = {
 	19302:'stun', 51820:'wireguard'
 };
 
-var callTrafficctl = rpc.declare({
-	object: 'luci.trafficctl',
-	method: 'summary',
-	expect: { result: [] }
-});
-
-var callDevice = rpc.declare({
-	object: 'luci.trafficctl',
-	method: 'device',
-	params: ['ip', 'proto']
-});
-
-var callBytes = rpc.declare({
-	object: 'luci.trafficctl',
-	method: 'bytes',
-	expect: { result: [] }
-});
-
-var callIfaces = rpc.declare({
-	object: 'luci.trafficctl',
-	method: 'ifaces',
-	expect: { result: [] }
-});
-
-var callBlock = rpc.declare({
-	object: 'luci.trafficctl',
-	method: 'block',
-	params: ['ip', 'label']
-});
-
-var callUnblock = rpc.declare({
-	object: 'luci.trafficctl',
-	method: 'unblock',
-	params: ['ip', 'label']
-});
-
-var callMacfilterAdd = rpc.declare({
-	object: 'luci.trafficctl',
-	method: 'macfilter_add',
-	params: ['ip']
-});
-
-var callMacfilterRemove = rpc.declare({
-	object: 'luci.trafficctl',
-	method: 'macfilter_remove',
-	params: ['ip']
-});
-
-var callRatelimit = rpc.declare({
-	object: 'luci.trafficctl',
-	method: 'ratelimit',
-	// rate_kbit_up is omitted for a symmetric limit rather than sent equal to
-	// rate_kbit: the backend reads absence as "same as download", and sending
-	// it always would make every record asymmetric-shaped on disk.
-	params: ['ip', 'rate_kbit', 'label', 'mode', 'rate_kbit_up']
-});
-
-var callRatelimitStats = rpc.declare({
-	object: 'luci.trafficctl',
-	method: 'ratelimit_stats',
-	expect: { result: [] }
-});
-
-var callSubnets = rpc.declare({
-	object: 'luci.trafficctl',
-	method: 'subnets',
-	expect: { result: [] }
-});
-
-var callShapeAdd = rpc.declare({
-	object: 'luci.trafficctl',
-	method: 'shape_add',
-	params: ['ip', 'rate_kbit', 'label', 'rate_kbit_up']
-});
-
-var callShapeRemove = rpc.declare({
-	object: 'luci.trafficctl',
-	method: 'shape_remove',
-	params: ['ip', 'label']
-});
-
-var callShapeStats = rpc.declare({
-	object: 'luci.trafficctl',
-	method: 'shape_stats',
-	expect: { result: [] }
-});
-
-
-var callNetifyList = rpc.declare({
-	object: 'luci.trafficctl',
-	method: 'netify_list',
-	expect: { result: [] }
-});
-
-var callNameSet = rpc.declare({
-	object: 'luci.trafficctl',
-	method: 'name_set',
-	params: ['ip', 'name']
-});
-
-
-
-
-var callLoggingGet = rpc.declare({
-	object: 'luci.trafficctl',
-	method: 'logging_config_get'
-});
-
-var callLoggingSet = rpc.declare({
-	object: 'luci.trafficctl',
-	method: 'logging_config_set',
-	params: ['enabled', 'log_file', 'max_lines', 'syslog',
-		'log_blocks', 'log_ratelimits', 'log_shapes', 'log_telegram', 'log_config', 'persist_rules']
-});
-
-var callNewDeviceGet = rpc.declare({
-	object: 'luci.trafficctl',
-	method: 'newdevice_config_get'
-});
-
-var callNewDeviceSet = rpc.declare({
-	object: 'luci.trafficctl',
-	method: 'newdevice_config_set',
-	params: ['enabled', 'limit_kbit', 'limit_mode']
-});
-
-// Global internet cut. cut_status is a write method even though it reads:
-// it reconciles the auto-revert deadline and revives a dead keeper, so that
-// the answer it gives about live nft state is one the UI can trust.
-var callCutStatus = rpc.declare({
-	object: 'luci.trafficctl',
-	method: 'cut_status'
-});
-
-var callCutSet = rpc.declare({
-	object: 'luci.trafficctl',
-	method: 'cut_set',
-	params: ['active', 'duration', 'persist']
-});
-
-var callActivityLog = rpc.declare({
-	object: 'luci.trafficctl',
-	method: 'activity_log',
-	params: ['lines']
-});
-var callVersion = rpc.declare({
-	object: 'luci.trafficctl',
-	method: 'version'
-});
-
-var callConfigSet = rpc.declare({
-	object: 'luci.trafficctl',
-	method: 'config_set',
-	// 【本仓库补丁】末尾追加 refresh_interval：让「Save as router default」
-	// 能把当前刷新间隔一并写为路由端默认值（默认 5 秒）。顺序必须与
-	// rpcd 的 config_set / callConfigSet 实参一一对应。
-	params: ['enabled', 'default_mode', 'sw', 'hw', 'poll_interval', 'avg_window', 'refresh_interval']
-});
-
-var callNetworkRrdnsLookup = rpc.declare({
-	object: 'network.rrdns',
-	method: 'lookup',
-	params: ['addrs', 'timeout', 'limit'],
-	expect: { '': {} }
-});
-
-var callConfigGet = rpc.declare({
-	object: 'luci.trafficctl',
-	method: 'config_get'
-});
+// 【本仓库改动】以下 rpc 声明已移入 trafficctl/common.js（设置页共用同一份）。
+// 用别名接回原名字，正文所有调用点保持不变。
+var callTrafficctl        = T.trafficctl;
+var callDevice            = T.device;
+var callBytes             = T.bytes;
+var callIfaces            = T.ifaces;
+var callBlock             = T.block;
+var callUnblock           = T.unblock;
+var callMacfilterAdd      = T.macfilterAdd;
+var callMacfilterRemove   = T.macfilterRemove;
+var callRatelimit         = T.ratelimit;
+var callRatelimitStats    = T.ratelimitStats;
+var callSubnets           = T.subnets;
+var callShapeAdd          = T.shapeAdd;
+var callShapeRemove       = T.shapeRemove;
+var callShapeStats        = T.shapeStats;
+var callNetifyList        = T.netifyList;
+var callNameSet           = T.nameSet;
+var callLoggingGet        = T.loggingGet;
+var callLoggingSet        = T.loggingSet;
+var callNewDeviceGet      = T.newDeviceGet;
+var callNewDeviceSet      = T.newDeviceSet;
+// Global internet cut. cut_status 是写方法：它会同时对自动回滚的截止时间做一次
+// 核对，并唤醒已停摆的 keeper，故它给出的「当前 nft 规则是否真的在」才可信。
+var callCutStatus         = T.cutStatus;
+var callCutSet            = T.cutSet;
+var callActivityLog       = T.activityLog;
+var callVersion           = T.version;
+var callConfigSet         = T.configSet;
+var callNetworkRrdnsLookup = T.networkRrdnsLookup;
+var callConfigGet         = T.configGet;
 
 var RATE_PRESETS = [
 	{v:'0',      l: _('Off')},
@@ -254,50 +108,19 @@ var GROUP_OPTS = [
 	{v:'proto',   l: _('Protocol')}
 ];
 
-// Router-wide defaults for a browser that has not chosen its own, read from
-// UCI at load (#12). The Poll and Window chips still win per-browser — these
-// only decide where a fresh session starts, which is the part an admin can
-// usefully set once for the router instead of once per person.
-//
-// Seeded with the same numbers the config ships so the dashboard behaves
-// identically before the rpc answers, and if the call fails.
-var siteDefaults = { pollInterval: 2, avgWindow: 15, refreshInterval: 5 };
-
-function loadOpts() {
-	try { return JSON.parse(window.localStorage.getItem(STORAGE_KEY) || '{}'); }
-	catch(e) { return {}; }
-}
-// 0 is a real choice here — "do not poll" — so an explicit undefined check,
-// not a falsy one.
-function optPoll(o) {
-	return (o && o.pollInterval !== undefined) ? o.pollInterval : siteDefaults.pollInterval;
-}
-function optWindow(o) {
-	return (o && o.avgWindow) ? o.avgWindow : siteDefaults.avgWindow;
-}
-// 整表自动刷新间隔（秒），0 = 关闭。
-//
-// 【本仓库补丁（相对上游 1.21.4）】
-//   上游的 `_setupTimer` 直接读 `loadOpts().refresh||0`，即**默认「关」**：
-//   冷启动打开页面后设备表完全不会自动刷新，用户必须手动点一次「所有设备」
-//   或切换设备才更新，观感就是「表格不自动刷新」。而「所有设备」页的核心
-//   用途正是实时监看，故本仓库把默认值改为 5 秒。
-//   与上游既有机制保持一致：默认值同样可由管理员经 UCI 的
-//   `trafficctl.main.refresh_interval` 下发（config_get 写入 siteDefaults），
-//   用户在界面上显式选「关」（保存 refresh=0）时仍尊重其选择。
-function optRefresh(o) {
-	return (o && o.refresh !== undefined) ? o.refresh : siteDefaults.refreshInterval;
-}
-function saveOpts(o) {
-	try { window.localStorage.setItem(STORAGE_KEY, JSON.stringify(o)); } catch(e) {}
-}
-function fmtBytes(b) {
-	if (b == null || isNaN(b)) return '—';
-	if (b < 1024) return b + ' B';
-	if (b < 1048576) return (b/1024).toFixed(1) + ' KB';
-	if (b < 1073741824) return (b/1048576).toFixed(2) + ' MB';
-	return (b/1073741824).toFixed(2) + ' GB';
-}
+// 【本仓库改动】选项存取与纯格式化函数已移入 trafficctl/common.js
+// （设置页要用同一份，否则同一档位在两页的默认值会不一致）。
+// 用别名接回原名字，正文调用点不变。
+var siteDefaults = T.siteDefaults;
+var loadOpts     = T.loadOpts;
+var saveOpts     = T.saveOpts;
+var optPoll      = T.optPoll;
+var optWindow    = T.optWindow;
+var optRefresh   = T.optRefresh;
+var fmtBytes     = T.fmtBytes;
+var fmtSpeed     = T.fmtSpeed;
+var fmtRate      = T.fmtRate;
+var escHtml      = T.escHtml;
 // The Bytes / TCP / UDP columns show a LIFETIME total accumulated on the
 // router by trafficctl-totals.sh, not the live conntrack sums they used to
 // show. conntrack only accounts for flows that still exist, so the old numbers
@@ -343,21 +166,6 @@ function renderTotalCell(cell, total, liveVal, since, pending, degraded) {
 	cell.title = tip;
 }
 
-function fmtSpeed(bps) {
-	if (!bps || bps < 1) return '—';
-	var bits = bps * 8;
-	if (bits < 1000) return bits.toFixed(0) + ' bit/s';
-	if (bits < 1000000) { var k = bits/1000; return (k % 1 === 0 ? k.toFixed(0) : k.toFixed(1)) + ' Kbit/s'; }
-	if (bits < 1000000000) { var m = bits/1000000; return (m % 1 === 0 ? m.toFixed(0) : m.toFixed(1)) + ' Mbit/s'; }
-	var g = bits/1000000000; return (g % 1 === 0 ? g.toFixed(0) : g.toFixed(2)) + ' Gbit/s';
-}
-function fmtRate(kbit) {
-	if (!kbit || kbit <= 0) return '—';
-	var mbit = kbit / 1000;
-	if (mbit >= 1) return (mbit % 1 === 0 ? mbit.toFixed(0) : mbit.toFixed(1)) + ' Mbit/s';
-	return kbit + ' kbit/s';
-}
-
 // Render a "↓ down / ↑ up" speed cell. Both halves come from the same
 // bytes_in/bytes_out sample, so they are always consistent with each other.
 function renderSpeedCell(cell, sd) {
@@ -373,8 +181,11 @@ function renderSpeedCell(cell, sd) {
 	cell.appendChild(document.createTextNode(fmtSpeed(sd.current)));
 }
 
-function escHtml(s) {
-	return String(s).replace(/&/g,'&amp;').replace(/</g,'&lt;').replace(/>/g,'&gt;').replace(/"/g,'&quot;');
+// 主机实时连接详情页的地址。该路由（admin/status/trafficctl/host/<ip>）在
+// menu.d 里刻意**不设 title**：可直达、可收藏、可后退，但不会在侧边栏多出
+// 一个永远点不开的菜单项。
+function hostDetailUrl(ip) {
+	return L.url('admin/status/trafficctl/host') + '/' + encodeURIComponent(ip);
 }
 
 // Manual device naming. Routed devices (behind a downstream router) have no
@@ -914,13 +725,20 @@ function mkTopTalkers(speedMap, nameByIp) {
 		body.appendChild(E('div', { 'class': 'tc-c-faint tc-ov-empty' }, _('No active devices')));
 		return body;
 	}
+	// 每一条都指向该主机的实时连接详情页（点击主机名或 IP）。
+	// 入口只做导航，不改变这一列表「谁正在占用带宽」的原意：速率与排序不动。
 	var peak = list[0].total || 1;
 	list.forEach(function(t) {
 		var label = nameByIp[t.ip] && nameByIp[t.ip] !== '*' ? nameByIp[t.ip] : t.ip;
 		var pct = Math.max(2, Math.round((t.total / peak) * 100));
 		body.appendChild(E('div', { 'class': 'tc-ov-talker' }, [
 			E('div', { 'class': 'tc-ov-talker-head' }, [
-				E('span', { 'class': 'tc-ov-talker-name', 'title': t.ip }, label),
+				E('span', { 'class': 'tc-ov-talker-name', 'title': _('Open host details') + ' — ' + t.ip }, [
+					E('a', { 'class': 'tc-link', 'href': hostDetailUrl(t.ip) }, label),
+					label !== t.ip
+						? E('a', { 'class': 'tc-link tc-ov-talker-ip tc-c-muted', 'href': hostDetailUrl(t.ip) }, t.ip)
+						: ''
+				]),
 				E('span', { 'class': 'tc-mono tc-ov-talker-rate' }, [
 					E('span', { 'class': 'tc-c-speed' }, '↓ ' + fmtSpeed(t.down)),
 					E('span', { 'class': 'tc-c-ok tc-ov-talker-up' }, '↑ ' + fmtSpeed(t.up))
@@ -945,8 +763,15 @@ function mkOvTile(caption, value, sub, colourClass) {
 // Builds the whole panel. Pure function of the state handed to it — it owns no
 // timer and no listener outside the nodes it returns, so dropping the element
 // is a complete teardown.
-function buildOverviewPanel(ifaces, ifHistory, speedMap, nameByIp, showOther, onToggleOther, pollOff) {
-	var wrap = E('div', { 'class': 'tc-overview' });
+// graphWidth: 上联图的实际绘制宽度（由调用方按容器量得）。
+//   此前写死 560px，而容器实测 1259px —— 图只占左半，右侧一大片空。
+//   不能用 CSS `width:100%` 拉伸：SVG 带 viewBox，等比放大 2.25 倍会把
+//   坐标轴与刻度文字一起放大，字号失控。故按真实宽度重绘。
+function buildOverviewPanel(ifaces, ifHistory, speedMap, nameByIp, showOther, onToggleOther, pollOff, graphWidth) {
+	// 卡片外壳（边框/底色/内边距）由调用方的 .tc-overview 承担 —— 统计条
+	// （活跃/已阻断/WiFi）也是那张卡片的抬头。这里只返回卡片**内容**，
+	// 否则会套出两层边框。
+	var wrap = E('div', { 'class': 'tc-ov-body' });
 	if (!ifaces || !ifaces.length) {
 		wrap.appendChild(E('div', { 'class': 'tc-c-faint tc-ov-empty' },
 			_('Collecting interface counters…')));
@@ -981,7 +806,18 @@ function buildOverviewPanel(ifaces, ifHistory, speedMap, nameByIp, showOther, on
 	// would be counted twice, and on two independent uplinks the sum is a
 	// number that describes neither link. Multi-WAN aggregation is issue #28.
 	var graphBox = E('div', { 'class': 'tc-ov-graph' });
-	var w = 560;
+	// 用容器实测宽度；拿不到时（首帧、隐藏）退回 560。
+	// 传入的是**外层**宽度，这里要扣掉 wrap 自身的内边距与边框，否则图会比
+	// 绘图区宽 26px（实测 .tc-overview 左右各 12px padding + 1px border）。
+	// 扣除值用 getComputedStyle 读，不写死像素 —— 改 CSS 时不会悄悄失配。
+	var avail = 0;
+	if (graphWidth) {
+		var cs = window.getComputedStyle(wrap);
+		avail = graphWidth - (parseFloat(cs.paddingLeft) || 0) - (parseFloat(cs.paddingRight) || 0)
+			- (parseFloat(cs.borderLeftWidth) || 0) - (parseFloat(cs.borderRightWidth) || 0);
+	}
+	// height 固定 150：宽度变大只影响横向分辨率，不把图拉高。
+	var w = Math.max(320, Math.round(avail || 560));
 	var svg = renderFullGraph(primaryHist, 0, w, 150);
 	if (svg) {
 		graphBox.appendChild(svg);
@@ -1152,7 +988,7 @@ function buildGroupedTable(groups, sortCol, sortDir) {
 		]);
 	});
 
-	return E('div', { 'class': 'table tc-table' }, [titleRow].concat(rows));
+	return E('div', { 'class': 'table tc-table tc-table--center' }, [titleRow].concat(rows));
 }
 
 function buildTable(conns, sortCol, sortDir, rdnsMode, hiddenCols) {
@@ -1214,31 +1050,82 @@ function buildTable(conns, sortCol, sortDir, rdnsMode, hiddenCols) {
 		return E('div', { 'class': 'tr' }, cells);
 	});
 
-	return E('div', { 'class': 'table tc-table' }, [titleRow].concat(rows));
+	// 连接表同样居中（与设备表口径一致）。
+	return E('div', { 'class': 'table tc-table tc-table--center' }, [titleRow].concat(rows));
 }
 
-function buildSummaryTable(rows, sortCol, sortDir, onSort, onSelect, speedMap, dropMap, shapeMap, speedHistory, hiddenCols) {
+// 默认隐藏的列。**必须与 cols 里的 hide 标记一致**，且单独提到模块级 ——
+// 表格构建（buildSummaryTable）与列开关（colChipDefs 那段）都要用它，
+// 两处各写一份必然漂移：芯片显示「已打开」而表格不渲染该列，就是漂移的症状。
+//
+// 这些列是为排障准备的细分数据（协议拆分、丢弃、队列深度、链路类型等），
+// 平时挤在一行会把「谁在占带宽」这件事淹掉，故默认关闭、按需在「可见列」里打开。
+var TC_COL_DEFAULT_HIDDEN = {
+	mac: true, _spark: true, total: true,
+	conn_type: true, app: true,
+	_drop_packets: true, _backlog: true
+};
+
+// 某列当前是否隐藏。用户的显式选择（localStorage 里存了这个键）优先；
+// 没存过则用上面的默认值。
+//
+// 【关键】不能只判断「键是否存在」就当作已隐藏 —— 芯片把列**打开**时若用
+// `delete` 删掉键，这里就会回落到默认隐藏，于是「打开」看起来毫无作用
+// （实测踩过：芯片变绿、列不出来）。故调用方打开列时必须写显式 `false`。
+function isColHidden(key, hiddenCols) {
+	if (!hiddenCols) return !!TC_COL_DEFAULT_HIDDEN[key];
+	if (Object.prototype.hasOwnProperty.call(hiddenCols, key)) return !!hiddenCols[key];
+	return !!TC_COL_DEFAULT_HIDDEN[key];
+}
+
+function buildSummaryTable(rows, sortCol, sortDir, onSort, onSelect, speedMap, dropMap, shapeMap, speedHistory, hiddenCols, onLimit) {
+	// 【本仓库改动】列按爱快设备列表的形状重排，并把「每行两行显示」落实为
+	//   合并列：IP/MAC 一列内上下两行、终端类型/厂商一列内上下两行、操作一列
+	//   内上下两行链接。三处合并省掉 3 个独立列宽（实测每列 100~150px），
+	//   16 列压到 9 列后不再需要横向滚动即可读全。
+	//   默认可见即此 9 列；其余（TCP/UDP/丢弃/队列/图表/字节总量等）保留为
+	//   「可见列」里的开关，默认隐藏 —— 它们是为排障准备的细分数据，
+	//   平时挤在一行只会把「谁在占带宽」这件事淹掉。
 	var cols = [
-		{ key:'name',             label: _('Device'),   num:false, tip: _('Device hostname from DHCP lease') },
-		{ key:'ip',               label:'IP',           num:false, tip: _('Local IP address') },
-		{ key:'mac',              label:'MAC',          num:false, tip: _('Hardware MAC address'), hide:true },
-		{ key:'_speed',           label: _('DL Speed'), num:true,  tip: _('Current download speed (bytes/sec from router to device)') },
-		{ key:'_speed_up',        label: _('UL Speed'), num:true,  tip: _('Current upload speed (bytes/sec from device to router)') },
-		{ key:'_spark',           label: '',            num:false, tip: _('Speed graph. Window = avg time. Orange dashed line = speed limit') },
-		{ key:'conns',            label: _('Conns'),    num:true,  tip: _('Active connections in conntrack') },
-		{ key:'total',            label: _('Bytes'),    num:true,  tip: _('Total bytes transferred (download + upload), accumulated on the router. Resets on reboot; hover a cell for the start time'), hide:true },
-		{ key:'tcp',              label:'TCP',          num:true,  tip: _('TCP bytes transferred, accumulated on the router. Not measurable while flow offload is active'), hide:true },
-		{ key:'udp',              label:'UDP',          num:true,  tip: _('UDP bytes transferred, accumulated on the router. Not measurable while flow offload is active'), hide:true },
-		{ key:'blocked',          label: _('Inet'),     num:false, tip: _('Internet access status (paused = traffic blocked)') },
-		{ key:'conn_type',        label: _('Link'),     num:false, tip: _('Connection interface (WiFi band, LAN port or routed)') },
-		{ key:'app',              label: _('App'),      num:false, tip: _('Top application by traffic (needs the netifyd DPI agent)') },
-		{ key:'_throttle_kbit',   label: _('Limit'),            num:true,  tip: _('Speed limit: shaper (queue) or limiter (drop)') },
-		{ key:'_drop_packets',    label: _('Drop'),           num:true,  tip: _('Packets dropped by rate limiter'), hide:true },
-		{ key:'_backlog',         label: '📦',           num:true,  tip: _('Bytes queued in traffic shaper'), hide:true }
+		// IP 与 MAC 是同一台设备的两个标识，分开成两列要在两列间来回找；
+		// 合并后上行 IP、下行 MAC（小字、灰色）。
+		{ key:'ip',             label:'IP / MAC',        num:false, tip: _('Local IP address — the hardware MAC is shown below it') },
+		// 保留 mac 作为独立列，供仍想单列看 MAC 的人打开。默认隐藏 ——
+		// 它已并入 IP 列的第二行，再单列一份就是同一串 MAC 显示两次。
+		{ key:'mac',            label:'MAC',             num:false, tip: _('Hardware MAC address') },
+		{ key:'conns',          label: _('Conns'),       num:true,  tip: _('Active connections in conntrack') },
+		// 顺序与参照图一致：先上行速率、再下行速率，然后累计上行、累计下行。
+		{ key:'_speed_up',      label: _('UL Speed'),    num:true,  tip: _('Current upload speed (bytes/sec from device to router)') },
+		{ key:'_speed',         label: _('DL Speed'),    num:true,  tip: _('Current download speed (bytes/sec from router to device)') },
+		{ key:'_total_up',      label: _('Total UL'),    num:true,  tip: _('Total bytes this device has uploaded, accumulated on the router. Resets on reboot; hover a cell for the start time') },
+		{ key:'_total_dn',      label: _('Total DL'),    num:true,  tip: _('Total bytes this device has downloaded, accumulated on the router. Resets on reboot; hover a cell for the start time') },
+		// 一列两行：上行为识别的终端类型，下行为 MAC 前缀对应的厂商（OUI）。
+		{ key:'_tydev',         label: _('Type / Vendor'), num:false, tip: _('Detected device type, with the vendor looked up from the MAC address below it') },
+		{ key:'name',           label: _('Name'),        num:false, tip: _('Device hostname from DHCP lease, or the name you set') },
+		{ key:'_actions',       label: _('Actions'),     num:false, tip: _('Open the host detail page, or target this device with the speed limit') },
+		// ── v0.6.8 起默认显示（按用户指定顺序：TCP | UDP | 互联网 | 限制）────
+		//   这四列原先默认隐藏、要在「可见列」里逐个打开。它们回答的是
+		//   「这台设备在用什么、有没有被限住」，属于日常判断的一部分，
+		//   藏起来等于每次都要先开一遍。
+		{ key:'tcp',            label:'TCP',             num:true,  tip: _('TCP bytes transferred, accumulated on the router. Not measurable while flow offload is active') },
+		{ key:'udp',            label:'UDP',             num:true,  tip: _('UDP bytes transferred, accumulated on the router. Not measurable while flow offload is active') },
+		{ key:'blocked',        label: _('Inet'),        num:false, tip: _('Internet access status (paused = traffic blocked)') },
+		{ key:'_throttle_kbit', label: _('Limit'),       num:true,  tip: _('Speed limit: shaper (queue) or limiter (drop)') },
+		// ── 以下默认隐藏，按需在「可见列」里打开 ──────────────────────────
+		// 默认隐藏由模块级 TC_COL_DEFAULT_HIDDEN 统一声明（不要在这里再写
+		// hide:true —— 两份真相必然漂移：芯片显示已打开而表格不渲染该列）。
+		{ key:'_spark',         label: '',               num:false, tip: _('Speed graph. Window = avg time. Orange dashed line = speed limit') },
+		{ key:'total',          label: _('Bytes'),       num:true,  tip: _('Total bytes transferred (download + upload), accumulated on the router. Resets on reboot; hover a cell for the start time') },
+		{ key:'conn_type',      label: _('Link'),        num:false, tip: _('Connection interface (WiFi band, LAN port or routed)') },
+		{ key:'app',            label: _('App'),         num:false, tip: _('Top application by traffic (needs the netifyd DPI agent)') },
+		{ key:'_drop_packets',  label: _('Drop'),        num:true,  tip: _('Packets dropped by rate limiter') },
+		{ key:'_backlog',       label: '📦',              num:true,  tip: _('Bytes queued in traffic shaper') }
 	];
 
 	hiddenCols = hiddenCols || {};
-	var visibleCols = cols.filter(function(c) { return !hiddenCols[c.key]; });
+	// 哪些列默认隐藏由 TC_COL_DEFAULT_HIDDEN 统一决定；用户在「可见列」里的
+	// 显式选择（已存进 localStorage）优先于它 —— 由 isColHidden 统一判定。
+	var visibleCols = cols.filter(function(c) { return !isColHidden(c.key, hiddenCols); });
 
 	function ipToInt(s) {
 		var p = String(s||'').split('.');
@@ -1320,9 +1207,32 @@ function buildSummaryTable(rows, sortCol, sortDir, onSort, onSelect, speedMap, d
 			});
 		});
 		cellMap.name = E('div', { 'class': 'td tc-fw-bold tc-c-speed tc-name-cell' }, [nameText, renameBtn]);
-		cellMap.ip   = E('div', { 'class': 'td tc-mono' }, escHtml(r.ip));
+		// 设备名与 IP 都是进入该主机实时连接详情页的入口。链接本身
+		// stopPropagation，否则点它会连带触发整行的「选中该设备」。
+		cellMap.name.appendChild(E('a', {
+			'class': 'tc-host-link', 'href': hostDetailUrl(r.ip),
+			'title': _('Open host details'),
+			'onclick': 'event.stopPropagation()'
+		}, '↗'));
 		var macEl = r.mac ? E('a', { 'href':'/cgi-bin/luci/admin/network/dhcp','target':'_blank','rel':'noopener','class':'tc-link','title':_('Open DHCP/DNS bindings'),'onclick':'event.stopPropagation()' }, r.mac) : '';
 		cellMap.mac  = E('div', { 'class': 'td tc-mono tc-sm tc-c-muted' }, macEl || '');
+		// 【本仓库改动】IP 列改为「两行式」：上行为 IP（详情页入口），下行为 MAC
+		//   （小字灰色，仍链到 DHCP/DNS 绑定页）。MAC 单列已无内容可放，
+		//   故默认隐藏（见 cols 里的 mac.hide），避免同一串 MAC 在一行里出现两次。
+		var macLine = r.mac
+			? E('div', {'class':'tc-cell-sub'}, E('a', {
+				'href':'/cgi-bin/luci/admin/network/dhcp','target':'_blank','rel':'noopener',
+				'class':'tc-link','title':_('Open DHCP/DNS bindings'),'onclick':'event.stopPropagation()'
+			}, escHtml(r.mac)))
+			: E('div', {'class':'tc-cell-sub tc-c-faint'}, '—');
+		cellMap.ip = E('div', { 'class': 'td tc-mono tc-cell-stack' }, [
+			E('a', {
+				'class': 'tc-link', 'href': hostDetailUrl(r.ip),
+				'title': _('Open host details'),
+				'onclick': 'event.stopPropagation()'
+			}, escHtml(r.ip)),
+			macLine
+		]);
 
 		// Down and up are measured separately (bytes_in / bytes_out); showing
 		// only the download half hid the entire upload side of every device.
@@ -1351,6 +1261,49 @@ function buildSummaryTable(rows, sortCol, sortDir, onSort, onSelect, speedMap, d
 		renderTotalCell(cellMap.total, r.total, r._live_total, r._total_since, r._total_pending, r._total_degraded);
 		renderTotalCell(cellMap.tcp,   r.tcp,   r._live_tcp,   r._total_since, r._total_pending, r._total_degraded);
 		renderTotalCell(cellMap.udp,   r.udp,   r._live_udp,   r._total_since, r._total_pending, r._total_degraded);
+
+		// 【本仓库改动】累计上行 / 累计下行分列显示（参照图的「累计上行」「累计下行」）。
+		//   这两个数来自 trafficctl-totals.sh 的 bytes_out_total / bytes_in_total ——
+		//   方向语义已核对：bytes_in = 下行（路由器→设备）、bytes_out = 上行（设备→路由器）。
+		//   复用 renderTotalCell 以保持「降级/待采样」的三种状态一致；它按
+		//   data-* 属性被 updateTotalCells 增量重绘，故两列也会随轮询增长。
+		cellMap._total_up = E('div', { 'class': 'td tc-right tc-mono tc-sm', 'data-total-up-ip': r.ip });
+		cellMap._total_dn = E('div', { 'class': 'td tc-right tc-mono tc-sm', 'data-total-dn-ip': r.ip });
+		renderTotalCell(cellMap._total_up, r._total_up, r._live_up, r._total_since, r._total_pending, r._total_degraded);
+		renderTotalCell(cellMap._total_dn, r._total_dn, r._live_dn, r._total_since, r._total_pending, r._total_degraded);
+
+		// 【本仓库改动】终端类型 / 设备厂商：一列两行。
+		//   类型由 guessDeviceType() 依主机名推断（本机无 WiFi 硬件，无法从
+		//   关联表判断，故与既有逻辑一致地按名称推断）；厂商取 MAC 前缀的 OUI，
+		//   由固件内的 luci-app-oui（luciOUI.decorate）异步填充 —— 它只有
+		//   decorate 没有公开 lookup，故建一个游离节点让 it 写入 title/src 再读回。
+		//   拿不到厂商时保留占位，不会把行撑高（两行结构始终存在）。
+		var devType = guessDeviceType(r);
+		var typeLine = E('div', {'class':'tc-cell-main'}, [deviceIcon(devType, 14), document.createTextNode(' ' + devTypeLabel(devType))]);
+		var vendorLine = E('div', {'class':'tc-cell-sub tc-c-faint', 'data-vendor-mac': r.mac || ''}, '—');
+		cellMap._tydev = E('div', { 'class': 'td tc-cell-stack' }, [typeLine, vendorLine]);
+		if (r.mac) fillVendor(vendorLine, r.mac);
+
+		// 【本仓库改动】操作列：一列两行链接（详情 / 限速）。
+		var actDetail = E('a', {
+			'class': 'tc-link', 'href': hostDetailUrl(r.ip),
+			'title': _('Open host details'),
+			'onclick': 'event.stopPropagation()'
+		}, _('Details'));
+		var actLimit = E('a', {
+			'class': 'tc-link', 'href': 'javascript:void(0)',
+			'title': _('Set this device\'s speed limit'),
+			'onclick': 'event.stopPropagation()'
+		}, _('Limit'));
+		actLimit.addEventListener('click', function(ev) {
+			ev.stopPropagation();
+			// 【本仓库改动 v0.6.9】原来只是把目标设为该设备、再让用户滚回卡片
+			//   去点速率 —— 两步且要来回找。现直接在这台设备旁弹出限速设置。
+			//   找不到回调时退回旧行为（选中该设备），不至于点了没反应。
+			if (typeof onLimit === 'function') onLimit(actLimit, r.ip, r.name);
+			else onSelect(r.ip, r.name);
+		});
+		cellMap._actions = E('div', { 'class': 'td tc-actions tc-cell-stack' }, [actDetail, actLimit]);
 
 		var inetBadge = r.blocked
 			? E('span', { 'class': 'tc-c-warn tc-fw-bold' }, '⏸ ' + _('blocked'))
@@ -1430,13 +1383,69 @@ function buildSummaryTable(rows, sortCol, sortDir, onSort, onSelect, speedMap, d
 		return row;
 	});
 
-	return E('div', { 'class': 'table tc-table tc-table--rows-clickable' }, [titleRow].concat(tableRows));
+	// 【本仓库改动】表头与单元格一律居中对齐（.tc-table--center）。
+	//   原先表头左对齐、数字列右对齐、文字列左对齐 —— 三种对齐混在一行里，
+	//   设备多时列与列之间看起来是错位的。统一居中后每列的标题与内容落在
+	//   同一条中轴上。
+	//   注意只加在**真正的表格**上：扩展统计面板（buildExtendedStatsPanel）
+	//   也用 .tc-table，但它是「标签 — 数值」两栏行，居中会读不成列表。
+	var tblEl = E('div', { 'class': 'table tc-table tc-table--rows-clickable tc-table--center' }, [titleRow].concat(tableRows));
+	// 【本仓库改动】列宽改由**这里按每列的最小可用宽度**算出来，不再只靠 CSS
+	//   里的百分比。原因：百分比是「占表宽的比例」，列一多（用户可在「可见列」
+	//   里把 11 个隐藏列全开，最多 20 列）各列比例被摊薄 —— 实测图表 / 限制 /
+	//   丢弃 / 队列四列被压到 **11px**，MAC 被挤成三行。
+	//   做法：给每列一个最小像素预算，总和即表的 min-width；每列的百分比按
+	//   「预算 / 总和」得出。于是：
+	//     · 容器窄于总和 → 表取 min-width，每列恰好拿到自己的预算，横向滚动；
+	//     · 容器宽于总和 → 表铺满容器，各列按同一比例变大（自然拉伸）。
+	//   两种情形都不会出现「某列被摊到 11px」。
+	var COL_MIN_PX = {
+		ip: 150, mac: 130, conns: 58,
+		_speed: 84, _speed_up: 84, _total_up: 84, _total_dn: 84,
+		total: 78, tcp: 78, udp: 78,
+		_tydev: 130, name: 170, _actions: 76,
+		_spark: 70, blocked: 70, conn_type: 82, app: 88,
+		_throttle_kbit: 78, _drop_packets: 64, _backlog: 64
+	};
+	var totalMin = 0;
+	visibleCols.forEach(function(c) { totalMin += (COL_MIN_PX[c.key] || 80); });
+	tblEl.style.minWidth = Math.max(860, totalMin) + 'px';
+	// 百分比之和恰为 100%，故 fixed 布局没有「余量按比例摊分」的问题。
+	visibleCols.forEach(function(c, i) {
+		var px = COL_MIN_PX[c.key] || 80;
+		var pct = (px / totalMin * 100);
+		titleRow.children[i].style.width = pct.toFixed(3) + '%';
+	});
+	return tblEl;
 }
 
 function setStatus(el, type, msg) {
 	var cls = {loading: '', ok: 'success', error: 'error', action: 'warning'};
 	el.className = 'alert-message ' + (cls[type] || '');
 	el.innerHTML = type === 'loading' ? '<span class="tc-spinner"></span>'+escHtml(msg) : escHtml(msg);
+	// 任何**动作**写的状态都会摘掉「例行轮询错误」标记 —— 见 clearRoutineStatus()。
+	// 不摘的话，动作成功消息会被下一次例行成功轮询当成自己的旧错误清掉。
+	el.removeAttribute('data-routine');
+}
+
+// 例行轮询专用的状态写入器（v0.6.7）。
+// 例行轮询（runAll / runSingle）此前每秒往状态行写「扫描所有设备中…」→「✓ 完成」，
+// 1 秒档位下这一行不停地闪 —— 它是**噪声**，不是信息：轮询本来就该是看不见的。
+// 现在例行轮询**只在失败时**写状态；成功时若上一行是它自己的错误，就清掉。
+// 动作类反馈（限速/切断/WiFi 黑名单）仍走 setStatus，逐字保留 —— 那些是
+// 用户主动触发、必须看到结果的操作，不能与轮询噪声一起被删。
+function setRoutineStatus(el, type, msg) {
+	if (type === 'error') {
+		setStatus(el, type, msg);
+		el.setAttribute('data-routine', '1');
+		return;
+	}
+	// 成功：只清理**本函数之前写下的**错误，不碰动作消息。
+	if (el.getAttribute('data-routine') === '1') {
+		el.className = 'alert-message tc-hidden';
+		el.innerHTML = '';
+		el.removeAttribute('data-routine');
+	}
 }
 
 function updateUrlParams(opts) {
@@ -1447,7 +1456,7 @@ function updateUrlParams(opts) {
 	if (opts.avgWindow && opts.avgWindow !== siteDefaults.avgWindow) params.set('avg', String(opts.avgWindow));
 	if (opts.avgMethod && opts.avgMethod !== 'simple') params.set('method', opts.avgMethod);
 	if (opts.extendedStats) params.set('extended', '1');
-	if (opts.showOverview) params.set('overview', '1');
+	// 【v0.6.8】不再写 overview 参数：概览已常显，没有开关可记。
 	if (opts.rdns) params.set('rdns', '1');
 	var newUrl = window.location.pathname + (params.toString() ? '?' + params.toString() : '');
 	// Selecting a different device is a real navigation step, so push it and let
@@ -1469,7 +1478,6 @@ function applyUrlParams(opts) {
 	var paramAvg = urlParams.get('avg');
 	var paramMethod = urlParams.get('method');
 	var paramExtended = urlParams.get('extended');
-	var paramOverview = urlParams.get('overview');
 	var paramRdns = urlParams.get('rdns');
 
 	if (paramIp) opts.lastIp = paramIp;
@@ -1478,7 +1486,8 @@ function applyUrlParams(opts) {
 	if (paramAvg) opts.avgWindow = parseInt(paramAvg) || siteDefaults.avgWindow;
 	if (paramMethod && (paramMethod === 'ewma' || paramMethod === 'simple')) opts.avgMethod = paramMethod;
 	if (paramExtended === '1') opts.extendedStats = true;
-	if (paramOverview === '1') opts.showOverview = true;
+	// 【v0.6.8】概览已常显。旧的 `?overview=1` 链接不再需要，但也不能因此
+	//   报错或改变行为 —— 直接读掉忽略即可（loadOpts 会剥掉它）。
 	if (paramRdns === '1') opts.rdns = true;
 	return opts;
 }
@@ -1638,6 +1647,65 @@ function deviceIcon(type, size) {
 		network: '🌐', device:  '⬡'
 	};
 	return E('span', {'style':'font-size:'+(size||18)+'px;line-height:1'}, icons[type] || icons.device);
+}
+
+// 终端类型的中文名，用于「终端类型 / 厂商」列的第一行。
+// 与 deviceIcon 的键一一对应；漏一个就会显示英文键名。
+function devTypeLabel(type) {
+	var labels = {
+		phone:   _('Phone'),    tablet:  _('Tablet'), tv:      _('TV'),
+		laptop:  _('Laptop'),   desktop: _('Desktop'), speaker: _('Speaker'),
+		camera:  _('Camera'),   printer: _('Printer'), network: _('Network'),
+		device:  _('Device')
+	};
+	return labels[type] || labels.device;
+}
+
+// 由 MAC 前缀查设备厂商，写入 el 的文本。
+//
+// 数据来自固件随包安装的 luci-app-oui（实测 100 KB 厂商库，能查到
+// Xiaomi / Midea 等）。但它只导出 decorate / setDevices，**没有公开的
+// lookup**，故这里建一个游离节点让 decorate 把厂商写进 icon.title，再读回来。
+//
+// 三种结果都要与「还没查出来」区分开，否则一列 '—' 分不清是没查到还是仍在查：
+//   厂商名（Xiaomi）/ 'Private MAC'（随机化 MAC，无厂商可查）/ 保持 '—'（查不到）。
+// 本机无 luci-app-oui 时 decorate 不存在，此处静默保持 '—'，不抛错 ——
+// 它是锦上添花的列，不该让设备表整块渲染失败。
+function fillVendor(el, mac) {
+	if (!mac) return;
+	function doFill() {
+		try {
+			var probe = E('div', {});
+			window.luciOUI.decorate(probe, mac);
+			var icon = probe.querySelector('.luci-oui-icon');
+			var title = icon && icon.title;
+			// decorate 先写 'Unknown vendor' 再异步覆盖，故要等一轮宏任务再读。
+			setTimeout(function() {
+				var ic2 = probe.querySelector('.luci-oui-icon');
+				var t2 = ic2 && ic2.title;
+				if (t2 && t2 !== 'Unknown vendor' && t2 !== 'Private MAC') {
+					el.textContent = t2;
+					el.title = t2 + ' (' + mac + ')';
+					el.classList.remove('tc-c-faint');
+				} else if (t2 === 'Private MAC') {
+					el.textContent = _('Private MAC');
+					el.title = _('This MAC is randomized by the client, so no vendor can be looked up.');
+				}
+			}, 400);
+		} catch (e) {
+			// 保持 '—'，不抛出：厂商列是附加信息。
+		}
+	}
+	if (window.luciOUI && window.luciOUI.decorate) {
+		doFill();
+		return;
+	}
+	// oui.js 未被任何视图加载过 —— 按需载入一次，失败也不影响表格。
+	var s = document.createElement('script');
+	s.src = '/luci-static/resources/oui/oui.js';
+	s.onload = doFill;
+	s.onerror = function() { /* 保持 '—' */ };
+	document.head.appendChild(s);
 }
 
 
@@ -1919,123 +1987,36 @@ return view.extend({
 		};
 		window.addEventListener('popstate', self._onPopState);
 
-		// Recent devices — functions defined at top level
-
-		// Quick-access bar: [All devices] + recent device chips
-		var quickBar = E('div', {'class':'tc-quick-bar'});
-
+		// 【本仓库改动 v0.6.9】「最近设备」chip 行已移除（用户框选要求删除）。
+		//   allBtn 保留，并改挂到 picker 行的搜索框**左侧**。
+		//   renderRecentChips 仍保留 —— addRecentDevice 依旧在记录访问历史，
+		//   只是不再有地方展示它（将来若要恢复，函数与存储都还在）。
 		var allBtn = E('span', {'class':'cbi-button cbi-button-action'}, ['📊 ', _('All devices')]);
 		allBtn.addEventListener('click', function() {
 			searchSelect.setValue('__all__', '');
 			onDeviceSelect('__all__');
 		});
-		quickBar.appendChild(allBtn);
-
-		var recentContainer = E('span', {'class':'tc-recent-container'});
-		quickBar.appendChild(recentContainer);
-
 
 		function renderRecentChips() {
-			while (recentContainer.firstChild) recentContainer.removeChild(recentContainer.firstChild);
-			var recent = getRecentDevices();
-			var currentIp = searchSelect.getValue();
-
 			// Update All button style
 			// cbi-button cbi-button-action has the active (filled) look by default;
 			// when a device is selected we switch to outline-only variant
+			var currentIp = searchSelect.getValue();
 			allBtn.className = currentIp === '__all__' ? 'cbi-button cbi-button-action' : 'cbi-button cbi-button-action cbi-button-action';
-
-			recent.forEach(function(entry) {
-				var ip = entry.ip || entry;
-				var storedName = entry.name;
-				var dev = devices.filter(function(d) { return d.ip === ip; })[0];
-				var label = (dev && dev.name) || storedName || ip;
-				var isActive = ip === currentIp;
-				var chip = E('span', {
-					'class': isActive ? 'tc-recent-chip tc-recent-chip--active' : 'tc-recent-chip',
-					'title': ip + (dev && dev.mac ? ' (' + dev.mac + ')' : '')
-				}, [
-					deviceIcon(guessDeviceType(dev || {name:label}), 12),
-					document.createTextNode(' ' + label)
-				]);
-				chip.addEventListener('click', function() {
-					var lbl = label !== ip ? label + '  —  ' + ip : ip;
-					searchSelect.setValue(ip, lbl);
-					onDeviceSelect(ip);
-				});
-				var removeBtn = E('span', {'class':'tc-recent-remove'}, '×');
-				removeBtn.addEventListener('click', function(ev) {
-					ev.stopPropagation();
-					var r = getRecentDevices().filter(function(x) { return (x.ip || x) !== ip; });
-					saveRecentDevices(r);
-					renderRecentChips();
-				});
-				chip.appendChild(removeBtn);
-				chip.addEventListener('mouseenter', function() { removeBtn.style.opacity = '1'; });
-				chip.addEventListener('mouseleave', function() { removeBtn.style.opacity = '0'; });
-				recentContainer.appendChild(chip);
-			});
 		}
 		renderRecentChips();
 
-		function mkToggle(id, label, checked, onChange) {
-			var cb = E('input', { 'type': 'checkbox', 'id': id, 'class': 'tc-toggle-input' });
-			cb.checked = !!checked;
-			cb.addEventListener('change', onChange);
-			var track = E('label', { 'class': 'tc-toggle', 'for': id });
-			return E('div', { 'class': 'tc-toggle-wrap' }, [
-				cb, track,
-				E('label', { 'for': id, 'style': 'cursor:pointer;font-size:12px;user-select:none;color:currentColor' }, label)
-			]);
-		}
-		function mkLabel(t) {
-			return E('span', { 'class': 'tc-inline-label' }, t);
-		}
+		// 【本仓库改动】控件实现在 trafficctl/common.js，这里只做转发，
+		// 保证设备页与设置页用的是同一套壳与同一套类名。
+		var mkToggle   = T.mkToggle;
+		var mkLabel    = T.mkLabel;
+		var mkChipPick = T.mkChipPick;
 
-		function mkChipPick(options, currentValue, onChange) {
-			var wrapper = E('span', {'style':'display:inline-flex;flex-wrap:wrap;gap:2px;align-items:center'});
-			var selected = currentValue;
-			var chips = [];
-			options.forEach(function(opt) {
-				var chip = E('span', {'class': opt.v === selected ? 'tc-chip tc-chip--active' : 'tc-chip'}, opt.l);
-				chip.addEventListener('click', function() {
-					selected = opt.v;
-					chips.forEach(function(c) { c.className = c._v === selected ? 'tc-chip tc-chip--active' : 'tc-chip'; });
-					onChange(opt.v);
-				});
-				chip._v = opt.v;
-				chips.push(chip);
-				wrapper.appendChild(chip);
-			});
-			return { el: wrapper, getValue: function() { return selected; }, setValue: function(v) { selected = v; chips.forEach(function(c) { c.className = c._v === v ? 'tc-chip tc-chip--active' : 'tc-chip'; }); } };
-		}
-
-		var showStats = mkToggle('tm-stats', _('Stats'), opts.showStats !== false, function() {
-			var o = loadOpts(); o.showStats = this.checked; saveOpts(o); updateUrlParams(o);
-			statsDiv.classList.toggle('tc-hidden', !this.checked);
-		});
-		var showConns = mkToggle('tm-conns', _('Connections'), opts.showConns !== false, function() {
-			var o = loadOpts(); o.showConns = this.checked; saveOpts(o); updateUrlParams(o);
-			connsDiv.classList.toggle('tc-hidden', !this.checked);
-		});
-		// Off by default: it costs one extra rpcd call per poll tick, so a user
-		// who never opens it never pays for it. The gate is read fresh in
-		// pollBytes() rather than cached, so unticking it stops the call on the
-		// very next tick.
-		var overviewCheck = mkToggle('tm-overview', _('Overview'), opts.showOverview, function() {
-			var o = loadOpts(); o.showOverview = this.checked; saveOpts(o); updateUrlParams(o);
-			overviewDiv.classList.toggle('tc-hidden', !this.checked || !isAllMode());
-			if (this.checked) {
-				pollIfaces();
-			} else {
-				// Drop the samples too — keeping them would show a stale graph
-				// with a gap in it when the panel is re-opened much later.
-				self._ifHistory = {};
-				self._ifBytes = {};
-				self._ifMeta = [];
-				while (overviewDiv.firstChild) { overviewDiv.removeChild(overviewDiv.firstChild); }
-			}
-		});
+		// 【本仓库改动 v0.6.9】「统计 / 连接 / 活动日志」三个开关已移除，三者**恒开**。
+		//   它们此前是滑动开关，但三个都是「关掉就少看一块信息」——用户实测
+		//   从不关它们，留着只是让人每次先确认一遍状态。开关行现在只剩
+		//   「扩展统计」与「反向DNS」两项（它们是真会改变第序读取行为）。
+		//   随之作废 showStats / showConns / showActivity 三个选项。
 		var rdnsCheck = mkToggle('tm-rdns', _('rDNS'), opts.rdns, function() {
 			var o = loadOpts(); o.rdns = this.checked; saveOpts(o); updateUrlParams(o);
 		});
@@ -2044,108 +2025,25 @@ return view.extend({
 			extStatsDiv.classList.toggle('tc-hidden', !this.checked);
 			if (this.checked) updateExtendedStats();
 		});
-		var activityCheck = mkToggle('tm-activity', _('Activity'), opts.showActivity, function() {
-			var o = loadOpts(); o.showActivity = this.checked; saveOpts(o);
-			activityDiv.classList.toggle('tc-hidden', !this.checked);
-			if (this.checked) {
-				if (!activityDiv._loaded) {
-					activityDiv._loaded = true;
-					loadActivityPanel(activityDiv);
-				}
-				setTimeout(function() { activityDiv.scrollIntoView({behavior:'smooth',block:'start'}); }, 100);
-			}
-		});
 
-		var overviewDiv = E('div', { 'class': opts.showOverview ? '' : 'tc-hidden' });
+		// 【本仓库改动 v0.6.7】统计条（活跃 / 已阻断 / WiFi）与上联概览合成**一张卡片**。
+		//   此前它们是两块：概览卡片（下载/上传/图表/接口/排行）下面另起一行窄条，
+		//   两者底部与表格之间又各占一段间距，视觉上是三块互不相干的东西，
+		//   而它们说的其实是同一件事（此刻网络的整体状况）。
+		//   注意两个开关是**独立**的（统计 / 概览），故卡片只是外壳，两个子块
+		//   各自显隐；卡片的可见性由「是否还有至少一个子块可见」决定 ——
+		//   否则会出现「只剩一个空边框」或「关掉概览连带关掉统计条」。
 		var extStatsDiv = E('div', { 'class': opts.extendedStats ? '' : 'tc-hidden' });
 		var deviceGraphDiv = E('div', { 'class': 'tc-device-graph tc-hidden' });
-		var activityDiv = E('div', { 'class': opts.showActivity ? '' : 'tc-hidden' });
+		// 恒显（v0.6.9）：这三个容器不再带 tc-hidden。
+		//   activityDiv 的内容要主动加载一次 —— 原先靠「活动日志」开关勾选时
+		//   才调 loadActivityPanel，开关没了就必须在首屏自己触发。
+		var activityDiv = E('div', {});
 
-		// 【本仓库补丁】默认值改由 optRefresh 决定（默认 5s，不再是「关」），
-		// 并新增 1s / 2s 档位 —— 用户明确要求「所有设备页最低按 1 秒刷新」，
-		// 用于实时监看。1s 会让 rpcd 每秒处理一次 summary+bytes，低性能设备
-		// 有负担，故仍保留 5s 作为默认，1s/2s 由用户按需选择。
-		var refreshPick = mkChipPick([
-			{v:'0',l:_('Off')},{v:'1',l:'1s'},{v:'2',l:'2s'},{v:'5',l:'5s'},
-			{v:'10',l:'10s'},{v:'30',l:'30s'},{v:'60',l:'60s'}
-		], String(optRefresh(opts)), function(v) {
-			var o = loadOpts(); o.refresh = parseInt(v); saveOpts(o); updateUrlParams(o);
-			self._setupTimer();
-			// 从「关」切回非 0 时立刻拉一次，不让用户白等一整个间隔
-			if (optRefresh(o) > 0) runQuery();
-		});
-
-		// 10s and 30s exist for the reason they were asked for: on a smaller
-		// router a 1s poll is a full conntrack read every second for numbers
-		// nobody is watching that closely.
-		var pollIntervalPick = mkChipPick([
-			{v:'0',l:_('Off')},{v:'1',l:'1s'},{v:'2',l:'2s'},{v:'5',l:'5s'},
-			{v:'10',l:'10s'},{v:'30',l:'30s'}
-		], String(optPoll(opts)), function(v) {
-			var o = loadOpts(); o.pollInterval = parseInt(v); saveOpts(o); updateUrlParams(o);
-			self._restartBytesPoll();
-		});
-
-		// Samples kept per device are window/poll, so the history sizes itself
-		// to the window — a longer one is memory, not a truncated average.
-		var avgWindowPick = mkChipPick([
-			{v:'5',l:'5s'},{v:'15',l:'15s'},{v:'30',l:'30s'},{v:'60',l:'60s'},
-			{v:'120',l:'2m'},{v:'300',l:'5m'}
-		], String(optWindow(opts)), function(v) {
-			var o = loadOpts(); o.avgWindow = parseInt(v); saveOpts(o); updateUrlParams(o);
-			// 【本仓库补丁】改「窗口」后立即按新窗口重算并重绘。上游只写配置，
-			// 新窗口要等下一个轮询周期才体现，用户观感是「改了没反应」。
-			refreshSpeedViews();
-		});
-
-		// The chips above are per-browser (localStorage). This writes the two
-		// that cost the ROUTER something — poll rate and the history each
-		// device keeps — to UCI as the starting point for anyone who has not
-		// chosen their own. Asked for in #12, where the request was explicitly
-		// for a router-level setting rather than a per-tab one.
-		var defaultsSaveStatus = E('span', {'class':'tg-save-status'});
-		var defaultsSaveBtn = E('button', {
-			'class': 'tg-btn',
-			'data-tip': _('Store the current Poll and Window as this router\'s defaults, for browsers that have not set their own')
-		}, _('Save as router default'));
-		defaultsSaveBtn.addEventListener('click', function() {
-			var o = loadOpts();
-			var poll = optPoll(o);
-			var win = optWindow(o);
-			var refr = optRefresh(o);
-			defaultsSaveBtn.disabled = true;
-			defaultsSaveStatus.textContent = _('Saving…');
-			defaultsSaveStatus.style.color = 'var(--tc-muted)';
-			// 参数顺序须与 callConfigSet 的 params 一致
-			callConfigSet(null, null, null, null, poll, win, refr).then(function(res) {
-				var ok = res && res.ok;
-				defaultsSaveStatus.textContent = ok ? '✓' : ('✗ ' + ((res && res.msg) || ''));
-				defaultsSaveStatus.style.color = ok ? 'var(--tc-ok)' : 'var(--tc-err)';
-				if (ok) {
-					siteDefaults.pollInterval = poll;
-					siteDefaults.avgWindow = win;
-					siteDefaults.refreshInterval = refr;
-				}
-				defaultsSaveBtn.disabled = false;
-			}).catch(function(e) {
-				defaultsSaveStatus.textContent = '✗ ' + e.message;
-				defaultsSaveStatus.style.color = 'var(--tc-err)';
-				defaultsSaveBtn.disabled = false;
-			});
-		});
-
-		var avgMethodPick = mkChipPick([
-			{v:'simple',l:_('Simple')},{v:'ewma',l:_('EWMA')}
-		], opts.avgMethod||'simple', function(v) {
-			var o = loadOpts(); o.avgMethod = v; saveOpts(o); updateUrlParams(o);
-			// 【本仓库补丁】切换算法后清掉历史与两个 EWMA 累加器，避免两种算法
-			// 的数据互相污染；随后立即重算，而不是等下一个轮询周期。
-			// 注意上游把上下行存在**同一个** _speedHistory（每条 {speed, up, time}），
-			// 故不存在单独的 _speedHistoryUp。
-			self._speedHistory = {};
-			self._speedEwma = {}; self._speedEwmaUp = {};
-			refreshSpeedViews();
-		});
+		// 【本仓库改动】刷新或轮询/窗口/算法这些**配置**项已整体移入设置页
+		// （settings.js 的「表格与速率」卡片）。此前它们在这里各有一个副本，
+		// 同一档位在两页显示不同默认值，正是「重复且混乱」的来源。
+		// 本页只保留「影响本页显示」的开关，见下方视图开关行。
 
 		var protoPick = mkChipPick([
 			{v:'all',l:_('All')},{v:'tcp',l:'TCP'},{v:'udp',l:'UDP'}
@@ -2159,8 +2057,189 @@ return view.extend({
 		});
 
 		var statusDiv = E('div', { 'class': 'tc-hidden' });
-		var statsDiv  = E('div', { 'style': 'margin:8px 0', 'class': opts.showStats === false ? 'tc-hidden' : '' });
-		var connsDiv  = E('div', { 'class': opts.showConns === false ? 'tc-hidden' : '' });
+		// 不写内联 margin：它属于概览卡片内的抬头行，边距由 CSS 统一给
+		// （.tc-overview > .alert-message）。内联样式的优先级高于样式表，
+		// 留在这里会把卡片内的间距改坏。
+		var statsDiv  = E('div', {});
+		var connsDiv  = E('div', {});
+
+		// 【本仓库改动 v0.6.7】统计条（活跃 / 已阻断 / WiFi）与上联概览合成**一张卡片**。
+		//   此前它们是两块：概览卡片（下载/上传/图表/接口/排行）下面另起一行窄条，
+		//   两者底部与表格之间又各占一段间距，视觉上是三块互不相干的东西，
+		//   而它们说的其实是同一件事（此刻网络的整体状况）。
+		//   两个子块是**独立**的（统计条有自己的开关；概览自 v0.6.8 起常显，
+		//   只在「所有设备」模式下出现），故卡片只是外壳，两个子块各自显隐；
+		//   卡片的可见性由「至少一个子块可见」决定 —— 否则会出现「只剩一个空边框」
+		//   或「关掉统计连带关掉概览」。
+		//   注意定义顺序：statsDiv 必须**先**定义，否则 var 提升会让这里拿到
+		//   undefined，E(...) 的 children 里出现 undefined → 整页空白。
+		var overviewDiv = E('div', { 'class': 'tc-ov-body' });
+		var overviewCard = E('div', { 'class': 'tc-overview tc-hidden' }, [statsDiv, overviewDiv]);
+
+		// 卡片的可见性：两个子块里**至少一个有内容且未被关掉**。
+		//   判据用 firstChild 而不只是 tc-hidden —— 子块在首帧都是空的
+		//   （统计条要等 runSummary 第一次回来才填），只看 tc-hidden 会让
+		//   卡片画出一个空的边框。
+		function updateOverviewCard() {
+			var anyVisible =
+				(!statsDiv.classList.contains('tc-hidden') && !!statsDiv.firstChild) ||
+				(!overviewDiv.classList.contains('tc-hidden') && !!overviewDiv.firstChild);
+			overviewCard.classList.toggle('tc-hidden', !anyVisible);
+		}
+
+		// ── 表格与速率 ────────────────────────────────────────────────────
+		// 【本仓库改动】这组档位原在设置页（settings.js 的「表格与速率」卡片）。
+		//   它决定的就是**下面这张设备表**怎么刷新、速率按什么窗口/算法算 ——
+		//   放在设备表上方，改完立刻能看到效果；放在设置页则要来回切 tab 才知道
+		//   有没有生效。故整体搬到此处。
+		//
+		//   注意各档位的副作用与设置页版本一致（不能只写 localStorage 就完事）：
+		//     poll    → 重启采样定时器（_restartBytesPoll）
+		//     window  → 立即按新窗口重算重绘（refreshSpeedViews）
+		//     method  → 清空历史与两个 EWMA 累加器后重算
+		//     refresh → 重设定时器；从「关」切回非 0 时立刻拉一次
+		var pollIntervalPick = mkChipPick([
+			{v:'0',l:_('Off')},{v:'1',l:'1s'},{v:'2',l:'2s'},{v:'5',l:'5s'},
+			{v:'10',l:'10s'},{v:'30',l:'30s'}
+		], String(optPoll(opts)), function(v) {
+			var o = loadOpts(); o.pollInterval = parseInt(v, 10); saveOpts(o); updateUrlParams(o);
+			self._restartBytesPoll();
+		});
+
+		var avgWindowPick = mkChipPick([
+			{v:'5',l:'5s'},{v:'15',l:'15s'},{v:'30',l:'30s'},{v:'60',l:'60s'},
+			{v:'120',l:'2m'},{v:'300',l:'5m'}
+		], String(optWindow(opts)), function(v) {
+			var o = loadOpts(); o.avgWindow = parseInt(v, 10); saveOpts(o); updateUrlParams(o);
+			refreshSpeedViews();
+		});
+
+		var avgMethodPick = mkChipPick([
+			{v:'simple',l:_('Simple')},{v:'ewma',l:_('EWMA')}
+		], opts.avgMethod || 'simple', function(v) {
+			var o = loadOpts(); o.avgMethod = v; saveOpts(o); updateUrlParams(o);
+			// 切换算法后必须清掉历史与两个 EWMA 累加器，否则两种算法的数据
+			// 互相污染。上下行存在同一个 _speedHistory（每条 {speed,up,time}），
+			// 故不存在单独的 _speedHistoryUp。
+			self._speedHistory = {};
+			self._speedEwma = {}; self._speedEwmaUp = {};
+			refreshSpeedViews();
+		});
+
+		var refreshPick = mkChipPick([
+			{v:'0',l:_('Off')},{v:'1',l:'1s'},{v:'2',l:'2s'},{v:'5',l:'5s'},
+			{v:'10',l:'10s'},{v:'30',l:'30s'},{v:'60',l:'60s'}
+		], String(optRefresh(opts)), function(v) {
+			var o = loadOpts(); o.refresh = parseInt(v, 10); saveOpts(o); updateUrlParams(o);
+			self._setupTimer();
+			if (optRefresh(o) > 0) runQuery();
+		});
+
+		// 把当前 Poll / Window / Refresh 写为路由器默认值：让没配过的浏览器
+		// 从这里起步，而不是逐个浏览器各设一遍。
+		var defaultsStatus = E('span', {'class':'tc-save-status'});
+		var defaultsBtn = E('button', {
+			'class': 'tc-btn',
+			'data-tip': _('Store the current Poll, Window and Refresh as this router\'s defaults, for browsers that have not set their own')
+		}, _('Save as router default'));
+		defaultsBtn.addEventListener('click', function() {
+			var o = loadOpts();
+			var poll = optPoll(o), win = optWindow(o), refr = optRefresh(o);
+			defaultsBtn.disabled = true;
+			defaultsStatus.textContent = _('Saving…');
+			defaultsStatus.style.color = 'var(--tc-muted)';
+			// 参数顺序须与 config_set 的 params 一致
+			callConfigSet(null, null, null, null, poll, win, refr).then(function(res) {
+				var ok = res && res.ok;
+				defaultsStatus.textContent = ok ? '✓' : ('✗ ' + ((res && res.msg) || ''));
+				defaultsStatus.style.color = ok ? 'var(--tc-ok)' : 'var(--tc-err)';
+				if (ok) {
+					siteDefaults.pollInterval = poll;
+					siteDefaults.avgWindow = win;
+					siteDefaults.refreshInterval = refr;
+				}
+				defaultsBtn.disabled = false;
+			}).catch(function(e) {
+				defaultsStatus.textContent = '✗ ' + e.message;
+				defaultsStatus.style.color = 'var(--tc-err)';
+				defaultsBtn.disabled = false;
+			});
+		});
+
+		// 【本仓库改动】把「一个按钮 + 一个浮层面板」抽成工厂，供**两个**菜单复用：
+		//   ① ☰ 档位（轮询/窗口/方法/刷新）② 「可见列」（设备列 / 连接表列 / 筛选）。
+		//   两者的交互完全一致（点开、点别处关、Esc 关、面板内点击不关），
+		//   复制一份必然漂移 —— 例如只有一边记住摘监听器。
+		//   返回 { bar, panel, btn, setOpen, isOpen }：
+		//     bar   —— 按钮 + 面板的容器（挂进按钮组）
+		//     panel —— 面板本体（调用方往里塞内容）
+		var popupMenus = [];
+		function mkPopupMenu(opts) {
+			var panel = E('div', {'class':'tc-menu-panel tc-hidden'});
+			var btn = E('button', {
+				'class': 'tc-menu-btn' + (opts.text ? ' tc-menu-btn--text' : ''),
+				'type': 'button',
+				'aria-haspopup': 'true',
+				'aria-expanded': 'false',
+				'data-tip': opts.tip || undefined
+			}, opts.text || '☰');
+			var bar = E('div', {'class':'tc-menu'}, [btn, panel]);
+			var api = { bar: bar, panel: panel, btn: btn };
+
+			api.setOpen = function(open) {
+				panel.classList.toggle('tc-hidden', !open);
+				btn.classList.toggle('tc-menu-btn--open', !!open);
+				btn.setAttribute('aria-expanded', open ? 'true' : 'false');
+				// 同一时刻只允许一个面板开着：两个浮层都贴着同一个按钮组，
+				// 同时展开会互相盖住。
+				if (open) {
+					popupMenus.forEach(function(m) { if (m !== api) m.setOpen(false); });
+				}
+			};
+			api.isOpen = function() { return !panel.classList.contains('tc-hidden'); };
+
+			btn.addEventListener('click', function(ev) {
+				ev.stopPropagation();
+				api.setOpen(!api.isOpen());
+			});
+			// 面板内部的点击不冒泡到 document，否则点档位/列开关就会立刻关掉面板。
+			panel.addEventListener('click', function(ev) { ev.stopPropagation(); });
+			popupMenus.push(api);
+			return api;
+		}
+
+		var speedMenu = mkPopupMenu({
+			tip: _('Polling interval, averaging window and method, and table refresh')
+		});
+		var speedMenuPanel = speedMenu.panel;
+
+		// 点页面别处 / 按 Esc 关闭**全部**面板。都不持久化「关闭」状态 ——
+		// 它只是本次交互的浮层，不是一项配置。
+		// 监听器必须具名挂到实例上，否则离开本页时无法摘除：页面视图切换后
+		// 它们仍会收到点击，闭包里抓着已被移除的 DOM（内存泄漏 + 每次进页
+		// 都多一层监听）。摘除在 handleTeardown 里做。
+		function closeAllMenus() { popupMenus.forEach(function(m) { m.setOpen(false); }); }
+		self._speedMenuDocClick = closeAllMenus;
+		self._speedMenuDocKey = function(ev) { if (ev.key === 'Escape') closeAllMenus(); };
+		document.addEventListener('click', self._speedMenuDocClick);
+		document.addEventListener('keydown', self._speedMenuDocKey);
+
+		// ☰ 面板内容：4 组档位 + 保存为路由器默认值。
+		// 「保存」放在面板底部：它作用的正是这四个值，单独留在外面会变成一个
+		// 悬空的按钮。
+		function menuRow(tipText, label, pick) {
+			return E('div', {'class':'tc-menu__row', 'data-tip': tipText},
+				[mkLabel(label + ':'), pick.el]);
+		}
+		speedMenuPanel.appendChild(E('div', {}, [
+			menuRow(_('How often live data is polled: speeds, graphs, drop/backlog counters, and the connection table in device view'),
+				_('Poll'), pollIntervalPick),
+			menuRow(_('Time window for speed averaging'), _('Window'), avgWindowPick),
+			menuRow(_('Simple = arithmetic mean, EWMA = exponential weighted moving average'),
+				_('Method'), avgMethodPick),
+			menuRow(_('Auto-refresh interval for the device table'), _('Refresh'), refreshPick),
+			E('div', {'class':'tc-menu__foot'}, [defaultsBtn, defaultsStatus])
+		]));
 
 		function _rdnsBatch(addrs, gen) {
 			if (!addrs.length) return;
@@ -2283,7 +2362,14 @@ return view.extend({
 			}
 		}
 
-		// ── Speed Limit: modern chip UI ──────────────────────────────
+		// ── 限速部件（v0.6.9 起挂在行内「限制」弹层里）──────────────────────
+		//
+		// 【本仓库改动 v0.6.9】这些部件原先平铺在速率限制卡片里（一条常驻的
+		//   速率档位行 + 目标/共享/网段），占掉卡片大半高度，而它们只在
+		//   **要给某台设备设限速**时才用得上。现整体移进设备表「限制」链接
+		//   打开的弹层：点哪台设备的限制，就在那台设备旁边设它的速率。
+		//   部件本身（preset chip / 自定义输入 / Shaper-Limiter）实现未变，
+		//   故切换逻辑与错误处理仍是原来那套。
 		var _rateSelected = '0';
 		// Set while the user has the custom field open. The per-device poll
 		// re-syncs this panel from the device's current rate, and without this
@@ -2302,7 +2388,7 @@ return view.extend({
 				updateRateChips();
 				_customPinned = false;
 				customRow.classList.add('tc-hidden');
-				applyRate();
+				applyLimit();
 			});
 			rateChips.push(chip);
 			rateChipsRow.appendChild(chip);
@@ -2319,8 +2405,6 @@ return view.extend({
 			if (_rateSelected === 'custom') {
 				rateChips.forEach(function(c) { c.className = c._val === '0' ? 'tc-chip tc-chip' : 'tc-chip'; });
 			}
-			// The each/shared sentence quotes the rate, so it moves with it.
-			updateScopeExplain();
 		}
 
 		// Custom input row
@@ -2348,7 +2432,7 @@ return view.extend({
 			_rateSelected = 'custom';
 			updateRateChips();
 			_customPinned = false;
-			applyRate();
+			applyLimit();
 		});
 
 		var customToggleBtn = E('span', {'class': 'tc-chip', 'data-tip': _('Enter a custom speed value')}, '✎ ' + _('Custom'));
@@ -2381,10 +2465,9 @@ return view.extend({
 			upMbitBtn.classList.toggle('tc-unit-btn--on', _upUnit === 'mbit');
 			upKbitBtn.classList.toggle('tc-unit-btn--on', _upUnit === 'kbit');
 		}
-		upMbitBtn.addEventListener('click', function() { _upUnit = 'mbit'; updateUpUnitBtns(); updateScopeExplain(); });
-		upKbitBtn.addEventListener('click', function() { _upUnit = 'kbit'; updateUpUnitBtns(); updateScopeExplain(); });
+		upMbitBtn.addEventListener('click', function() { _upUnit = 'mbit'; updateUpUnitBtns(); });
+		upKbitBtn.addEventListener('click', function() { _upUnit = 'kbit'; updateUpUnitBtns(); });
 		updateUpUnitBtns();
-		upInput.addEventListener('input', function() { updateScopeExplain(); });
 
 		var upRow = E('div', {'class':'tc-custom-row tc-hidden'}, [
 			E('span', {'class':'tc-c-muted','style':'font-size:11px'}, _('↑ Upload')),
@@ -2400,7 +2483,6 @@ return view.extend({
 			var on = !upRow.classList.contains('tc-hidden');
 			upToggleBtn.classList.toggle('tc-chip--active', on);
 			if (on) { upInput.focus(); } else { upInput.value = ''; }
-			updateScopeExplain();
 		});
 		rateChipsRow.appendChild(upToggleBtn);
 
@@ -2428,143 +2510,16 @@ return view.extend({
 		modeToggle.appendChild(limiterBtn);
 		updateModeToggle();
 
-		// ── Network-wide / subnet target ──────────────────────────────
-		// With "All active devices" selected there is no single IP to act on,
-		// so the target is a subnet instead: "all" or a CIDR. Only the limiter
-		// supports blocks — tc classids are derived from a single address, so
-		// the shaper cannot express a subnet. That is also why a subnet limit
-		// is safe next to SQM: the limiter is a policer and owns no qdisc,
-		// while the shaper refuses to touch a root qdisc it does not recognise.
-		var _scopeSelected = 'each';
-		// Subnets the router actually monitors. A limit on anything else is
-		// written into a chain no packet of that subnet passes through.
-		var _monitoredSubnets = [];
-		var scopeInput = E('input', {
-			'type': 'text',
-			'class': 'tc-custom-input',
-			'value': 'all',
-			'placeholder': '10.0.20.0/24',
-			'style': 'width:150px',
-			'data-tip': _('"all" for every device, or a CIDR such as 10.0.20.0/24')
-		});
-		scopeInput.addEventListener('input', function() {
-			updateSubnetChips();
-			updateScopeExplain();
-		});
-
-		// One chip per monitored subnet, so the common case is a click and the
-		// operator cannot mistype a target that exists but is spelled wrong.
-		var subnetChips = E('div', {'class':'tc-chips-row', 'style':'gap:4px'});
-		function updateSubnetChips() {
-			var cur = (scopeInput.value || '').trim();
-			Array.prototype.forEach.call(subnetChips.children, function(c) {
-				c.className = (c._target === cur) ? 'tc-chip tc-chip--active' : 'tc-chip';
-			});
-		}
-		function addSubnetChip(target, label, tip) {
-			var c = E('span', {'class':'tc-chip', 'data-tip': tip}, label);
-			c._target = target;
-			c.addEventListener('click', function() {
-				scopeInput.value = target;
-				updateSubnetChips();
-				updateScopeExplain();
-			});
-			subnetChips.appendChild(c);
-		}
-		addSubnetChip('all', _('Whole network'), _('Every device this router forwards for'));
-
-		var scopeChips = E('div', {'class':'tc-chips-row', 'style':'gap:4px'});
-		function updateScopeChips() {
-			Array.prototype.forEach.call(scopeChips.children, function(c) {
-				c.className = c._v === _scopeSelected ? 'tc-chip tc-chip--active' : 'tc-chip';
-			});
-			updateScopeExplain();
-		}
-		[
-			{ v: 'each',   l: _('per device') },
-			{ v: 'shared', l: _('shared') }
-		].forEach(function(o) {
-			var c = E('span', {'class':'tc-chip'}, o.l);
-			c._v = o.v;
-			c.addEventListener('click', function() { _scopeSelected = o.v; updateScopeChips(); });
-			scopeChips.appendChild(c);
-		});
-
-		// The difference between the two is the whole point and is easy to get
-		// backwards, so it is spelled out in full sentences with the rate and
-		// the target filled in — not left to a tooltip nobody hovers.
-		var scopeExplain = E('div', {'class':'tc-scope-explain'});
-		var scopeWarn = E('div', {'class':'tc-scope-warn tc-hidden'});
-
-		function targetIsMonitored(t) {
-			if (!t || t === 'all' || t === 'any' || t === '0.0.0.0/0') { return true; }
-			var want = parseCidr(t);
-			if (!want) { return true; }   // malformed: the backend rejects it
-			// Unknown list (the call failed, or nothing is monitored yet) is
-			// not evidence of a problem — say nothing rather than cry wolf.
-			if (!_monitoredSubnets.length) { return true; }
-			for (var i = 0; i < _monitoredSubnets.length; i++) {
-				if (cidrOverlaps(want, parseCidr(_monitoredSubnets[i].cidr))) { return true; }
-			}
-			return false;
-		}
-
-		function updateScopeExplain() {
-			// Reachable from updateRateChips, which the rate presets call before
-			// this row exists on the first render.
-			if (!scopeExplain) { return; }
-			var t = (scopeInput.value || 'all').trim();
-			var shown = (t === 'all' || t === 'any') ? _('every device') : t;
-			var kbit = parseInt(getRateKbit(), 10);
-			// The sentence has to quote the rate that will actually be applied.
-			// Naming only the download figure while a split ceiling is set would
-			// describe a different rule than the one being installed — and these
-			// sentences exist precisely so the each/shared distinction cannot be
-			// misread.
-			var kbitUp = parseInt(getRateKbitUp(), 10);
-			var rateWords = (kbitUp && kbitUp !== kbit)
-				? _('%s down and %s up').format(fmtRate(kbit), fmtRate(kbitUp))
-				: fmtRate(kbit);
-			// A split ceiling is two buckets, one per direction, so the aggregate
-			// wording changes with it.
-			var sharedTail = (kbitUp && kbitUp !== kbit)
-				? _('between them — one bucket per direction for the whole subnet.')
-				: _('between them — one bucket for the whole subnet.');
-			if (!kbit || kbit <= 0) {
-				scopeExplain.textContent =
-					_('Pick a rate to apply it to this target, or Off to remove its limit.');
-			} else if (_scopeSelected === 'shared') {
-				scopeExplain.textContent = _('All of') + ' ' + shown + ' ' + _('share') + ' ' +
-					rateWords + ' ' + sharedTail;
-			} else {
-				scopeExplain.textContent = _('Every device in') + ' ' + shown + ' ' +
-					_('may use') + ' ' + rateWords + ' ' + _('of its own.');
-			}
-
-			var bad = !targetIsMonitored(t);
-			scopeWarn.classList.toggle('tc-hidden', !bad);
-			if (bad) {
-				// A limit here would be accepted and then never match a packet:
-				// the netdev hooks are attached to the devices the monitored
-				// subnets resolve to. A firewall zone other than lan with
-				// masq=1 — the usual way to isolate a guest VLAN — is excluded
-				// from that set, which is the likeliest reason to land here.
-				scopeWarn.textContent = '⚠ ' + t + ' ' +
-					_('is not one of the subnets this router monitors, so a limit on it would be accepted but never enforced. A firewall zone other than "lan" with masq=1 (the usual guest-VLAN setup) is excluded. Check with: uci show firewall | grep -E "name=|masq="');
-			}
-		}
-
-		var scopeRow = E('div', {'class':'tc-scope-row tc-hidden'}, [
-			E('div', {'class':'tc-custom-row', 'style':'align-items:center;gap:8px'}, [
-				E('span', {'class':'tc-inline-label'}, _('Target:')),
-				scopeInput,
-				E('span', {'class':'tc-inline-label'}, _('Share:')),
-				scopeChips
-			]),
-			subnetChips,
-			scopeExplain,
-			scopeWarn
-		]);
+		// 【本仓库改动 v0.6.9】「目标 / 共享 / 网段」整组已移除（用户框选要求删除）。
+		//   限速的目标不再是「在卡片里填一个 CIDR」，而是**点哪台设备的「限制」
+		//   就在那台设备上施加**（见 mkLimitPopup）。故这一整段失去挂载点：
+		//   `_scopeSelected` / `_monitoredSubnets` / `scopeInput` / `subnetChips`
+		//   / `scopeChips` / `scopeExplain` / `scopeWarn` / `targetIsMonitored`
+		//   / `updateScopeExplain` / `callSubnets()` 全部删除。
+		//
+		//   注意**保留**「已有的网段限制」列表（subnetLimitsBox）—— 它不在被删的
+		//   范围内，而且是既有全局限速**唯一**可见、可删的地方。删掉它会让此前
+		//   设过全网/网段限速的人再也去不掉那条规则。
 
 		// ── Active subnet limits ──────────────────────────────────────
 		//
@@ -2624,33 +2579,71 @@ return view.extend({
 			});
 		}
 
-		callSubnets().then(function(list) {
-			if (!Array.isArray(list)) { return; }
-			_monitoredSubnets = list;
-			list.forEach(function(s) {
-				if (!s || !s.cidr) { return; }
-				addSubnetChip(s.cidr, s.cidr, s.kind === 'routed'
-					? (_('Routed via') + ' ' + s.device)
-					: (_('On') + ' ' + s.device));
-			});
-			updateSubnetChips();
-			updateScopeExplain();
-		}).catch(function() {});
+		// 【本仓库改动 v0.6.9】原先这里拉一次 callSubnets() 把「已监控网段」
+		//   做成 chip，供用户在卡片里选作限速目标。目标选择已随「限制」入口
+		//   移走 → 这批 chip 与它依赖的 addSubnetChip / updateSubnetChips /
+		//   updateScopeExplain 一并删除。`callSubnets` 的 rpc 声明仍留在
+		//   common.js（rpc 表是共用的，删它会影响设置页）。
 
-		updateSubnetChips();
-		updateScopeChips();
+		// 【本仓库改动】「切断全部互联网访问」原是一个与速率限制并列的独立卡片，
+		//   两者都是「对设备/全网施加限制」，却分成两块、各占一行高度。现并入
+		//   速率限制卡片下方，由 .tc-cut--embedded 去掉重复的外框与标题栏高度。
+		//   注意：它必须仍然常显 —— 这是本应用唯一能把操作者自己关在门外的控件，
+		//   不能藏进任何折叠区。故放在这个恒常可见的面板里，而不是设置页。
+		//   定义提前到此处是因为要在构造 rateLimitRow 时就把它挂进去
+		//   （var 提升对下方的 renderCut 等函数同样成立）。
+		var cutPanel = E('div', {'class': 'tc-cut tc-cut--embedded'});
 
+		// 【本仓库改动】设备选择（搜索框 + 「所有设备」+ 最近设备 chip）原先是
+		//   速率限制面板**之上**的独立一行，与面板里的「目标」是两个各自成行的
+		//   选择器 —— 用户要在这两处之间来回看。现整体并入速率限制面板，
+		//   与「目标」同排成一行：左边选设备、右边设限制。
+		//   注意 searchSelect / quickBar 在本文件上方（约 1731/1754 行）就已构造，
+		//   此处只是把它们挂进面板，不新建实例 —— 否则事件绑定会全部失效。
+		//
+		// 【本仓库改动 v0.6.9】picker 行只剩两个控件，顺序为 **所有设备 | 搜索框**
+		//   （用户指定：按钮在输入框左侧）。原先这一行还挤着最近设备 chip、
+		//   目标、共享、网段四组 —— 全是「怎么施加限制」，与「选哪台设备」
+		//   混在同一行，扫一眼分不出哪部分在选设备。
+		//   限速目标随「限速」入口一并移到设备表的「限制」里（见 mkLimitPopup），
+		//   故这里不再需要 scopeSlot。
+		//
+		//   「拦截互联网 / 拦截 WiFi」按钮（actionRow）在下方才构造，
+		//   此处先留一个占位容器，稍后把按钮挂进来。**不能**直接引用 actionRow：
+		//   var 提升会给出 undefined，且它会被当成文本节点渲染成页面上一个字面的
+		//   "undefined"（实测踩过）。
+		var actionSlot = E('div', {'class':'tc-picker-row__actions'});
+		var pickerRow = E('div', {'class':'tc-picker-row'}, [
+			E('div', {'class':'tc-picker-row__device'}, [allBtn, searchSelect.el]),
+			actionSlot
+		]);
+
+		// 视图开关行与「可见列」菜单在文件下方才构造（依赖列 chip 等）。
+		// 用一个占位容器在此先留好位置，稍后再把内容 append 进来 ——
+		// 直接引用会因 var 提升拿到 undefined（赋值发生在下方）。
+		var panelTail = E('div', {'class':'tc-rate-panel__tail'});
+
+		// 【本仓库改动】不再带初始 tc-hidden。原因：切断面板（下面嵌进来的
+		//   cutPanel）是**安全关键**控件 —— 它能把操作者自己关在门外，
+		//   其状态必须在页面一渲染出来就可读。原先靠 updateModeUI() 里的
+		//   `rateLimitRow.classList.remove('tc-hidden')` 才显示，即它依赖
+		//   runQuery() 那条异步链；若该链因任何原因未走到（异常、RPC 挂起），
+		//   整个面板连同切断开关一起消失 —— 对这一个控件来说是不可接受的失败模式。
+		//   现在首屏即显示，updateModeUI 里那行 remove 保留作幂等兜底。
+		// 【本仓库改动 v0.6.9】速率档位行（关 / 1Mbit … / 自定义 / 上下行分别设置）
+		//   与 Shaper-Limiter 切换已移进设备表「限制」弹层（mkLimitPopup）。
+		//   卡片本身保留：它仍是「选设备 + 切断全网访问 + 查看已有网段限制 +
+		//   视图开关」的容器，且 cutPanel 必须常显（安全关键，见上）。
 		var rateLimitRow = E('div', {
-			'class': 'tc-rate-panel tc-hidden'
+			'class': 'tc-rate-panel'
 		}, [
 			E('div', {'class':'tc-rate-panel__header'}, [
-				E('span', {'class':'tc-rate-panel__title'}, _('Speed Limit')),
-				modeToggle
+				E('span', {'class':'tc-rate-panel__title'}, _('Speed Limit'))
 			]),
-			scopeRow,
-			rateChipsRow,
-			customRow,
-			subnetLimitsBox
+			pickerRow,
+			subnetLimitsBox,
+			cutPanel,
+			panelTail
 		]);
 
 		// Compat shims for existing code that uses ratePick/modePick interface
@@ -2688,36 +2681,22 @@ return view.extend({
 			return _('%s down / %s up').format(fmtRate(parseInt(kbit)), fmtRate(parseInt(up)));
 		}
 
-		function applyRate() {
-			var all  = isAllMode();
-			// In all-devices mode the target is the typed scope ("all" or a
-			// CIDR); otherwise it's the selected device's address.
-			var ip   = all ? (scopeInput.value || 'all').trim() : searchSelect.getValue();
-			var name = '';
+		// 【本仓库改动 v0.6.9】原来是 `applyRate()`，目标取自「所有设备」模式下的
+		//   scopeInput / 单设备模式下的 searchSelect —— 即「先在卡片里选目标，
+		//   再点速率」。现改为 `applyLimit()`：目标是**打开弹层的那台设备**
+		//   （`_limitIp`，由 mkLimitPopup 设置）。这样：
+		//     · 不再需要 scopeInput / _scopeSelected / all 模式分支；
+		//     · 全局限速（网段/CIDR）不再从界面新建 —— 已有规则仍可在
+		//       「已有的网段限制」列表里删除（renderSubnetLimits 保留）。
+		var _limitIp = null;
+		var _limitName = '';
+		function applyLimit() {
+			if (!_limitIp) return;
+			var ip = _limitIp;
+			var name = _limitName;
 			var kbit = getRateKbit();
 			var kbitUp = getRateKbitUp();
-			// A block target has no single tc classid, so the shaper can't
-			// express it — force the limiter rather than silently doing nothing.
-			var mode = all ? 'limiter' : _modeSelected;
-			var scope = all ? _scopeSelected : '';
-
-			if (all && kbit !== '0') {
-				setStatus(statusDiv, 'loading',
-					_('Limiting') + ' ' + ip + ' → ' + rateLabel(kbit, kbitUp) + ' (' + scope + ')…');
-				callRatelimit(ip, parseInt(kbit), name, scope, kbitUp ? parseInt(kbitUp) : null).then(function(res) {
-					setStatus(statusDiv, (res && res.ok) ? 'action' : 'error', (res && res.msg) || '?');
-					runQuery();
-				}).catch(function(e) { setStatus(statusDiv, 'error', '✗ '+e.message); });
-				return;
-			}
-			if (all) {
-				setStatus(statusDiv, 'loading', _('Removing throttle…'));
-				callRatelimit(ip, 0, name, scope).then(function(res) {
-					setStatus(statusDiv, 'ok', (res && res.msg) || _('Throttle removed'));
-					runQuery();
-				}).catch(function(e) { setStatus(statusDiv, 'error', '✗ '+e.message); });
-				return;
-			}
+			var mode = _modeSelected;
 
 			if (kbit === '0') {
 				setStatus(statusDiv, 'loading', _('Removing throttle…'));
@@ -2730,7 +2709,7 @@ return view.extend({
 					runQuery();
 				}).catch(function(e) { setStatus(statusDiv, 'error', '✗ '+e.message); });
 			} else if (mode === 'shaper') {
-				setStatus(statusDiv, 'loading', _('Shaping') + ' → ' + rateLabel(kbit, kbitUp) + '…');
+				setStatus(statusDiv, 'loading', _('Shaping') + ' ' + ip + ' → ' + rateLabel(kbit, kbitUp) + '…');
 				callRatelimit(ip, 0, name)
 					.then(function() { return callShapeAdd(ip, parseInt(kbit), name, kbitUp ? parseInt(kbitUp) : null); })
 					.then(function(res) {
@@ -2739,7 +2718,7 @@ return view.extend({
 					})
 					.catch(function(e) { setStatus(statusDiv, 'error', '✗ '+e.message); });
 			} else {
-				setStatus(statusDiv, 'loading', _('Limiting') + ' → ' + rateLabel(kbit, kbitUp) + '…');
+				setStatus(statusDiv, 'loading', _('Limiting') + ' ' + ip + ' → ' + rateLabel(kbit, kbitUp) + '…');
 				callShapeRemove(ip, name)
 					.then(function() { return callRatelimit(ip, parseInt(kbit), name, '', kbitUp ? parseInt(kbitUp) : null); })
 					.then(function(res) {
@@ -2750,8 +2729,101 @@ return view.extend({
 			}
 		}
 
+		// 挂进速率限制面板里预留的位置（见上文 actionSlot 的说明）。
 		var actionRow = E('div', { 'class': 'tc-action-row' },
 			[inetBtn, wifiBtn]);
+		actionSlot.appendChild(actionRow);
+
+		// ── 行内「限制」弹层（v0.6.9）─────────────────────────────────────
+		//
+		// 点设备表操作列的「限制」，在这台设备旁边弹出它的限速设置：
+		//   速率档位（关 / 1Mbit … / 自定义）＋ Shaper-Limiter 切换 ＋ 上下行分别设置。
+		//   这一切原先平铺在「速率限制」卡片里，占掉大半高度，却只在**要给某台
+		//   设备设限速**时才用得上；而设限速本来就要先选中一台设备 —— 两件事
+		//   合成一步，点哪台就设哪台。
+		//
+		//   复用同一套部件实例（rateChipsRow / customRow / modeToggle），
+		//   故切换逻辑与错误处理仍是原来那套，只是换了挂载点。
+		var limitPopup = E('div', {'class':'tc-limit-popup tc-hidden'}, [
+			E('div', {'class':'tc-limit-popup__who'}),
+			rateChipsRow,
+			customRow,
+			upRow,
+			E('div', {'class':'tc-limit-popup__foot'}, [
+				E('span', {'class':'tc-inline-label'}, _('Mode:')),
+				modeToggle
+			])
+		]);
+		document.body.appendChild(limitPopup);
+		self._limitPopup = limitPopup;
+		var _limitPopupOpen = false;
+
+		function openLimitPopup(cell, ip, name) {
+			_limitIp = ip;
+			_limitName = name || '';
+			// 回填这台设备当前的限速值，使弹层一开就显示既有设置（而不是
+			// 停在上一台设备的值）。_customPinned 置假，否则用户上次编辑过
+			// 自定义值会阻止回填。
+			_customPinned = false;
+			var row = (self._lastRows || []).filter(function(r) { return r.ip === ip; })[0] || {};
+			var shapeRate = row.shape_kbit || 0;
+			var limitRate = row.rate_limit_kbit || 0;
+			var curRate = shapeRate > 0 ? shapeRate : limitRate;
+			var curStr = String(curRate);
+			if (RATE_PRESETS.some(function(p) { return p.v === curStr; })) {
+				_rateSelected = curStr;
+				customRow.classList.add('tc-hidden');
+			} else if (curRate > 0) {
+				_rateSelected = 'custom';
+				customInput.value = curRate;
+				_customUnit = 'kbit'; updateUnitBtns();
+				customRow.classList.remove('tc-hidden');
+			} else {
+				_rateSelected = '0';
+				customRow.classList.add('tc-hidden');
+			}
+			updateRateChips();
+			// 上行分栏默认收起（后端把「无上行速率」解释为与下行相同），
+			// 并清掉上一台设备残留的值。
+			upRow.classList.add('tc-hidden');
+			upToggleBtn.classList.remove('tc-chip--active');
+			upInput.value = '';
+			_modeSelected = shapeRate > 0 ? 'shaper' : (limitRate > 0 ? 'limiter' : 'shaper');
+			updateModeToggle();
+
+			// 名称可能是后端占位（`*`）或空，那种情况下只显示 IP ——
+			// 写成「*  —  192.168.3.203」看着像坏掉的数据。
+			limitPopup.querySelector('.tc-limit-popup__who').textContent =
+				(name && name !== '*') ? (name + '  —  ' + ip) : ip;
+			var r = cell.getBoundingClientRect();
+			// 先显示再量高度：弹层高度随内容（自定义/上行分栏是否展开）变化，
+			// 用固定估值会算错位置。故先去 tc-hidden 拿到真实尺寸，再定位。
+			limitPopup.classList.remove('tc-hidden');
+			var pw = limitPopup.offsetWidth || 340;
+			var ph = limitPopup.offsetHeight || 200;
+			// 水平：贴住该行左侧，右边界收进视口内。
+			limitPopup.style.left = Math.max(8, Math.min(r.left, window.innerWidth - pw - 8)) + 'px';
+			// 垂直：优先在该行**下方**；下方放不下、而上方更宽裕时才翻到上方。
+			//   此前只写 `min(r.bottom+4, innerHeight-40)` —— 实测弹层高 192px
+			//   而当时只剩 40px，于是大半落在屏幕外（截图为证）。
+			var below = window.innerHeight - r.bottom - 8;
+			var above = r.top - 8;
+			limitPopup.style.top = ((below >= ph || below >= above)
+				? r.bottom + 4
+				: Math.max(8, r.top - ph - 4)) + 'px';
+			_limitPopupOpen = true;
+		}
+		function closeLimitPopup() {
+			limitPopup.classList.add('tc-hidden');
+			_limitPopupOpen = false;
+			_limitIp = null;
+		}
+		// 点弹层内部不关（否则点速率档位就消失了）；监听器具名挂到实例。
+		limitPopup.addEventListener('click', function(ev) { ev.stopPropagation(); });
+		self._limitPopupDocClick = function() { if (_limitPopupOpen) closeLimitPopup(); };
+		self._limitPopupDocKey = function(ev) { if (ev.key === 'Escape' && _limitPopupOpen) closeLimitPopup(); };
+		document.addEventListener('click', self._limitPopupDocClick);
+		document.addEventListener('keydown', self._limitPopupDocKey);
 
 		function isAllMode() { return searchSelect.getValue() === '__all__'; }
 
@@ -2760,18 +2832,21 @@ return view.extend({
 			actionRow.classList.toggle('tc-hidden', all);
 			// The throttle panel used to be hidden in all-devices mode, which
 			// left no way to limit a subnet or the whole network at all.
+			// 【本仓库改动】它现已首屏可见（见构造处的说明：其中嵌着安全关键的
+			//   切断开关）。这行保留作幂等兜底，删掉也不影响首屏。
 			rateLimitRow.classList.remove('tc-hidden');
-			scopeRow.classList.toggle('tc-hidden', !all);
+			// 目标/共享/网段那一行已随「限制」入口移走；卡片里现在只剩
+			// 「选设备 + 已有的网段限制 + 切断 + 视图开关」，都不随模式隐藏
+			// （pickerRow 在单设备模式下也有用：它显示当前选中的设备）。
 			renderSubnetLimits();
-			modeToggle.classList.toggle('tc-hidden', all);
 			rdnsCheck.classList.toggle('tc-hidden', all);
 			extStatsCheck.classList.toggle('tc-hidden', all);
-			// The overview is a whole-router view, so it belongs to the
-			// all-devices mode only; its toggle goes with it rather than
-			// sitting there doing nothing while a device is selected.
-			overviewCheck.classList.toggle('tc-hidden', !all);
-			overviewDiv.classList.toggle('tc-hidden', !all || !loadOpts().showOverview);
+			// 概览是整台路由器的视图，只在「所有设备」模式下有意义。
+			// v0.6.8 起它没有开关、常显，故这里只按模式显隐。
+			overviewDiv.classList.toggle('tc-hidden', !all);
 			extStatsDiv.classList.toggle('tc-hidden', all || !loadOpts().extendedStats);
+			// 概览的显隐刚变过，卡片要跟着决定自己是否还有内容。
+			updateOverviewCard();
 			if (typeof updateTableSectionMode === 'function') updateTableSectionMode();
 		}
 
@@ -2815,7 +2890,10 @@ return view.extend({
 
 		function pollDrops() {
 			if (document.hidden) return;
+			if (pollDropsInFlight) return;
+			pollDropsInFlight = true;
 			callRatelimitStats().then(function(data) {
+				pollDropsInFlight = false;
 				if (!Array.isArray(data)) return;
 				// Rebuilt from every response rather than accumulated the way
 				// _dropMap is: a limit that was just removed has to leave the
@@ -2845,12 +2923,15 @@ return view.extend({
 					});
 				}
 				updateExtendedStats();
-			}).catch(function(){});
+			}).catch(function(){ pollDropsInFlight = false; });
 		}
 
 		function pollShapeStats() {
 			if (document.hidden) return;
+			if (pollShapeInFlight) return;
+			pollShapeInFlight = true;
 			callShapeStats().then(function(data) {
+				pollShapeInFlight = false;
 				if (!Array.isArray(data)) return;
 				data.forEach(function(d) {
 					self._shapeMap[d.ip] = {
@@ -2875,7 +2956,7 @@ return view.extend({
 					});
 				}
 				updateExtendedStats();
-			}).catch(function(){});
+			}).catch(function(){ pollShapeInFlight = false; });
 		}
 
 		// Global overview. Deliberately has NO timer of its own: it is driven
@@ -2885,7 +2966,7 @@ return view.extend({
 		// remember to clear on teardown — the bug class this repo has shipped
 		// before with the speed-graph popup.
 		function pollIfaces() {
-			if (!loadOpts().showOverview || !isAllMode()) return;
+			if (!isAllMode()) return;
 			callIfaces().then(function(list) {
 				if (!Array.isArray(list)) return;
 				var now = Date.now();
@@ -2925,10 +3006,12 @@ return view.extend({
 		}
 
 		function renderOverview() {
+			if (!isAllMode()) return;
 			var o = loadOpts();
-			if (!o.showOverview || !isAllMode()) return;
 			var nameByIp = {};
 			(self._lastRows || []).forEach(function(r) { nameByIp[r.ip] = r.name; });
+			// 图表要按容器实宽绘制。容器此刻可能还没布局完（首帧、tab 隐藏），
+			// 那时 offsetWidth 为 0，退回 560；下一拍轮询会用真实宽度重画。
 			var panel = buildOverviewPanel(
 				self._ifMeta, self._ifHistory, self._speedMap, nameByIp,
 				!!o.ovShowOther,
@@ -2936,18 +3019,47 @@ return view.extend({
 					var oo = loadOpts(); oo.ovShowOther = next; saveOpts(oo);
 					renderOverview();
 				},
-				optPoll(o) <= 0
+				optPoll(o) <= 0,
+				overviewDiv.clientWidth
 			);
 			while (overviewDiv.firstChild) overviewDiv.removeChild(overviewDiv.firstChild);
 			overviewDiv.appendChild(panel);
+			updateOverviewCard();
 		}
+
+		// 窗口尺寸变了要按新宽度重画上联图：图宽是按容器实宽算的，不重画就会
+		// 停在旧宽度（拉宽浏览器后右侧留白，缩窄后横向溢出）。
+		// 只挂一次、只在宽度**真的变了**时重画 —— resize 事件在拖动窗口时
+		// 每帧都触发，无条件重画会连带重建表格行，白白吃 CPU。
+		// 监听器具名挂到实例，随 handleTeardown 摘除（与两个菜单监听器同理）。
+		var _lastOvW = 0;
+		self._onResize = function() {
+			if (!isAllMode()) return;
+			var w = overviewDiv.clientWidth;
+			if (w && Math.abs(w - _lastOvW) >= 2) { _lastOvW = w; renderOverview(); }
+		};
+		window.addEventListener('resize', self._onResize);
+
+		// 【本仓库改动】各字节轮询的防重入闸。
+		//   与 _setupTimer 旁的 queryInFlight 同一用意：一旦档位可设 1 秒，而
+		//   单次 RPC 实测 P50≈290ms、最坏 1877ms（conntrack 读取在设备多时变慢），
+		//   `setInterval` 会在慢的那一拍还没回来时再发一次 —— 实测 1 秒档位下
+		//   30 秒内出现 3 次重叠、最多 2 个并发。请求层层堆积会让 rpcd 不断 fork
+		//   子脚本、路由器 load 飙升（AGENTS.md 红线 9 记的正是这个故障）。
+		//   闸门按「每类请求各自一个」：dro 与 shape 是 5 秒固定间隔，互不影响。
+		var pollBytesInFlight = false;
+		var pollDropsInFlight = false;
+		var pollShapeInFlight = false;
 
 		function pollBytes() {
 			if (document.hidden) return;
+			if (pollBytesInFlight) return;   // 上一拍未回，跳过这一拍
+			pollBytesInFlight = true;
 			// Runs in BOTH modes: byte counters are per-device, and the device
 			// view's speed graph is fed from this history. Only the summary-table
 			// repaint below is all-devices-specific.
 			callBytes().then(function(data) {
+				pollBytesInFlight = false;
 				if (!Array.isArray(data)) return;
 				var now = Date.now();
 				var o = loadOpts();
@@ -3067,6 +3179,13 @@ return view.extend({
 						liveTotal: (Number(d.bytes_in) || 0) + (Number(d.bytes_out) || 0),
 						liveTcp: liveTcp,
 						liveUdp: liveUdp,
+						// 【本仓库改动】累计上行 / 下行分列（参照图的「累计上行」「累计下行」）。
+						//   方向已核对：bytes_out = 设备上传、bytes_in = 设备下载。
+						//   -1 保留语义与 TCP/UDP 一致（「不可测」不能与「0」同形）。
+						up: (d.bytes_out_total == null) ? -1 : Number(d.bytes_out_total),
+						dn: (d.bytes_in_total == null) ? -1 : Number(d.bytes_in_total),
+						liveUp: (d.bytes_out == null) ? -1 : Number(d.bytes_out),
+						liveDn: (d.bytes_in == null) ? -1 : Number(d.bytes_in),
 						since: Number(d.total_since) || 0,
 						degraded: (d.degraded === true)
 					};
@@ -3084,7 +3203,10 @@ return view.extend({
 				// talkers" and the summary table can never disagree about who
 				// is busy.
 				pollIfaces();
-			}).catch(function(){});
+			}).catch(function(){
+				// 出错也要解锁，否则一次失败会让轮询永久停摆。
+				pollBytesInFlight = false;
+			});
 		}
 
 		function updateDeviceGraph() {
@@ -3173,17 +3295,18 @@ return view.extend({
 			self._queryGen++;
 			var gen = self._queryGen;
 
-			setStatus(statusDiv, 'loading', _('Running…'));
-
+			// 例行轮询不写「运行中…」（1 秒档位下会一直闪），只在失败时报错。
 			// 必须 return：轮询的防重入锁依赖「请求真正结束」才复位
 			// （见 _setupTimer 旁的 tick 与 runQuery 的注释）。
 			return callDevice(ip, proto).then(function(data) {
 				if (!data || data.error) {
-					setStatus(statusDiv, 'error', (data && data.error) || _('Unknown error'));
+					setRoutineStatus(statusDiv, 'error', (data && data.error) || _('Unknown error'));
 					return;
 				}
 
-				if (opts.showStats !== false) {
+				// 【本仓库改动 v0.6.9】原先这里包在 `if (opts.showStats !== false)`
+				//   里 —— 「统计」开关已移除，该块恒执行。
+				{
 					var protoTcp = Number(data.protocols.tcp) || 0;
 					var protoUdp = Number(data.protocols.udp) || 0;
 					var protoOther = Number(data.protocols.other) || 0;
@@ -3222,10 +3345,15 @@ return view.extend({
 					} else {
 						wifiPart = data.mac ? ' &nbsp;|&nbsp; <span style="color:var(--tc-faint)">MAC: '+escHtml(data.mac)+'</span>' : '';
 					}
+					// 同 renderSummary：整体赋 className 会丢掉 tc-hidden。
+					var sHidden = statsDiv.classList.contains('tc-hidden');
 					statsDiv.className = 'alert-message ' + (data.blocked ? 'error' : 'info');
+					if (sHidden) statsDiv.classList.add('tc-hidden');
 					statsDiv.innerHTML = (data.blocked
 						? '<b>⛔ ' + _('BLOCKED') + '</b> — '+(Number(data.block_packets) || 0)+' pkts, '+fmtBytes(Number(data.block_bytes) || 0)+' ' + _('dropped') + ' &nbsp;|&nbsp; '
 						: '') + parts.join(' &nbsp;|&nbsp; ') + wifiPart;
+					// 单设备模式下统计条刚被填好，卡片可能要显示出来。
+					updateOverviewCard();
 				}
 
 				updateInetBtn(data.blocked);
@@ -3234,25 +3362,29 @@ return view.extend({
 				var curShapeRate = data.shape_kbit || 0;
 				var curLimitRate = data.rate_limit_kbit || 0;
 				var curRate = curShapeRate > 0 ? curShapeRate : curLimitRate;
-				modePick.setValue(curShapeRate > 0 ? 'shaper' : (curLimitRate > 0 ? 'limiter' : 'shaper'));
-
-				var curRateStr = String(curRate);
-				var matched = RATE_PRESETS.some(function(p) { return p.v === curRateStr; });
-				// Leave the panel alone entirely while the custom field is
-				// open — this runs on every poll.
-				if (_customPinned) {
-					/* user is editing */
-				} else if (matched) {
-					ratePick.setValue(curRateStr);
-					customRow.classList.add('tc-hidden');
-				} else if (curRate > 0) {
-					ratePick.setValue('custom');
-					customInput.value = curRate;
-					_customUnit = 'kbit'; updateUnitBtns();
-					customRow.classList.remove('tc-hidden');
-				} else {
-					ratePick.setValue('0');
-					customRow.classList.add('tc-hidden');
+				// 【本仓库改动 v0.6.9】速率部件已移进「限制」弹层，故只在
+				//   **弹层正开着、且看的就是这台设备**时才回填 —— 否则会把
+				//   另一台设备的值写进弹层，或在没打开时白白改动隐藏的部件。
+				if (_limitPopupOpen && _limitIp === ip) {
+					modePick.setValue(curShapeRate > 0 ? 'shaper' : (curLimitRate > 0 ? 'limiter' : 'shaper'));
+					var curRateStr = String(curRate);
+					var matched = RATE_PRESETS.some(function(p) { return p.v === curRateStr; });
+					// Leave the panel alone entirely while the custom field is
+					// open — this runs on every poll.
+					if (_customPinned) {
+						/* user is editing */
+					} else if (matched) {
+						ratePick.setValue(curRateStr);
+						customRow.classList.add('tc-hidden');
+					} else if (curRate > 0) {
+						ratePick.setValue('custom');
+						customInput.value = curRate;
+						_customUnit = 'kbit'; updateUnitBtns();
+						customRow.classList.remove('tc-hidden');
+					} else {
+						ratePick.setValue('0');
+						customRow.classList.add('tc-hidden');
+					}
 				}
 
 				while (connsDiv.firstChild) connsDiv.removeChild(connsDiv.firstChild);
@@ -3320,13 +3452,17 @@ return view.extend({
 						}
 					}
 				}
-				setStatus(statusDiv, 'ok', '✓ ' + _('Done'));
+				setRoutineStatus(statusDiv, 'ok', '✓ ' + _('Done'));
 			})
-			.catch(function(e) { setStatus(statusDiv, 'error', '✗ '+e.message); });
+			.catch(function(e) { setRoutineStatus(statusDiv, 'error', '✗ '+e.message); });
 		}
 
 		self._tableFilter = null;
 		self._lastRows = [];
+		// 【本仓库改动】分页状态（参照图底部的「每页 N 条」）。
+		//   0 表示「全部」。存 localStorage，刷新后保持同一页长。
+		self._pageSize = Number(opts.pageSize) || 20;
+		self._page = 1;
 
 		function applyTableFilter(rows) {
 			var f = self._tableFilter;
@@ -3360,9 +3496,13 @@ return view.extend({
 				r.total = t.total;
 				r.tcp = t.tcp;
 				r.udp = t.udp;
+				r._total_up = t.up;
+				r._total_dn = t.dn;
 				r._live_total = t.liveTotal;
 				r._live_tcp = t.liveTcp;
 				r._live_udp = t.liveUdp;
+				r._live_up = t.liveUp;
+				r._live_dn = t.liveDn;
 				r._total_since = t.since;
 				r._total_degraded = t.degraded;
 			});
@@ -3376,7 +3516,10 @@ return view.extend({
 			var specs = [
 				['data-total-ip',     'total',    'liveTotal'],
 				['data-total-tcp-ip', 'tcp',      'liveTcp'],
-				['data-total-udp-ip', 'udp',      'liveUdp']
+				['data-total-udp-ip', 'udp',      'liveUdp'],
+				// 累计上行 / 下行同样随字节轮询增长，否则这两列会停在全表重建的那一刻。
+				['data-total-up-ip',  'up',       'liveUp'],
+				['data-total-dn-ip',  'dn',       'liveDn']
 			];
 			Object.keys(self._totalsMap).forEach(function(ip) {
 				var t = self._totalsMap[ip];
@@ -3403,7 +3546,12 @@ return view.extend({
 			var lnk = 'cursor:pointer;text-decoration:underline;text-decoration-style:dashed';
 			var activeFilter = self._tableFilter;
 
+			// className 整体赋值会**丢掉 tc-hidden** —— 关掉「统计」后
+			// 下一次 renderSummary 把它写回来，于是统计条照样显示。
+			// 故先把隐藏态记下，赋完类名再还原。
+			var statsHidden = statsDiv.classList.contains('tc-hidden');
 			statsDiv.className = 'alert-message info';
+			if (statsHidden) statsDiv.classList.add('tc-hidden');
 			while (statsDiv.firstChild) statsDiv.removeChild(statsDiv.firstChild);
 
 			function mkFilterVal(filter, color, text) {
@@ -3446,6 +3594,8 @@ return view.extend({
 				statsDiv.appendChild(E('span', {'style':'margin-left:10px;cursor:pointer;color:var(--tc-muted);font-size:11px'}, '✕ ' + _('clear filter')));
 				statsDiv.lastChild.addEventListener('click', function() { self._tableFilter = null; renderSummary(rows); });
 			}
+			// 统计条刚填好内容，卡片可能要由隐藏转为显示。
+			updateOverviewCard();
 
 			// Says once, in words, what the ⚠ in every byte cell means. The
 			// Flow Offload banner above already explains the mode, but on this
@@ -3466,8 +3616,21 @@ return view.extend({
 			if (filtered.length === 0) {
 				connsDiv.appendChild(E('p',{'style':'color:var(--tc-muted);padding:12px 0'}, _('No devices match filter.')));
 			} else {
+				// 【本仓库改动】分页：只把当前页交给表格构建器。
+				//   必须在**排序之后**切片才有意义，故先让 buildSummaryTable 排序
+				//   就不可行 —— 它是构建并排序一体的。这里改为：先按当前排序列
+				//   对 filtered 排一次序（与 buildSummaryTable 内同一套规则），
+				//   再切片，然后把切片交给它（它会对切片再排一次，结果一致）。
+				var sortedAll = sortSummaryRows(filtered, self._sumCol, self._sumDir);
+				var pageSize = self._pageSize > 0 ? self._pageSize : sortedAll.length;
+				var pageCount = Math.max(1, Math.ceil(sortedAll.length / pageSize));
+				if (self._page > pageCount) self._page = pageCount;
+				if (self._page < 1) self._page = 1;
+				var start = (self._page - 1) * pageSize;
+				var pageRows = sortedAll.slice(start, start + pageSize);
+
 				var tbl = buildSummaryTable(
-					filtered,
+					pageRows,
 					self._sumCol,
 					self._sumDir,
 					function(key, isNum) {
@@ -3477,6 +3640,7 @@ return view.extend({
 							self._sumCol = key;
 							self._sumDir = isNum ? 'desc' : 'asc';
 						}
+						self._page = 1;
 						renderSummary(rows);
 					},
 					function(ip) {
@@ -3491,17 +3655,90 @@ return view.extend({
 					self._dropMap,
 					self._shapeMap,
 					self._speedHistory,
-					self._hiddenCols
+					self._hiddenCols,
+					// 【本仓库改动 v0.6.9】「限制」链接直接打开该设备的限速弹层。
+					function(cell, ip, name) { openLimitPopup(cell, ip, name); }
 				);
 				connsDiv.appendChild(E('div',{'style':'overflow-x:auto'},[tbl]));
+				connsDiv.appendChild(mkPager(sortedAll.length, start, pageRows.length, pageCount));
 				connsDiv.appendChild(E('p',{'style':'color:var(--tc-faint);font-size:11px;margin-top:6px'},
 					_('Click a row to inspect that device. Download and upload speeds update every 2 seconds.')));
 			}
 		}
 
-		function runAll() {
-			setStatus(statusDiv, 'loading', _('Scanning all devices…'));
+		// 与 buildSummaryTable 内的排序规则保持一致（否则分页切片的顺序与
+		// 表内最终顺序不同，会出现「第一页不是最快的设备」这种怪现象）。
+		function sortSummaryRows(rows, sortCol, sortDir) {
+			function ipToInt(s) {
+				var p = String(s||'').split('.');
+				if (p.length !== 4) return 0;
+				return ((parseInt(p[0])||0)*16777216 + (parseInt(p[1])||0)*65536 + (parseInt(p[2])||0)*256 + (parseInt(p[3])||0));
+			}
+			return rows.slice().sort(function(a, b) {
+				var av = a[sortCol], bv = b[sortCol];
+				if (typeof av === 'number') {
+					var diff = sortDir === 'asc' ? av - bv : bv - av;
+					if (diff !== 0) return diff;
+					return String(a.name || '').localeCompare(String(b.name || ''));
+				}
+				if (typeof av === 'boolean') return sortDir === 'asc' ? (av?1:0)-(bv?1:0) : (bv?1:0)-(av?1:0);
+				if (sortCol === 'ip') {
+					var d = ipToInt(av) - ipToInt(bv);
+					return sortDir === 'asc' ? d : -d;
+				}
+				av = String(av||''); bv = String(bv||'');
+				return sortDir === 'asc' ? av.localeCompare(bv) : bv.localeCompare(av);
+			});
+		}
 
+		// 底部分页条：左侧「共 N 条 当前显示 a-b」，右侧「每页 N 条」+ 页码。
+		// 只在「所有设备」模式下出现（单设备模式只有一行数据，分页没有意义）。
+		function mkPager(total, start, shown, pageCount) {
+			var sizes = [20, 50, 100, 0];
+			var sizeLabels = { 20:'20', 50:'50', 100:'100' };
+			var sel = E('select', {'class':'cbi-input-select', 'style':'margin:0 4px'}, sizes.map(function(s) {
+				return E('option', { 'value': String(s), 'selected': (self._pageSize === s) ? 'selected' : undefined },
+					s === 0 ? _('All') : sizeLabels[s]);
+			}));
+			sel.addEventListener('change', function() {
+				self._pageSize = parseInt(sel.value, 10) || 0;
+				self._page = 1;
+				var o = loadOpts(); o.pageSize = self._pageSize; saveOpts(o);
+				renderSummary(self._lastRows);
+			});
+
+			function pageBtn(label, page, disabled, active) {
+				var b = E('span', {
+					'class': 'tc-page-btn' + (active ? ' tc-page-btn--active' : '') + (disabled ? ' tc-page-btn--disabled' : ''),
+					'style': disabled ? 'pointer-events:none;opacity:.45' : ''
+				}, label);
+				if (!disabled && !active) b.addEventListener('click', function() { self._page = page; renderSummary(self._lastRows); });
+				return b;
+			}
+
+			var nav = [];
+			nav.push(pageBtn('«', 1, self._page <= 1, false));
+			nav.push(pageBtn('‹', self._page - 1, self._page <= 1, false));
+			// 页码窗口：当前页 ±2，最多 5 个。
+			var from = Math.max(1, self._page - 2), to = Math.min(pageCount, from + 4);
+			from = Math.max(1, to - 4);
+			for (var p = from; p <= to; p++) nav.push(pageBtn(String(p), p, false, p === self._page));
+			nav.push(pageBtn('›', self._page + 1, self._page >= pageCount, false));
+			nav.push(pageBtn('»', pageCount, self._page >= pageCount, false));
+
+			return E('div', {'class':'tc-pager'}, [
+				E('span', {'class':'tc-pager__info'}, _('Total') + ' ' + total + ' ' + _('items') +
+					'  ' + _('showing') + ' ' + (total === 0 ? 0 : start + 1) + '-' + (start + shown)),
+				E('span', {'class':'tc-pager__right'}, [
+					E('span', {}, _('Per page')), sel, E('span', {}, _('items')),
+					E('span', {'style':'margin:0 10px;color:var(--tc-faint)'}, '|'),
+					E('span', {}, nav)
+				])
+			]);
+		}
+
+		function runAll() {
+			// 例行轮询不写「扫描中…」（1 秒档位下会一直闪），只在失败时报错。
 			// 必须 return：轮询的防重入锁依赖「请求真正结束」才复位
 			// （见 _setupTimer 旁的 tick 与 runQuery 的注释）。
 			return callTrafficctl().then(function(rows) {
@@ -3519,10 +3756,10 @@ return view.extend({
 						netifyMap = m;
 					}).catch(function() {});
 				}
-				setStatus(statusDiv, 'ok', '✓ ' + _('Done'));
+				setRoutineStatus(statusDiv, 'ok', '✓ ' + _('Done'));
 				self._startBytesPoll();
 			})
-			.catch(function(e) { setStatus(statusDiv, 'error', '✗ '+e.message); });
+			.catch(function(e) { setRoutineStatus(statusDiv, 'error', '✗ '+e.message); });
 		}
 
 		function updateExtendedStats() {
@@ -3705,29 +3942,47 @@ return view.extend({
 		var savedHidden = opts.hiddenCols || {};
 		self._hiddenCols = savedHidden;
 
+		// 【本仓库改动 v0.6.8】可见列清单只含**默认隐藏**的列。
+		//   默认就显示的列（IP/MAC、连接数、四个速率列、类型厂商、名称、操作、
+		//   TCP、UDP、互联网、限制）不列进来 —— 它们本来就看得见，再给一个
+		//   开关只会让人以为「没勾上就是没有」。
+		//   与 buildSummaryTable 的 cols 保持同源：key 必须都在 cols 里，
+		//   且恰好是 cols 中默认隐藏的那一批（断言按此校验）。
 		var colChipDefs = [
-			{key:'name', label:_('Device')}, {key:'ip', label:'IP'}, {key:'mac', label:'MAC'},
-			{key:'_speed', label:_('DL Speed')}, {key:'_speed_up', label:_('UL Speed')},
-			{key:'_spark', label:_('Graph')},
-			{key:'conns', label:_('Conns')}, {key:'total', label:_('Bytes')},
-			{key:'tcp', label:'TCP'}, {key:'udp', label:'UDP'},
-			{key:'blocked', label:_('Inet')}, {key:'conn_type', label:_('Link')},
-			{key:'_throttle_kbit', label:_('Speed Limit')},
-			{key:'_drop_packets', label:_('Drops')}, {key:'_backlog', label:_('Queue')}
+			{key:'mac',           label:'MAC'},
+			{key:'_spark',        label:_('Graph')},
+			{key:'total',         label:_('Bytes')},
+			{key:'conn_type',     label:_('Link')},
+			{key:'app',           label:_('App')},
+			{key:'_drop_packets', label:_('Drops')},
+			{key:'_backlog',      label:_('Queue')}
 		];
-		var colChipsContainer = E('div', {'class':'tc-chips-wrap'});
+		// 复选框**一行一个**（原先是挤在一起的圆形 chip，多到五行、每行长短
+		// 不一，要在一堆同色小圆里找某一列）。一行一个复选框：命中区域大、
+		// 对齐整齐、状态一眼可读。
+		var colChipsContainer = E('div', {'class':'tc-col-checks'});
 		colChipDefs.forEach(function(ct) {
-			var chip = E('span', {
-				'class': savedHidden[ct.key] ? 'tc-col-chip tc-col-chip--off' : 'tc-col-chip tc-col-chip--on',
-				'data-tip': _('Click to toggle column visibility')
-			}, ct.label);
-			chip.addEventListener('click', function() {
-				if (self._hiddenCols[ct.key]) { delete self._hiddenCols[ct.key]; chip.className = 'tc-col-chip tc-col-chip--on'; }
-				else { self._hiddenCols[ct.key] = true; chip.className = 'tc-col-chip tc-col-chip--off'; }
+			var cb = E('input', {
+				'type': 'checkbox',
+				'class': 'tc-col-check__box',
+				'id': 'tc-col-' + ct.key
+			});
+			cb.checked = !isColHidden(ct.key, savedHidden);
+			var row = E('label', {
+				'class': 'tc-col-check',
+				'for': 'tc-col-' + ct.key,
+				'data-tip': _('Show this column in the device table')
+			}, [cb, E('span', {'class':'tc-col-check__label'}, ct.label)]);
+			cb.addEventListener('change', function() {
+				// 【关键】两个方向都写**显式布尔**，不用 delete。
+				//   delete 之后 isColHidden 会回落到默认隐藏，于是「勾上」
+				//   看起来毫无作用（勾是勾了、表格里却没有这一列）。
+				//   写显式值还让用户的选择能抵御后续默认值变化。
+				self._hiddenCols[ct.key] = !cb.checked;
 				var o = loadOpts(); o.hiddenCols = self._hiddenCols; saveOpts(o);
 				if (isAllMode()) runAll();
 			});
-			colChipsContainer.appendChild(chip);
+			colChipsContainer.appendChild(row);
 		});
 
 		// Per-device connection table column toggles
@@ -3757,331 +4012,52 @@ return view.extend({
 			connColChipsContainer.appendChild(chip);
 		});
 
-		var sep = function() { return E('span', {'class':'tc-sep'}); };
-		var sectionLabel = function(t) { return E('div', {'class':'tc-section-label'}, t); };
-
-		var settingsBody = E('div', {'class':'tc-settings-body'});
-		// 【本仓库补丁（相对上游 1.21.4）】
-		//   上游把整个设置区包在一个可折叠容器里且**初始隐藏**（tc-hidden），
-		//   用户必须点标题才能看到任何设置项。本仓库改为：常显标题栏 +
-		//   内容始终可见，小节全部默认展开。
-		//   注意：Telegram Bot 已**提升为页面级独立 tab**（telegram.js，由
-		//   menu.d 生成），故本页不再有嵌套 tab —— 两级 tab 会让人分不清
-		//   哪一层在切页。其余设置项直接顺序列出。
-		var settingsHeader = E('div', {'class':'tc-settings-head'}, [
-			E('span', {'class':'tc-settings-title'}, _('Settings')),
-			E('span', {'class':'tc-settings-hint'}, _('changes are saved automatically'))
-		]);
-
-		// ── Collapsible subsection helper ──────────────────────────────────
-		// 【本仓库补丁】
-		//   - startOpen 缺省 true（上游为 false），小节默认全展开；
-		//   - 去掉折叠态持久化（上游本就没有；本地旧版曾用 localStorage 记住，
-		//     导致用户收起过一次后每次都收起，表现为「设置没有完全展开」）；
-		//   - loader 作为**构造参数**传入：小节初始即展开时，mkCollapsible 内部
-		//     会立刻触发首次展开，若沿用「返回后再赋 onFirstOpen」的写法，
-		//     回调此刻尚未挂上，懒加载永不执行、内容区空白。
-		function mkCollapsible(title, content, startOpen, loader) {
-			var open = (startOpen === undefined) ? true : !!startOpen;
-			var body = E('div', {'class': 'tc-collapsible-body' + (open ? '' : ' tc-hidden')});
-			if (content) body.appendChild(content);
-			var arrow = E('span', {'class':'tc-collapse-arrow'}, open ? '▾' : '▸');
-			var label = sectionLabel(title);
-			label.classList.add('tc-collapsible-head');
-			label.appendChild(arrow);
-			var el = E('div', {'class':'tc-card' + (open ? ' tc-card--open' : '')}, [label, body]);
-			var api = {label: label, body: body, el: el, _opened: false, _loader: loader};
-			function setOpen(v) {
-				open = !!v;
-				body.classList.toggle('tc-hidden', !open);
-				el.classList.toggle('tc-card--open', open);
-				arrow.textContent = open ? '▾' : '▸';
-				if (open && !api._opened) { api._opened = true; if (api._loader) api._loader(body); }
-			}
-			label.addEventListener('click', function() { setOpen(!open); });
-			label._tcSetOpen = setOpen;
-			if (open) setOpen(true);
-			return api;
-		}
-
-
-		// ── Assemble settings sections ─────────────────────────────────────
-		//
-		// 【本仓库补丁（相对上游 1.21.4）】把平铺的小节改为 **tab 分页**。
-		//   原因：Telegram Bot 的表单极长（Token / Chat ID / 测试 / 控制开关 /
-		//   内联键盘矩阵 / 机器人命令 / 通知 / 自定义消息，实测单卡片 1270px），
-		//   与其它设置混在一起时把整页撑到 2600px 以上，且与常用项争夺注意力。
-		//   现分三个 tab，按「使用频率」排序，Telegram 独立成页：
-		//     Display & Table  —— 显示、表格与速率（高频，默认打开）
-		//     Devices         —— 新设备默认值、流量卸载
-		//     Telegram        —— Telegram 机器人（低频、最长）
-		//   tab 状态持久化到 localStorage，刷新后保持用户所在页。
-		//
-		// 说明：displaySection / loggingSection 等仍在下方按顺序创建并
-		//   appendChild 到各自的 tab 容器，故此处只建立容器骨架。
-		// tab 容器：卡片瀑布流（column-count 定义在 CSS 的 .tc-settings-pane 上）
-
-		var displaySection = mkCollapsible(_('Display'), E('div', {'class':'tc-settings-section-row'}, [
-			showStats, showConns, overviewCheck, extStatsCheck, rdnsCheck, activityCheck,
-			sep(),
-			E('span', {'data-tip':_('Auto-refresh interval for summary table')}, [mkLabel(_('Refresh')+':'), refreshPick.el])
-		]), true);
-		settingsBody.appendChild(displaySection.el);
-
-		// ── Logging & Persistence section (lazy-loaded) ────────────────────
-		var loggingSection = mkCollapsible(_('Logging & Persistence'), null, true, function(body) { loadLoggingUI(body); });
-
-		function loadLoggingUI(container) {
-			var statusSpan = E('span', {'style':'font-size:12px;color:var(--tc-muted)'}, _('Loading…'));
-			container.appendChild(statusSpan);
-
-			callLoggingGet().then(function(cfg) {
-				while (container.firstChild) container.removeChild(container.firstChild);
-
-				var logStatus = E('span', {'class':'tg-save-status'});
-				var logTimer = null;
-				var doLogSave = function() {
-					if (logTimer) clearTimeout(logTimer);
-					logTimer = setTimeout(function() {
-						logStatus.textContent = _('Saving…');
-						logStatus.style.color = 'var(--tc-muted)';
-						callLoggingSet(
-							container.querySelector('#tm-log-enabled').checked,
-							null, null,
-							container.querySelector('#tm-log-syslog').checked,
-							container.querySelector('#tm-log-blocks').checked,
-							container.querySelector('#tm-log-ratelimits').checked,
-							container.querySelector('#tm-log-shapes').checked,
-							container.querySelector('#tm-log-telegram').checked,
-							container.querySelector('#tm-log-config').checked,
-							container.querySelector('#tm-persist-rules').checked
-						).then(function(res) {
-							logStatus.textContent = (res && res.ok) ? '✓' : '✗';
-							logStatus.style.color = (res && res.ok) ? 'var(--tc-ok)' : 'var(--tc-err)';
-						}).catch(function(e) {
-							logStatus.textContent = '✗';
-							logStatus.style.color = 'var(--tc-err)';
-						});
-					}, 400);
-				};
-
-				var logEnabled = mkToggle('tm-log-enabled', _('Logging'), cfg.enabled, doLogSave);
-				var logSyslog = mkToggle('tm-log-syslog', _('Syslog'), cfg.syslog, doLogSave);
-				var persistRules = mkToggle('tm-persist-rules', _('Persist rules'), cfg.persist_rules, doLogSave);
-
-				var logBlocks = mkToggle('tm-log-blocks', _('Blocks'), cfg.log_blocks, doLogSave);
-				var logRatelimits = mkToggle('tm-log-ratelimits', _('Ratelimits'), cfg.log_ratelimits, doLogSave);
-				var logShapes = mkToggle('tm-log-shapes', _('Shapes'), cfg.log_shapes, doLogSave);
-				var logTelegram = mkToggle('tm-log-telegram', _('Telegram'), cfg.log_telegram, doLogSave);
-				var logConfig = mkToggle('tm-log-config', _('Config'), cfg.log_config, doLogSave);
-
-				container.appendChild(E('div', {'class':'tc-log-row'}, [logEnabled, logSyslog, persistRules, logStatus]));
-				container.appendChild(E('div', {'style':'margin-top:6px'}, [
-					E('div', {'style':'font-size:11px;color:var(--tc-muted);margin-bottom:4px'}, _('Log categories')),
-					E('div', {'class':'tc-log-row'}, [logBlocks, logRatelimits, logShapes, logTelegram, logConfig])
-				]));
-			}).catch(function(e) {
-				statusSpan.textContent = '✗ ' + e.message;
-				statusSpan.style.color = 'var(--tc-err)';
-			});
-		}
-		settingsBody.appendChild(loggingSection.el);
-
-		// ── New Device Defaults section (lazy-loaded) ──────────────────────
-		var newDevSection = mkCollapsible(_('New Device Defaults'), null, true, function(body) { loadNewDeviceUI(body); });
-
-		function loadNewDeviceUI(container) {
-			var statusSpan = E('span', {'style':'font-size:12px;color:var(--tc-muted)'}, _('Loading…'));
-			container.appendChild(statusSpan);
-
-			callNewDeviceGet().then(function(cfg) {
-				while (container.firstChild) container.removeChild(container.firstChild);
-
-				var saveStatus = E('span', {'class':'tg-save-status'});
-				var hint = E('div', {'style':'font-size:11px;color:var(--tc-muted);margin-top:6px'});
-				var modePick = null;
-				var saveTimer = null;
-
-				// The baseline is what stops the feature limiting the whole
-				// LAN, so its size is shown rather than left implicit: an
-				// operator can tell a populated ledger from an empty one.
-				function renderHint(c) {
-					var kbit = parseInt(rateInput.value, 10);
-					if (enabledToggle.querySelector('input').checked && (!kbit || kbit <= 0)) {
-						hint.textContent = _('Set a rate above 0 — with no rate this does nothing.');
-						hint.style.color = 'var(--tc-warn)';
-						return;
-					}
-					hint.style.color = 'var(--tc-muted)';
-					if (c && c.seeded) {
-						hint.textContent = _('Devices already known:') + ' ' + (c.seen_count || 0) +
-							' — ' + _('these are never limited by this setting.');
-					} else {
-						hint.textContent = _('No baseline recorded yet. It is taken from the current leases when you switch this on.');
-					}
-				}
-
-				var doSave = function() {
-					if (saveTimer) clearTimeout(saveTimer);
-					saveTimer = setTimeout(function() {
-						saveStatus.textContent = _('Saving…');
-						saveStatus.style.color = 'var(--tc-muted)';
-						var kbit = parseInt(rateInput.value, 10);
-						if (isNaN(kbit) || kbit < 0) kbit = 0;
-						callNewDeviceSet(
-							enabledToggle.querySelector('input').checked,
-							kbit,
-							modePick.getValue()
-						).then(function(res) {
-							saveStatus.textContent = (res && res.ok) ? '✓' : '✗';
-							saveStatus.style.color = (res && res.ok) ? 'var(--tc-ok)' : 'var(--tc-err)';
-							if (res && res.ok) {
-								callNewDeviceGet().then(renderHint).catch(function() {});
-							}
-						}).catch(function() {
-							saveStatus.textContent = '✗';
-							saveStatus.style.color = 'var(--tc-err)';
-						});
-					}, 400);
-				};
-
-				var enabledToggle = mkToggle('tm-nd-enabled', _('Limit new devices'), cfg.enabled, function() {
-					renderHint(cfg);
-					doSave();
-				});
-
-				var rateInput = E('input', {
-					'type': 'number',
-					'min': '0',
-					'class': 'tg-input tg-input--chat',
-					'value': cfg.limit_kbit || 0,
-					'placeholder': _('kbit/s')
-				});
-				rateInput.addEventListener('change', function() {
-					renderHint(cfg);
-					doSave();
-				});
-
-				modePick = mkChipPick([
-					{ v: 'limiter', l: _('Limiter') },
-					{ v: 'shaper', l: _('Shaper') }
-				], cfg.limit_mode || 'limiter', doSave);
-
-				container.appendChild(E('div', {'class':'tc-log-row'}, [
-					enabledToggle, mkLabel(_('Rate')), rateInput, mkLabel(_('kbit/s')),
-					modePick.el, saveStatus
-				]));
-				container.appendChild(hint);
-				container.appendChild(E('div', {'style':'font-size:11px;color:var(--tc-muted);margin-top:4px'},
-					_('Applied once, the first time a device appears on the network. A device that already has a limit is left alone.')));
-
-				renderHint(cfg);
-			}).catch(function(e) {
-				statusSpan.textContent = '✗ ' + e.message;
-				statusSpan.style.color = 'var(--tc-err)';
-			});
-		}
-		settingsBody.appendChild(newDevSection.el);
-
-		// ── Flow Offload section (lazy-loaded) ─────────────────────────────
-		var offloadSection = mkCollapsible(_('Flow Offload'), null, true, function(body) { loadOffloadUI(body); });
-
-		function loadOffloadUI(container) {
-			var statusSpan = E('span', {'style':'font-size:12px;color:var(--tc-muted)'}, _('Loading…'));
-			container.appendChild(statusSpan);
-
-			callConfigGet().then(function(cfg) {
-				while (container.firstChild) container.removeChild(container.firstChild);
-
-				var saveStatus = E('span', {'class':'tg-save-status'});
-				var saveTimer = null;
-				var swCb, hwCb;
-
-				function doSave() {
-					if (saveTimer) clearTimeout(saveTimer);
-					saveTimer = setTimeout(function() {
-						saveStatus.textContent = _('Applying…');
-						saveStatus.style.color = 'var(--tc-muted)';
-						callConfigSet(undefined, undefined, swCb.checked, hwCb.checked).then(function(res) {
-							saveStatus.textContent = (res && res.ok) ? '✓ ' + _('Applied — firewall reloading') : '✗';
-							saveStatus.style.color = (res && res.ok) ? 'var(--tc-ok)' : 'var(--tc-err)';
-						}).catch(function(e) {
-							saveStatus.textContent = '✗';
-							saveStatus.style.color = 'var(--tc-err)';
-						});
-					}, 400);
-				}
-
-				// Current mode badge
-				var modeLabels = {
-					'none':              ['⊘', _('No offload'),              'var(--tc-muted)'],
-					'software':          ['◑', _('Software offload'),        'var(--tc-speed)'],
-					// tctl_get_offload_mode splits software offload on the flowtable
-					// counter flag, so this value reaches the badge too. Without an
-					// entry the badge fell through to '?' and the raw mode string.
-					'software-counter':  ['◑', _('Software offload'),        'var(--tc-speed)'],
-					'hardware-counter':  ['●', _('Hardware offload'),        'var(--tc-warn)'],
-					'hardware':          ['●', _('Hardware offload'),        'var(--tc-warn)']
-				};
-				var ml = modeLabels[cfg.offload_mode] || ['?', cfg.offload_mode, 'var(--tc-muted)'];
-				var modeBadge = E('div', {'style':'margin-bottom:10px;font-size:12px'}, [
-					E('span', {'style':'color:'+ml[2]+';font-size:15px;margin-right:4px'}, ml[0]),
-					E('span', {'style':'color:var(--tc-muted)'}, _('Current mode: ')),
-					E('b', {}, ml[1])
-				]);
-
-				// SW toggle row
-				var swToggleEl = mkToggle('tc-offload-sw', _('Software flow offload'), cfg.sw, function() {
-					hwCb.disabled = !swCb.checked;
-					if (!swCb.checked) { hwCb.checked = false; }
-					doSave();
-				});
-				swCb = swToggleEl.querySelector('input');
-				var swDesc = E('div', {'class':'tc-offload-desc'},
-					_('Accelerates routing in the kernel via nftables flowtable. Speed monitoring and traffic shaping work normally.'));
-
-				// HW toggle row
-				var hwToggleEl = mkToggle('tc-offload-hw', _('Hardware flow offload'), cfg.hw, doSave);
-				hwCb = hwToggleEl.querySelector('input');
-				if (!cfg.sw) hwCb.disabled = true;
-				var hwDesc = E('div', {'class':'tc-offload-desc'},
-					_('Offloads routing to the hardware engine (PPE/NPU). Requires software offload. ' +
-					  '⚠ On many platforms (e.g. Mediatek Filogic) the driver does not report byte counters back to the kernel — real-time speed monitoring will show zero.'));
-
-				container.appendChild(modeBadge);
-				container.appendChild(E('div', {'class':'tc-offload-row'}, [swToggleEl, saveStatus]));
-				container.appendChild(swDesc);
-				container.appendChild(E('div', {'class':'tc-offload-row tc-offload-row--hw'}, [hwToggleEl]));
-				container.appendChild(hwDesc);
-			}).catch(function(e) {
-				statusSpan.textContent = '✗ ' + (e.message || e);
-				statusSpan.style.color = 'var(--tc-err)';
-			});
-		}
-		settingsBody.appendChild(offloadSection.el);
-
+		// 连接表筛选（协议 / 分组）。此前它随其它设置项一起定义在下方，
+		// v0.6.0 把配置区迁走时该定义被一并删除，而 viewSection 与
+		// updateTableSectionMode 仍在引用它 → 「connFiltersRow is not defined」
+		// 令整页 render 抛错、页面空白。故定义必须留在引用之前。
 		var connFiltersRow = E('div', {'class':'tc-conn-filters-row'}, [
-			E('span', {'data-tip':_('Filter connections by protocol')}, [mkLabel(_('Proto')+':'), protoPick.el]),
-			sep(),
-			E('span', {'data-tip':_('Group connections table rows')}, [mkLabel(_('Group')+':'), groupPick.el])
+			E('span', {'data-tip':_('Filter connections by protocol')}, [T.mkLabel(_('Proto')+':'), protoPick.el]),
+			T.sep(),
+			E('span', {'data-tip':_('Group connections table rows')}, [T.mkLabel(_('Group')+':'), groupPick.el])
 		]);
-		var tableSection = mkCollapsible(_('Table & Speed'), E('div', {'class':'tc-table-speed-inner'}, [
-			E('div', {'class':'tc-table-speed-row'}, [
-				E('span', {'data-tip':_('How often live data is polled: speeds, graphs, drop/backlog counters, and the connection table in device view')}, [mkLabel(_('Poll')+':'), pollIntervalPick.el]),
-				sep(),
-				E('span', {'data-tip':_('Time window for speed averaging')}, [mkLabel(_('Window')+':'), avgWindowPick.el]),
-				sep(),
-				E('span', {'data-tip':_('Simple = arithmetic mean, EWMA = exponential weighted moving average')}, [mkLabel(_('Method')+':'), avgMethodPick.el]),
-				sep(),
-				defaultsSaveBtn, defaultsSaveStatus
-			]),
-			E('div', {'style':'font-size:11px;color:var(--tc-muted);margin-bottom:4px'}, _('Visible columns')),
-			colChipsContainer,
-			connColChipsContainer,
-			connFiltersRow
-		]), true);
-		settingsBody.appendChild(tableSection.el);
 
+		// 【本仓库改动】sep / sectionLabel / mkCollapsible 原先在此定义，
+		// 因设置区迁出后本页只剩连接表一处使用，且它们已在
+		// trafficctl/common.js 中有同一份实现，故删除本地副本，直接用 T.*。
+
+		// ── 本页视图与表格 ────────────────────────────────────────────────
+		//
+		// 【本仓库改动】原先这些开关裹在一张可折叠卡片「视图与表格」里，
+		//   与「可见列」chip 挤在一起。现按用途拆成两处：
+		//     ① **开关**（v0.6.9 起只剩「扩展统计」与「反向DNS」）直接展示在
+		//        速率限制卡片尾部 —— 它们各自决定一段内容显不显示。
+		//     ② **可见列**（设备列 chip、连接表列 chip、连接表筛选）收进一个
+		//        「可见列」按钮的浮层，与 ☰ 组成按钮组（可见列 | ☰）。
+		//        这些是「调表的显示」，平时不动，却数量最多、最占横向空间。
+		var togglesRow = E('div', {'class':'tc-view-toggles'}, [
+			extStatsCheck, rdnsCheck
+		]);
+
+		// 「可见列」浮层面板：设备列 / 连接表列 / 连接表筛选。
+		var visibleColsMenu = mkPopupMenu({
+			text: _('Visible columns'),
+			tip: _('Choose which columns the device table and the connection table show')
+		});
+		visibleColsMenu.panel.appendChild(E('div', {'class':'tc-menu__label'}, _('Visible columns')));
+		visibleColsMenu.panel.appendChild(colChipsContainer);
+		visibleColsMenu.panel.appendChild(connColChipsContainer);
+		visibleColsMenu.panel.appendChild(connFiltersRow);
+
+		// 【本仓库改动】原先是单独一行右对齐的 ☰。现两个菜单并列成一组：
+		// 「可见列 | ☰」。
+		var tableSpeedBar = E('div', {'class':'tc-menu-group'}, [
+			visibleColsMenu.bar,
+			speedMenu.bar
+		]);
+
+		// 整表列 chip 与连接表筛选只在各自模式下有意义：全局模式看设备列，
+		// 单设备模式看连接表列与筛选。不隐藏的话两组会同时出现并互相误导。
 		function updateTableSectionMode() {
 			var all = isAllMode();
 			colChipsContainer.classList.toggle('tc-hidden', !all);
@@ -4090,8 +4066,9 @@ return view.extend({
 		}
 		updateTableSectionMode();
 
-
-		var settingsPanel = E('div', {'class':'tc-settings-panel'}, [settingsHeader, settingsBody]);
+		// 【本仓库改动】开关行直接挂在速率限制卡片尾部（原先是可折叠卡片，
+		//   挂在 panelTail）。它不再需要外框 —— 目标是「一眼看到所有开关」。
+		panelTail.appendChild(togglesRow);
 
 		function loadActivityPanel(container) {
 			container.className = 'tc-activity-panel';
@@ -4128,10 +4105,10 @@ return view.extend({
 			});
 		}
 
-		if (opts.showActivity) {
-			activityDiv._loaded = true;
-			loadActivityPanel(activityDiv);
-		}
+		// 活动日志恒显（v0.6.9）：内容必须在首屏就加载 —— 原先这一步挂在
+		// 「活动日志」开关的勾选回调里，开关移除后就没人触发了。
+		activityDiv._loaded = true;
+		loadActivityPanel(activityDiv);
 
 		callVersion().then(function(res) {
 			var el = document.getElementById('tc-version-footer');
@@ -4142,6 +4119,12 @@ return view.extend({
 
 		var mkOffloadBanner = function(mode) {
 			if (!mode || mode === 'none') return null;
+
+			// 【本仓库改动】软件卸载**不再**出横幅。软件卸载不损失任何功能
+			// （速率由图上的 nftables 计数器提供，限速与阻断照常），却每次打开
+			// 页面都弹一条橙黄色公告，用户明确要求移除；模式本身在设置页的
+			// 「流量卸载」卡片里有常驻显示，不靠横幅告知。
+			if (mode === 'software' || mode === 'software-counter') return null;
 
 			var bg, border, icon, body;
 			var para = function(text) { return E('p', {'style': 'margin:6px 0'}, text); };
@@ -4210,16 +4193,17 @@ return view.extend({
 					docLinks,
 				]);
 			} else {
-				bg     = 'rgba(243,156,18,0.10)';
-				border = '#f39c12';
-				icon   = 'ℹ️';
+				// 兜底：software 已在函数开头直接返回 null，hardware 与
+				// hardware-counter 在上面各自处理，故这个分支只会在将来新增
+				// 未知 mode 值时走到。此前它是一个软件卸载说明分支，现已随
+				// 橙色横幅一并删除，留一条保守告警以免未知模式下边框/背景为
+				// undefined 而渲染出无边框的裸文本。
+				bg     = 'rgba(211,84,0,0.10)';
+				border = '#d35400';
+				icon   = '⚠️';
 				body   = E('div', {}, [
-					para(bold(_('Software flow offloading is active.'))),
-					para(_('The kernel fast-paths established connections through a flowtable, ' +
-						  'bypassing conntrack byte updates for higher throughput.')),
-					para(_('Speed is measured via nftables counters installed at a higher priority ' +
-						  '(before the flowtable), so graphs are accurate.')),
-					para(_('Traffic shaping and blocking are not affected.')),
+					para(bold(_('Flow offloading is active.'))),
+					para(_('Speed monitoring and traffic shaping may be bypassed for offloaded flows.')),
 					docLinks,
 				]);
 			}
@@ -4247,7 +4231,7 @@ return view.extend({
 
 		// Debug: add ?offload_debug=1 to URL to preview all banner types at once
 		if (window.location.search.indexOf('offload_debug') !== -1) {
-			['hardware-counter', 'software', 'hardware'].forEach(function(mode) {
+			['hardware-counter', 'hardware'].forEach(function(mode) {
 				var b = mkOffloadBanner(mode);
 				if (b) offloadBanner.appendChild(b);
 			});
@@ -4263,12 +4247,10 @@ return view.extend({
 
 		// ── Global internet cut (#55) ──────────────────────────────────────
 		//
-		// Deliberately NOT inside the collapsed Settings panel. This is the one
-		// control in the app that can lock out its own operator, so its live
-		// state has to be legible without expanding anything: a cut that is on
-		// must look on from the moment the page renders.
-		var cutPanel = E('div', {'class': 'tc-cut'});
-
+		// 【本仓库改动】容器已在上方随 rateLimitRow 一起创建（并挂进那张卡片），
+		//   此处只保留行为：CUT_DURATIONS、提交与渲染。
+		//   仍然常显：这是本应用唯一能把操作者自己关在门外的控件，其状态必须
+		//   在页面渲染出来的一刻就可读，不藏进任何折叠区。
 		var CUT_DURATIONS = [
 			{ v: '900',   l: _('15 min') },
 			{ v: '3600',  l: _('1 hour') },
@@ -4313,6 +4295,11 @@ return view.extend({
 			});
 		}
 
+		// 基类必须是常量：renderCut 每次重绘都要重设 className（切换
+		// --on/--broken 状态），若各处手写 'tc-cut' 就会把 --embedded 抹掉，
+		// 面板又变回带外框的独立卡片。
+		var CUT_BASE = 'tc-cut tc-cut--embedded';
+
 		function renderCut(st) {
 			var status, btn, hint, persistToggle, pick, note, devs;
 
@@ -4325,7 +4312,7 @@ return view.extend({
 			// nft is the only backend this is implemented on; saying so beats
 			// offering a button that would quietly do nothing.
 			if (st.supported === false) {
-				cutPanel.className = 'tc-cut';
+				cutPanel.className = CUT_BASE;
 				cutPanel.appendChild(E('div', {'class': 'tc-cut__row'}, [
 					E('span', {'class': 'tc-cut__icon'}, '⊘'),
 					E('span', {'class': 'tc-c-muted'},
@@ -4334,14 +4321,14 @@ return view.extend({
 				return;
 			}
 
-			status = E('span', {'class': 'tg-save-status'});
+			status = E('span', {'class': 'tc-save-status'});
 			devs = st.lan_devices || '';
 
 			// The dangerous state: the toggle says on, the rule is gone. Never
 			// render this as ON — a lapsed cut with an ON-looking UI is exactly
 			// the failure this feature is supposed to not have.
 			if (st.active && !st.rule_present) {
-				cutPanel.className = 'tc-cut tc-cut--broken';
+				cutPanel.className = CUT_BASE + ' tc-cut--broken';
 				btn = E('button', {'class': 'btn cbi-button-negative'}, _('Switch it off'));
 				btn.addEventListener('click', function() { cutSubmit(false, status); });
 				cutPanel.appendChild(E('div', {'class': 'tc-cut__row'}, [
@@ -4357,7 +4344,7 @@ return view.extend({
 			}
 
 			if (st.active) {
-				cutPanel.className = 'tc-cut tc-cut--on';
+				cutPanel.className = CUT_BASE + ' tc-cut--on';
 				btn = E('button', {'class': 'btn cbi-button-positive'}, _('Restore internet'));
 				btn.addEventListener('click', function() { cutSubmit(false, status); });
 
@@ -4399,7 +4386,7 @@ return view.extend({
 			}
 
 			// ── Off: offer the cut ──
-			cutPanel.className = 'tc-cut';
+			cutPanel.className = CUT_BASE;
 			pick = mkChipPick(CUT_DURATIONS, cutDuration, function(v) {
 				cutDuration = v;
 				cutDisarm();
@@ -4471,19 +4458,23 @@ return view.extend({
 		return E('div', {'class':'cbi-map', 'style':'color:currentColor'}, [
 			E('h2', {'style':'color:currentColor'}, _('Traffic Control')),
 			E('div', {'class':'cbi-section'}, [
+				// 【本仓库改动】整页只剩两段：速率限制卡片（内含设备选择、
+				//   目标/共享、速率档位、切断、视图与表格）与下面的数据区。
+				//   设备选择原先在卡片之外独占两行、"视图与表格" 又是独立卡片，
+				//   三块合起来把数据区推得很低 —— 现全部收进同一张卡片。
 				offloadBanner,
-				cutPanel,
-				E('div', {'style':'margin-bottom:10px'}, [
-						E('div', {'style':'display:flex;align-items:center;gap:10px;flex-wrap:wrap'}, [searchSelect.el, actionRow]),
-						quickBar
-					]),
-				statusDiv,
+				// 【本仓库改动 v0.6.8】概览卡片（含统计条）移到**速率限制之上**。
+				//   它回答的是「此刻网络怎么样」，是打开这一页第一件想知道的事；
+				//   速率限制是**操作**，操作区放在读数下方才符合「先看后改」。
+				//   此前顺序是 速率限制 → 概览 → 表格，等于每次都要先滚过一整张
+				//   操作卡片才看得到读数。
+				overviewCard,
 				rateLimitRow,
-				settingsPanel,
-				overviewDiv,
-				statsDiv,
+				statusDiv,
 				extStatsDiv,
 				deviceGraphDiv,
+				// 「表格与速率」紧贴设备表上方：它调的就是下面这张表的刷新与测速
+				tableSpeedBar,
 				connsDiv,
 				activityDiv
 			]),
@@ -4500,7 +4491,17 @@ return view.extend({
 		if (this._timer) { clearInterval(this._timer); this._timer = null; }
 		if (this._cutTimer) { clearInterval(this._cutTimer); this._cutTimer = null; }
 		this._stopBytesPoll && this._stopBytesPoll();
+		// ☰ 档位菜单挂在 document 上的两个监听器，随实例建、随实例摘。
+		if (this._speedMenuDocClick) { document.removeEventListener('click', this._speedMenuDocClick); this._speedMenuDocClick = null; }
+		if (this._speedMenuDocKey) { document.removeEventListener('keydown', this._speedMenuDocKey); this._speedMenuDocKey = null; }
 		if (this._onPopState) { window.removeEventListener('popstate', this._onPopState); this._onPopState = null; }
+		// 上联图按容器实宽重绘用的 resize 监听器，同样随实例摘除。
+		if (this._onResize) { window.removeEventListener('resize', this._onResize); this._onResize = null; }
+		// 「限制」弹层挂在 document.body 上（不在视图树里），故必须自己移除；
+		// 两个监听器同理 —— 不摘会在切页后仍在收点击，闭包抓着已移除的 DOM。
+		if (this._limitPopupDocClick) { document.removeEventListener('click', this._limitPopupDocClick); this._limitPopupDocClick = null; }
+		if (this._limitPopupDocKey) { document.removeEventListener('keydown', this._limitPopupDocKey); this._limitPopupDocKey = null; }
+		if (this._limitPopup && this._limitPopup.parentNode) { this._limitPopup.parentNode.removeChild(this._limitPopup); this._limitPopup = null; }
 		if (this._graphPopupTimer) { clearInterval(this._graphPopupTimer); this._graphPopupTimer = null; }
 		if (this._graphPopup && this._graphPopup.parentNode) { this._graphPopup.parentNode.removeChild(this._graphPopup); this._graphPopup = null; }
 		// The overview panel lives inside the view's own tree, so the DOM goes
