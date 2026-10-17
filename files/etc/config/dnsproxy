@@ -1,11 +1,10 @@
 # ============================================================
 # dnsproxy — ALL_DOH 默认配置（openwrt-build 仓库 files/ overlay）
 # ------------------------------------------------------------
-# 主链路（ALL_DOH 加密解析，按域名分流）:
+# 主链路（ALL_DOH 加密解析）:
 #   LAN → dnsmasq:53 → dnsproxy:5353 → DoH/DoT → Internet
-#   例外：国外域名列表（见下方 servers 段）显式分流到 SSR-Plus 的 MosDNS
-#   127.0.0.1:5335，由 MosDNS 经代理查询国外 DoH（防污染）。
-#   另：dnsmasq 的 gfw_list.conf（23614 条）也指向 127.0.0.1#5335。
+#   走 MosDNS 的域名由 dnsmasq 的 gfw_list.conf 分流（见下方 servers 段，
+#   v0.8.0 起 dnsproxy 自身不再持有任何指向 127.0.0.1:5335 的上游）。
 # 规则:
 #   - 上游一律加密（https:// = DoH），bootstrap 仅用于解析加密上游主机名
 #   - 无明文 DNS 上游、无明文 fallback（fallback 亦为 DoH）
@@ -63,9 +62,6 @@ config dnsproxy 'private_rdns'
 
 config dnsproxy 'servers'
 	# 国内/国外统一加密解析主链：主上游为国内 DoH（稳定可达）
-	# 国外域名（google 等）显式分流到 SSR-Plus 的 MosDNS(127.0.0.1:5335)：
-	# MosDNS 由 SSR-Plus 管理（pdnsd_enable=4），上游为经代理的国外 DoH，
-	# 返回真实 IP 不被污染。bootstrap 仅用于解析加密上游主机名（明文是其唯一用途）。
 	#
 	# 2026-09-04 修复（v0.3.4）：
 	# - doh.pub（域名型、偶发 502、依赖 bootstrap）→ 1.12.12.12（IP 型直连，china ipset 命中不代理）
@@ -74,8 +70,42 @@ config dnsproxy 'servers'
 	list upstream 'https://dns.alidns.com/dns-query'
 	list upstream 'https://1.12.12.12/dns-query'
 	list upstream 'https://doh.360.cn/dns-query'
-	# 常用国外域名 → SSR-Plus MosDNS(5335)（国外 DoH 经代理，防污染）
-	list upstream '[/google.com/youtube.com/github.com/twitter.com/x.com/facebook.com/instagram.com/whatsapp.com/telegram.org/reddit.com/discord.com/spotify.com/netflix.com/cloudflare.com/cloudflare-dns.com/amazon.com/amazonaws.com/stackoverflow.com/wikipedia.org/medium.com/notion.so/figma.com/vercel.com/herokuapp.com/]127.0.0.1:5335'
+	# ── 2026-10-17 移除「24 个国外域名 → 127.0.0.1:5335」例外清单（v0.8.0）──
+	#
+	# 移除理由（三条，均有实测）：
+	#
+	# 1) 它 100% 冗余。这 24 个域名在 dnsmasq 的 gfw_list.conf 里**全部命中**
+	#    （逐个 grep：google.com / youtube.com / github.com / twitter.com / x.com /
+	#    facebook.com / instagram.com / whatsapp.com / telegram.org / reddit.com /
+	#    discord.com / spotify.com / netflix.com / cloudflare.com /
+	#    cloudflare-dns.com / amazon.com / amazonaws.com / stackoverflow.com /
+	#    wikipedia.org / medium.com / notion.so / figma.com / vercel.com /
+	#    herokuapp.com —— 24/24 命中，行形如 server=/<域名>/127.0.0.1#5335）。
+	#    SSR-Plus 启用时它们本来就会被 dnsmasq 转去 :5335，此处是重复声明。
+	#
+	# 2) SSR-Plus **禁用**时它把答案污染掉。此时 :5335 无监听，dnsproxy 打
+	#    `connection refused` 后回落到 fallback https://1.12.12.12/dns-query，
+	#    拿到的是污染答案。2026-10-17 实测：
+	#        youtube.com    → 31.13.92.37    （Facebook 的 IP）
+	#        wikipedia.org  → 31.13.94.36    （Facebook 的 IP）
+	#        wikipedia.org  → 199.59.148.96 / 31.13.73.169
+	#    同一时刻不在清单里的域名全部正常：
+	#        blogspot.com → 65.49.68.152、wordpress.com → 192.0.78.9、
+	#        www.bing.com → 202.89.233.100
+	#    dnsproxy 日志相应刷
+	#        ERROR exchange failed prefix=dnsproxy upstream=127.0.0.1:5335
+	#          question=";www.google.com.\tIN\t HTTPS"
+	#          err="... read: connection refused"
+	#
+	# 3) 它让 dnsproxy 的解析结果隐式依赖「SSR-Plus 是否在运行」。这条耦合本身就是
+	#    故障来源：SSR 停止 → 这 24 个域名的所有子域（含冷门子域）解析异常，
+	#    而用户看不出与 SSR 有关。移除后 dnsproxy 只依赖国内 DoH 主链，行为可预期。
+	#
+	# 移除不影响分流能力：国外域名仍经 dnsmasq 的 gfw_list.conf（23701 条）
+	# 转去 mosdns:5335，由 MosDNS 经代理查国外 DoH。判定依据见
+	#   grep -c '127.0.0.1#5335' /tmp/dnsmasq.d/dnsmasq-ssrplus.d/gfw_list.conf
+	#
+	# 相关：AGENTS.md 第 5 节（filter_aaaa 语义）、docs/adr/0001。
 	# bootstrap 仅用于解析加密上游主机名（明文是它唯一且应有的用途）
 	list bootstrap '223.5.5.5'
 	list bootstrap '223.6.6.6'

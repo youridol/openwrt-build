@@ -54,27 +54,64 @@ uci -q set turboacc.config.fullcone='1'
 uci -q del_list firewall.@zone[1].network='wan6'
 
 # ICMPv6 Input (PMTU discovery — 游戏关键)
-uci add firewall rule
-uci set firewall.@rule[-1].name='ICMPv6-Input'
-uci set firewall.@rule[-1].src='wan'
-uci set firewall.@rule[-1].proto='icmp'
-uci set firewall.@rule[-1].family='ipv6'
+#
+# 【2026-10-17 修复幂等性】原写法是裸 `uci add firewall rule`，每执行一次
+#   uci-defaults 就多一条同名规则。实测：连续跑三次后 `firewall` 里出现
+#   3 × ICMPv6-Input + 3 × ICMPv6-Forward。uci-defaults 正常只在首启执行一次，
+#   但脚本可能被手工重跑（排查、迁移），重复规则会让同一条 ICMPv6 报文被
+#   accept 多次、并让 `uci show firewall` 的索引漂移（按 @rule[N] 定位会错位）。
+#
+# 修法：先记录「该 name 是否已存在」，已存在则就地改写那条、不再新增。
+#   这样脚本可任意次重跑，结果恒为「每样恰好一条」。
+_fw_rule_index() {
+	local want="$1" i=0
+	while uci -q get "firewall.@rule[$i]" >/dev/null 2>&1; do
+		if [ "$(uci -q get "firewall.@rule[$i].name")" = "$want" ]; then
+			echo "@rule[$i]"
+			return 0
+		fi
+		i=$((i + 1))
+	done
+	return 1
+}
+
+if _idx=$(_fw_rule_index 'ICMPv6-Input'); then
+	R="firewall.$_idx"
+	log "firewall: 复用已有 ICMPv6-Input（$_idx），不重复新增"
+else
+	uci add firewall rule >/dev/null
+	R='firewall.@rule[-1]'
+fi
+# 注意：用 `uci set "$R.name=值"` 时**不要**在值两侧再加单引号 ——
+#   uci 会把单引号当成值的一部分存进去，实测存成 `name='ICMPv6-Input'`
+#   （值里含字面单引号），导致按 name 精确匹配永远失败、规则无限重复。
+uci set "$R.name=ICMPv6-Input"
+uci set "$R.src=wan"
+uci set "$R.proto=icmp"
+uci set "$R.family=ipv6"
+uci -q delete "$R.icmp_type"
 for t in echo-request echo-reply destination-unreachable packet-too-big \
          time-exceeded parameter-problem router-solicitation \
          neighbour-solicitation router-advertisement neighbour-advertisement; do
-    uci add_list firewall.@rule[-1].icmp_type="$t"
+    uci add_list "$R.icmp_type=$t"
 done
-uci set firewall.@rule[-1].limit='1000/sec'
-uci set firewall.@rule[-1].target='ACCEPT'
+uci set "$R.limit=1000/sec"
+uci set "$R.target=ACCEPT"
 
 # ICMPv6 Forward (客户端 PMTU 发现)
-uci add firewall rule
-uci set firewall.@rule[-1].name='ICMPv6-Forward'
-uci set firewall.@rule[-1].src='wan'
-uci set firewall.@rule[-1].dest='lan'
-uci set firewall.@rule[-1].proto='icmp'
-uci set firewall.@rule[-1].family='ipv6'
-uci set firewall.@rule[-1].target='ACCEPT'
+if _idx=$(_fw_rule_index 'ICMPv6-Forward'); then
+	R="firewall.$_idx"
+	log "firewall: 复用已有 ICMPv6-Forward（$_idx），不重复新增"
+else
+	uci add firewall rule >/dev/null
+	R='firewall.@rule[-1]'
+fi
+uci set "$R.name=ICMPv6-Forward"
+uci set "$R.src=wan"
+uci set "$R.dest=lan"
+uci set "$R.proto=icmp"
+uci set "$R.family=ipv6"
+uci set "$R.target=ACCEPT"
 
 log "firewall: flow_offloading fullcone drop_invalid mtu_fix icmpv6"
 
@@ -271,6 +308,294 @@ uci set shadowsocksr.@global[0].tunnel_forward_mosdns='https://dns.google/dns-qu
 log "ssr-plus: MosDNS(5335) enabled, foreign DoH via proxy"
 
 # ─────────────────────────────────────────────
+# 4.6 SSR-Plus: 关闭自动切换（v0.8.1）
+# ─────────────────────────────────────────────
+# `enable_switch='1'` 会让 `ssr-switch` 每 `switch_time` 秒（本机 667s）探测一次
+# 当前节点，探测失败就调 `/etc/init.d/shadowsocksr restart`（ssr-switch 第 155 行）。
+# 该 restart 是**周期性 DNS 故障源**，实测链路：
+#
+#   1. `start()` 先 `start_rules` + `gfw2ipset`，把 gfw_list.conf（23701 条
+#      `server=/域名/127.0.0.1#5335`）拷进 dnsmasq 的 conf-dir —— 此刻分流已生效；
+#   2. 约 2 秒后才轮到 `start_dns`/`start_server` 拉起 MosDNS 与 Xray；
+#   3. 于是存在约 4 秒的窗口：**分流已指向 :5335，但 :5335 尚无人监听**。
+#      实测时间线（0.5 秒粒度）：
+#        21:39:35  gs=cfg014a8f  5335=0  1234=1  nft=0  gfw=23701   ← 危险窗口
+#        21:39:37  gs=cfg014a8f  5335=1  1234=1  nft=2  gfw=23701   ← 才就绪
+#      该窗口内查任何 gfw_list 里的域名都会 timeout。
+#
+# 更糟的是探测本身容易误判：`switch_time=3` 是 **curl 超时**，
+# 而跨境节点的 TLS 握手常超过 3 秒；探测失败且全部候选节点都判失败时，
+# `select_proxy` 返回 `ENABLE_SERVER=nil`，`switch_proxy` 便
+# `uci set global_server=nil` —— 界面显示「已启用」，但 `load_config()` 会
+# `return 1`，一条规则都不装，进入「已启用但空转」的半死状态
+# （实测出现过多次：`enable=1` 而 `global_server=nil`、无 ss_spec 表）。
+#
+# 结论：单节点家用场景不需要自动切换，它的收益远小于周期性中断的代价。
+# 关闭后 `start_switch()` 的那个 `if` 不成立，守护不再启动，重启只在
+# 手动操作或开机时发生。
+#
+# 【若日后确实需要多节点自动切换】必须同时做到：
+#   a) 把 `switch_time`（探测超时）调到 ≥ 10s，避免跨境握手误判；
+#   b) 让 `switch_proxy` 在全部节点失败时**保留原 `global_server`**，
+#      而不是写 nil（否则会从「代理慢」恶化成「完全无规则」）；
+#   c) 修 `start()` 的顺序，使后端就绪后再装分流（见 AGENTS.md §4）。
+uci set shadowsocksr.@global[0].enable_switch='0' \
+	|| log "ERROR: 写入 shadowsocksr.@global[0].enable_switch 失败"
+
+log "ssr-plus: enable_switch=0 (避免 ssr-switch 周期性 restart 造成 DNS 空窗)"
+
+# ─────────────────────────────────────────────
+# 4.7 SSR-Plus: 给 ssr-switch 打 nil 防护补丁（v0.8.2）
+# ─────────────────────────────────────────────
+# 关闭 enable_switch 只让守护**不再启动**，并不能约束已经在跑的守护，
+# 也无法修复 `set_main_server()` 本身的缺陷。实测（监控日志）：
+#
+#   22:02:31 *** gs=cfg014a8f → cfg194a8f   ← 被自动切到另一个节点
+#   22:04:09 *** gs=cfg194a8f → nil          ← 再切成 nil，客户机全挂
+#
+# 根因在 `/usr/bin/ssr-switch` 的 `set_main_server()`：
+#   原实现只判空串 `[ -n "$sid" ] || return 1`，
+#   而 `select_proxy()` 失败时把 `ENABLE_SERVER` 置为**字符串 `"nil"`**
+#   （不是空串），于是 `set_main_server "nil"` 能顺利通过检查并
+#   `uci set global_server=nil` 落盘。
+#
+# 后果：`load_config()` 见 `GLOBAL_SERVER=nil` 直接 `return 1`，
+# 一条 nft 规则都不装、MosDNS/Xray 全不启动，但 Lua 界面 `enable=1`
+# 仍显示「运行中」—— 客户机 DNS 全部 timeout，路由器自身却因走
+# `/etc/resolv.conf` 的运营商 DNS 而显得正常。
+#
+# 打两处补丁（幂等，打前先查标记）：
+#   a) `set_main_server()` 显式拒绝 `"nil"`；
+#   b) `run_once()` 的 else 分支不再盲写 `CURRENT_SERVER`，
+#      改成「保留原节点只重启」，避免从「代理慢」恶化成「完全无规则」。
+SSR_SWITCH=/usr/bin/ssr-switch
+if [ -f "$SSR_SWITCH" ] && ! grep -q '修复 v0.8.2' "$SSR_SWITCH"; then
+	cp "$SSR_SWITCH" "${SSR_SWITCH}.orig"
+
+	# (a) 在 `[ -n "$sid" ] || return 1` 之前插入 nil 拒绝
+	_ln=$(grep -n '^	\[ -n "\$sid" \] || return 1$' "$SSR_SWITCH" | head -1 | cut -d: -f1)
+	if [ -n "$_ln" ]; then
+		{ head -n $((_ln - 1)) "$SSR_SWITCH"
+		  printf '\t# [修复 v0.8.2] 拒绝把 global_server 写成 nil。\n'
+		  printf '\t# nil 会让 load_config() 直接 return 1 → 界面显示已启用但一条规则都不装，\n'
+		  printf '\t# 客户机全部解析超时。原代码只判空串，字符串 "nil" 能通过并落盘。\n'
+		  printf '\t[ "$sid" != "nil" ] || return 1\n'
+		  tail -n +"$_ln" "$SSR_SWITCH"
+		} > "${SSR_SWITCH}.tmp"
+		mv "${SSR_SWITCH}.tmp" "$SSR_SWITCH"
+		chmod +x "$SSR_SWITCH"
+		log "ssr-switch: set_main_server 已加 nil 防护"
+	else
+		log "ERROR: 未找到 set_main_server 的判空行，补丁 (a) 未应用"
+	fi
+
+	# (b) else 分支：全部节点失败时保留原 global_server，不写 nil
+	if grep -q 'switch_proxy "\$CURRENT_SERVER"' "$SSR_SWITCH"; then
+		_old='		switch_proxy "$CURRENT_SERVER"
+		echolog "Try restart current server."'
+		_new='		# [修复 v0.8.2] 全部候选节点探测失败时，保留原 global_server 只重启。
+		# 原逻辑 switch_proxy "$CURRENT_SERVER" 在 CURRENT_SERVER=nil 时会把
+		# global_server 写成 nil → 规则全撤 → 客户机全挂。
+		if [ "$CURRENT_SERVER" != "nil" ] && [ -n "$CURRENT_SERVER" ]; then
+			/etc/init.d/shadowsocksr restart "$CURRENT_SERVER"
+		fi
+		echolog "Try restart current server."'
+		# 用 awk 做多行替换，避免 sed 的转义地狱
+		awk -v old="$_old" -v new="$_new" "
+			BEGIN { n = split(old, o, \"\n\"); m = 0; inblk = 0 }
+			{
+				if (!inblk && \$0 == o[1]) { buf = \$0; inblk = 1; k = 1; next }
+				if (inblk) {
+					k++
+					buf = buf \"\n\" \$0
+					if (k == n) { print new; inblk = 0 }
+					next
+				}
+				print
+			}
+			END { if (inblk) print buf }
+		" "$SSR_SWITCH" > "${SSR_SWITCH}.tmp" && mv "${SSR_SWITCH}.tmp" "$SSR_SWITCH"
+		chmod +x "$SSR_SWITCH"
+		log "ssr-switch: 全节点失败时不再写 nil"
+	else
+		log "ssr-switch: else 分支已是修复后的形态，跳过 (b)"
+	fi
+
+	# 语法校验：补丁写坏了必须能发现（禁止静默失败）
+	if sh -n "$SSR_SWITCH"; then
+		log "ssr-switch: 补丁后语法检查通过"
+	else
+		log "ERROR: ssr-switch 补丁后语法错误，回滚"
+		cp "${SSR_SWITCH}.orig" "$SSR_SWITCH"
+		chmod +x "$SSR_SWITCH"
+	fi
+else
+	log "ssr-switch: nil 防护补丁已存在或文件缺失，跳过"
+fi
+
+# ─────────────────────────────────────────────
+# 4.8 SSR-Plus: 消除 restart 期间「客户机被断两次」（v0.8.3）
+# ─────────────────────────────────────────────
+# `/etc/init.d/shadowsocksr` 的 `stop()`（原第 3257 行）与 `start()`
+# （第 3124 行）**各自**执行一次 `/etc/init.d/dnsmasq restart`，
+# 而 `restart` 由 `/etc/rc.common` 实现为 `stop + start`，于是一次 restart
+# 会把 dnsmasq 重启**两次**。
+#
+# 实测（0.5 秒粒度记录 dnsmasq PID）：
+#   修复前：22:45:18 → 22:45:21   又  22:45:32 → 22:45:35   ← 断两次
+#   修复后：22:48:09 → 22:48:12                              ← 只断一次
+#
+# 每次 dnsmasq 不可用约 **3 秒**，期间客户机**所有**域名（含国内 baidu）
+# 全部无法解析 —— 这正是用户在 LuCI 启用 SSR-Plus 后看到
+# 「apple/github/google/youtube/bilibili/baidu 全部不可达」的原因。
+#
+# 根因是 `stop()` 先 `rm -rf dnsmasq-ssrplus.conf` 再重启 dnsmasq，
+# 等于把 23928 条 `server=` 分流全撤掉；紧接着 `start()` 重建并再重启一次。
+# 在 restart 场景下，`stop()` 那次重启纯属多余且有害。
+#
+# 修法：覆写 `restart()`，设置并导出 `SSR_IN_RESTART=1`；
+# `stop()` 内那次重启改由该标志守卫，restart 时跳过。
+SSR_INIT=/etc/init.d/shadowsocksr
+if [ -f "$SSR_INIT" ] && ! grep -q '修复 v0.8.3' "$SSR_INIT"; then
+	cp "$SSR_INIT" "${SSR_INIT}.orig"
+
+	# (a) 覆写 restart()，插在 start() 定义之前
+	_ln=$(grep -n '^start() {' "$SSR_INIT" | head -1 | cut -d: -f1)
+	if [ -n "$_ln" ]; then
+		{ head -n $((_ln - 1)) "$SSR_INIT"
+		  printf '# [修复 v0.8.3] 覆写 rc.common 的 restart()：\n'
+		  printf '# rc.common 的 restart = stop + start，而两者各重启一次 dnsmasq，\n'
+		  printf '# 导致 restart 期间客户机被断两次（实测各 3 秒）。\n'
+		  printf '# 这里设置 SSR_IN_RESTART=1，让 stop() 跳过它那次 dnsmasq 重启，\n'
+		  printf '# 只由 start() 重启一次，客户机只断一次。\n'
+		  printf 'restart() {\n'
+		  printf '\tSSR_IN_RESTART=1\n'
+		  printf '\texport SSR_IN_RESTART\n'
+		  printf '\ttrap "" TERM\n'
+		  printf '\tstop "$@"\n'
+		  printf '\ttrap - TERM\n'
+		  printf '\tstart "$@"\n'
+		  printf '\tSSR_IN_RESTART=0\n'
+		  printf '}\n'
+		  printf '\n'
+		  tail -n +"$_ln" "$SSR_INIT"
+		} > "${SSR_INIT}.tmp"
+		mv "${SSR_INIT}.tmp" "$SSR_INIT"
+		chmod +x "$SSR_INIT"
+		log "init.d/shadowsocksr: restart() 已覆写"
+	else
+		log "ERROR: 未找到 start() 定义，restart() 覆写未应用"
+	fi
+
+	# (b) stop() 内那次 dnsmasq restart 加标志守卫
+	# 定位「stop() 之后的第一处 dnsmasq restart」
+	_stopln=$(grep -n '^stop() {' "$SSR_INIT" | head -1 | cut -d: -f1)
+	_dmln=$(awk -v s="$_stopln" 'NR > s && /etc\/init.d\/dnsmasq restart/ { print NR; exit }' "$SSR_INIT")
+	if [ -n "$_dmln" ]; then
+		{ head -n $((_dmln - 1)) "$SSR_INIT"
+		  printf '\t\t# [修复 v0.8.3] restart 场景下跳过这次 dnsmasq 重启。\n'
+		  printf '\t\t# stop 会先删掉 dnsmasq-ssrplus.conf，此时重启 dnsmasq 等于把\n'
+		  printf '\t\t# 23928 条 server= 分流全撤掉，而紧接着 start 又会重建并再重启一次\n'
+		  printf '\t\t# → 客户机在 restart 期间被断两次（实测各 3 秒全断）。\n'
+		  printf '\t\tif [ "$SSR_IN_RESTART" = "1" ]; then\n'
+		  printf '\t\t\techolog "restart: skip dnsmasq restart in stop()"\n'
+		  printf '\t\telse\n'
+		  printf '\t\t\t/etc/init.d/dnsmasq restart >/dev/null 2>&1\n'
+		  printf '\t\tfi\n'
+		  tail -n +$((_dmln + 1)) "$SSR_INIT"
+		} > "${SSR_INIT}.tmp"
+		mv "${SSR_INIT}.tmp" "$SSR_INIT"
+		chmod +x "$SSR_INIT"
+		log "init.d/shadowsocksr: stop() 的 dnsmasq 重启已加守卫"
+	else
+		log "ERROR: 未在 stop() 内找到 dnsmasq restart，守卫未应用"
+	fi
+
+	# 语法校验，失败回滚（禁止静默失败）
+	if sh -n "$SSR_INIT"; then
+		log "init.d/shadowsocksr: 补丁后语法检查通过"
+	else
+		log "ERROR: init.d/shadowsocksr 补丁后语法错误，回滚"
+		cp "${SSR_INIT}.orig" "$SSR_INIT"
+		chmod +x "$SSR_INIT"
+	fi
+else
+	log "init.d/shadowsocksr: v0.8.3 补丁已存在或文件缺失，跳过"
+fi
+
+# ─────────────────────────────────────────────
+# 4.9 SSR-Plus: 从透明代理端口列表移除 53（v0.8.4）
+# ─────────────────────────────────────────────
+# 这是「启用 SSR-Plus 后客户机连 baidu 都解析不了」的真正根因。
+#
+# `dports='2'`（常用端口）对应的端口列表原本是：
+#   22,53,587,465,995,993,143,80,443,853,9418        ← 含 53
+# 于是客户机的 UDP/53 会被 `ss_spec_mangle prerouting`（priority mangle，-150）
+# TPROXY 到 `:1234`，交给 v2ray 的 dokodemo-door。
+#
+# 但客户机 DNS 本来就已经被 fw4 的 `dns_intercept_lan`
+# （priority dstnat+1，-99）劫持到本机 dnsmasq 了 —— **两条路径必须只留一条**。
+# 而 mangle(-150) 比 dstnat+1(-99) **更早执行**，所以 tproxy 先赢，
+# dnsmasq 根本收不到包（实测 nft 计数器：prerouting 命中 48 个包，
+# dns_intercept_lan 命中 0，input 链命中 0）。
+#
+# v2ray 会对每个被 tproxy 的 DNS 打开一个绑定 `192.168.3.254:53` 的 UDP
+# socket 且**不释放**，累积后反过来抢走 dnsmasq 的 DNS 包。实测 50 秒内：
+#   23:11:49  socket=1    解析=1     ← 正常
+#   23:11:56  socket=4    解析=0     ← 开始堆积
+#   23:12:10  socket=50   解析=0
+#   23:12:24  socket=167  解析=0
+#   23:12:38  socket=246  解析=0     ← 完全不可用（连 baidu 也超时）
+# 这就是「启用后一两分钟开始断、过一阵又自己好」的周期来源：
+# v2ray 重启后 socket 归零，随后再次堆积。
+#
+# 移除 53 后实测（3 分钟持续 DNS 压力，每 8 秒采样）：
+#   socket 恒为 1，解析 100% 成功。
+#
+# 注意：仅改运行时 nft 规则**不够** —— 旧的持久化规则
+# `/usr/share/nftables.d/ruleset-post/99-shadowsocksr.nft` 里仍含 53，
+# fw4 重载会把它加回来。故必须同时改 init 脚本里的端口列表，
+# 让 `ssr-rules -P` 重新生成的持久化文件也不含 53。
+if [ -f "$SSR_INIT" ] && ! grep -q '修复 v0.8.4' "$SSR_INIT"; then
+	_pl=$(grep -n 'proxyport="-m multiport --dports 22,53,' "$SSR_INIT" | head -1 | cut -d: -f1)
+	if [ -n "$_pl" ]; then
+		{ head -n $((_pl - 1)) "$SSR_INIT"
+		  printf '\t\t\t# [修复 v0.8.4] 从透明代理端口列表移除 53。\n'
+		  printf '\t\t\t# 客户机 DNS 已由 fw4 的 dns_intercept_lan 劫持到本机 dnsmasq，\n'
+		  printf '\t\t\t# 不需要、也不应该再经 tproxy 送进 :1234。\n'
+		  printf '\t\t\t# 保留 53 时 v2ray 会为每个被 tproxy 的 DNS 打开一个 UDP socket 且\n'
+		  printf '\t\t\t# 不释放，实测 50 秒内从 1 个涨到 246 个并全部绑定 192.168.3.254:53，\n'
+		  printf '\t\t\t# 抢走 dnsmasq 的 DNS 包 → 客户机连 baidu 都无法解析。\n'
+		  printf '\t\t\tproxyport="-m multiport --dports 22,587,465,995,993,143,80,443,853,9418"\n'
+		  tail -n +$((_pl + 1)) "$SSR_INIT"
+		} > "${SSR_INIT}.tmp"
+		mv "${SSR_INIT}.tmp" "$SSR_INIT"
+		chmod +x "$SSR_INIT"
+		log "init.d/shadowsocksr: 已从 tproxy 端口列表移除 53"
+	else
+		log "init.d/shadowsocksr: 未找到含 53 的 proxyport 行（可能已修）"
+	fi
+
+	# 清掉含 53 的旧持久化规则，让 ssr-rules -P 重建
+	_oldnft=/usr/share/nftables.d/ruleset-post/99-shadowsocksr.nft
+	if [ -f "$_oldnft" ] && grep -q '22, 53,' "$_oldnft"; then
+		rm -f "$_oldnft"
+		log "已删除含 53 的旧持久化 nft 规则，等待 ssr-rules -P 重建"
+	fi
+
+	if sh -n "$SSR_INIT"; then
+		log "init.d/shadowsocksr: v0.8.4 补丁后语法检查通过"
+	else
+		log "ERROR: init.d/shadowsocksr v0.8.4 补丁后语法错误，回滚"
+		cp "${SSR_INIT}.orig" "$SSR_INIT"
+		chmod +x "$SSR_INIT"
+	fi
+else
+	log "init.d/shadowsocksr: v0.8.4 补丁已存在或文件缺失，跳过"
+fi
+
+
+# ─────────────────────────────────────────────
 # 5. DNSMasq → 全部走 dnsproxy (ALL_DOH)
 # ─────────────────────────────────────────────
 while uci delete dhcp.@dnsmasq[0].server 2>/dev/null; do :; done
@@ -280,7 +605,30 @@ uci set dhcp.@dnsmasq[0].noresolv='1'
 uci set dhcp.@dnsmasq[0].cachesize='8192'
 uci set dhcp.@dnsmasq[0].ednspacket_max='1232'
 
-log "dnsmasq: server=127.0.0.1#5353 (dnsproxy ALL_DOH)"
+# dns-forward-max：dnsmasq 的并发转发槽上限，**默认仅 150**（`dnsmasq --help`
+# 原文：Maximum number of concurrent DNS queries. (defaults to 150)）。
+#
+# 为什么必须显式抬高（v0.8.0）：
+#   本固件的 dnsmasq 是**单点串行依赖** —— noresolv=1 没有兜底解析器，且
+#   gfw_list.conf 里 23701 个域名被指到 127.0.0.1#5335（SSR-Plus 的 MosDNS）。
+#   MosDNS 一旦没起来（init 的 ln_start_bin 用 `>/dev/null 2>&1 &` 静默启动，
+#   失败无日志），这 23701 个域名的查询会**占住转发槽直到超时**：
+#     · 槽位耗尽后 dnsmasq 拒绝发起新查询，并打
+#       `Maximum number of concurrent DNS queries reached (max: 150)`
+#     · 于是**国内域名也一起解析失败** —— 这正是「启用 SSR-Plus 后国内外全挂」
+#       表现形态的成因之一（离线已复现：并发打满后未查过的国内域名全部
+#       `connection timed out`）。
+#
+# 注意：这是**防御性**配置，不是本次故障的已证根因 —— 2026-10-17 故障窗口内
+#   `logread | grep -c 'Maximum number of concurrent'` = 0，说明那次告警并未出现。
+#   抬高上限能降低「死上游拖垮国内解析」的概率与烈度，但真正的修法是让
+#   SSR-Plus 在装规则前确认 :5335 与 :1234 已监听（见 CHANGELOG v0.8.0）。
+#
+# 取值依据：dnsmasq 每个在途查询约占一个 fd 与少量内存；1024 在 7GB 级设备上
+#   开销可忽略，而 150 → 1024 足以覆盖「数千 gfw 域名冷启动」的场景。
+uci set dhcp.@dnsmasq[0].dnsforwardmax='1024'
+
+log "dnsmasq: server=127.0.0.1#5353 (dnsproxy ALL_DOH), dnsforwardmax=1024"
 
 # ─────────────────────────────────────────────
 # 6. SSR-Plus: filter_aaaa 的拒绝集语义（详见 docs/adr/0001）

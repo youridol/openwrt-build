@@ -86,7 +86,7 @@
      否则 CI 的 `Verify luci-app-trafficctl local invariants` 会因
      「patch 重放结果 ≠ vendored 包」而 `exit 1`。
    - 升级上游用 `sh tools/sync-trafficctl.sh <tag>`（会覆盖包目录并重算 patch）。
-   - **四项本地改动必须保留**（被覆盖会静默失效，界面不报错、构建也成功）：
+   - **六项本地改动必须保留**（被覆盖会静默失效，界面不报错、构建也成功）：
      1. `root/usr/local/bin/trafficctl-bytes-nft.sh` 的重写 —— 上游至今用本内核
         不支持的 `flags dynamic` map + `update @bytes_in`，且只挂 forward 单钩子；
         丢掉它 → **速率列恒为 `—`**。详见红线 7/8 与第 4 节。
@@ -94,16 +94,194 @@
         hostapd/wpad 变体时存在，x86_64 无 WiFi → 不可满足 → kconfig 把整包
         连同 `luci-i18n-trafficctl-zh-cn` 一起从 `.config` 丢弃。
         丢掉这个修正 → **界面变英文、i18n 断言失败**（构建不报错，症状隐蔽）。
-     3. `status.js`/`status.css`/`telegram.js`/`menu.d`/`config`/`rpcd` 的刷新与 tab 改动 ——
-        丢掉它 → **冷启动不再自动刷新**、Telegram 变回超长折叠小节、或设置区冒出
-        内层 tab。Telegram 必须是**页面级** tab（顶部行：设备 | Telegram机器人 | 端口转发）。
+     3. `status.js`/`status.css`/`menu.d`/`config`/`rpcd` 的刷新与 tab 改动 ——
+        丢掉它 → **冷启动不再自动刷新**、或设置区冒出内层 tab。
+        页面级 tab 为**设备 | 设置 | 端口转发**
+        （v0.7.0 起 Telegram tab 已全链路移除，见红线 9 第 3 条补充）。
         **轮询必须防重入**（`setInterval(tick, …)` + `queryInFlight` + `document.hidden`）：
         一次 `summary` 实测 1.5–1.9 秒，而档位可设 1 秒，退回
         `setInterval(runQuery, …)` 会让请求层层堆积、rpcd 不断 fork 子脚本、
         路由器 load 飙到三位数、页面最终 `XHR request timed out`。
      4. `po/zh-cn/luci-app-trafficctl.po` —— 丢掉它 → **中文界面变英文**。
+     5. `host.js` + `trafficctl-device.sh` 的**主机实时连接详情页**（v0.5.0）——
+        丢掉它 → 概览「流量排行」与设备表 IP 的链接 404。要留意三点：
+        - 详情页路由 `admin/status/trafficctl/host/*` 在 `menu.d` 里**不设 `title`**：
+          可直达、可收藏、可后退，但**不进侧边栏**（`ui.menu.getChildren` 会跳过
+          无 title 的节点）。给它加回 title 就会多出一个点不开的菜单项。
+        - `trafficctl-device.sh` 读的是 conntrack 的**第二个**（回复方向）元组，
+          否则源端口与「外网地址」全空、且上下行会变成同一个数。
+        - 13 列在 shadcn 主题下必须由 `.tc-host-table` 自己用 grid 定列：
+          该主题下 LuCI 的 `.table/.tr/.th` 是 `display:block`，表头会竖着堆成一列
+          （既有设备表当前也是这个表现，本次未改动其布局）。
+     6. `settings.js` + `common.js` 的**设置独立 tab**（v0.6.0；布局于 v0.6.2 再调整）
+        —— 配置项整体从设备页迁到 `admin/status/trafficctl/settings`；两页共用
+        `resources/trafficctl/common.js`（rpc 声明、localStorage 选项、
+        开关/chip/折叠卡片控件）。丢掉它 → 配置重新挤回设备页，或两页各持一份
+        定义而渐渐不一致。易错点：
+        - **`common.js` 必须 `return baseclass.extend({…})`**。LuCI 前端 require
+          在 `luci.js` 里对工厂返回值做 `Class.isSubclass(_class)` 断言，返回普通对象
+          直接抛 `TypeError: "…" factory yields invalid constructor`，整页加载失败。
+          require 返回的是实例，故调用方写 `T.fmtBytes(...)` 成立。
+        - **软件卸载的橙黄横幅必须保持移除**（`mkOffloadBanner` 对 `software` /
+          `software-counter` 直接 `return null`）；但**硬件卸载的告警必须保留**，
+          那说的是该模式下 conntrack 字节计数器确实不更新、速率会显示为 0。
+        - **每个视图都要自己注入 `status.css`**（`status.js` / `settings.js` /
+          `host.js` / `portfw.js`）。LuCI 只自动加载与**视图同名**的样式，而
+          htdocs 下没有 `settings.css`。漏注入时页面不报错，
+          只是所有 `tc-*` 类失效（卡片无边框、chip 无底色）。
+        - **设备页与设置页不得各持一份同名配置档位（v0.6.2 起方向）**：
+          `pollIntervalPick` / `avgWindowPick` / `avgMethodPick` / `refreshPick` /
+          `defaultsBtn` 必须存在于 **`status.js`**（设备表上方），且**不得**在
+          `settings.js` 留副本 —— 两处各一份时同一档位会显示不同默认值。
+          （v0.6.0~v0.6.1 曾短暂相反，见 CHANGELOG。）
+        - **设备页操作区是三块并进同一张卡片的**：设备选择（`.tc-picker-row`，
+          块内 `flex-wrap: nowrap`）、切断（`.tc-cut--embedded`）、
+          View & Table（`.tc-rate-panel__tail`）。并块时**必须用占位容器**
+          （`actionSlot` / `scopeSlot` / `panelTail`）：被并进来的块往往在文件**下方**
+          才构造，直接引用会因 `var` 提升拿到 `undefined` —— 轻则页面出现字面的
+          "undefined"，重则 `appendChild` 抛错导致整页空白（两样都踩过）。
+          v0.6.9 起 `scopeSlot` 已随「目标/共享/网段」一并删除（picker 行只剩
+          「所有设备 | 搜索框」）。
+        `tools/verify-trafficctl-invariants.sh` 已对以上各点加断言。
+        - **设备表是「两行式」的（v0.6.3）**：`ip`（IP 上 / MAC 下）、
+          `_tydev`（类型上 / 厂商下）、`_actions`（详情上 / 限制下）三列各含
+          两个子元素。要留意四点（都是实测踩出来的）：
+          - 两行靠子元素**块级**成立。`.table.tc-table .td` 是 `table-cell`，
+            `.tc-cell-stack` 的 flex 列布局会被覆盖，故子元素若都是 `<a>`
+            （inline）会并成一行 —— `.tc-actions a` 必须显式 `display:block`。
+          - 表格必须 `table-layout:fixed`。`auto` 布局下 `width` 只是建议：
+            数字列被拉成几百像素空槽，同时「操作」列被压到放不下两个链接
+            → 整表溢出（实测 153px）。**列宽由 JS 的列预算给**（见下方
+            v0.6.6 那条），不要写回 CSS 百分比。
+          - **默认隐藏列只能有一处声明**：模块级 `TC_COL_DEFAULT_HIDDEN` +
+            `isColHidden()`。列定义里再写 `hide:true` 就是两份真相，必然漂移。
+          - 列开关**必须写显式布尔，不能 `delete`**：`delete` 后
+            `isColHidden` 回落到默认隐藏，表现为「勾是勾了、表格里却没有这一列」。
+        - **设备厂商来自固件内 `luci-app-oui`**（100KB 厂商库，实测能查
+          Xiaomi/Midea/Huawei/TCL/TP-Link）。它只导出 `decorate`，**没有公开的
+          `lookup`** —— 用一个游离节点让 `decorate` 写 `title` 再读回。
+          `oui.js` 未被任何视图加载过时需按需 `<script>` 载入一次；
+          取不到厂商保持占位「—」，不可抛错（它是附加信息，不该让表格挂掉）。
+          CI 未显式启用该包，靠固件里已存在；换目标平台时先确认它仍在。
+        - **分页切片前必须先排序**（`sortSummaryRows`，与表内同一套规则），
+          否则第一页不是真正的最快设备。分页只在「所有设备」模式出现。
+        - **参照图若来自别的系统**（如爱快），先逐列核对数据源再动手：
+          本机无 WiFi 硬件（`iw dev` 返回 0 个接口），故「连接AP / SSID」
+          两列没有来源；后端也不产出在线时长（无 `first_seen`）。
+        - **四组档位收在 ☰ 菜单里（v0.6.4；类名于 v0.6.6 改为通用 `tc-menu*`）**：
+          `tc-menu` + `tc-menu-btn` + `tc-menu-panel`（面板默认 `tc-hidden`）。
+          浮层绝对定位，展开时设备表不跳动；点别处 / Esc / 再点按钮收起，
+          面板内点击不收起。两个 `document` 监听器**必须具名挂到实例并在
+          `handleTeardown` 摘除**，否则切 tab 后仍在收点击、闭包抓着已移除的 DOM。
+        - **冷启动轮询默认 1 秒，三处必须一致**（v0.6.4）：前端
+          `common.js` 的 `siteDefaults.pollInterval`、UCI
+          `root/etc/config/trafficctl` 的 `option poll_interval`、rpcd
+          `luci.trafficctl` 的 `${poll:-N}` 兜底。任一不同 → 界面与路由器下发值
+          漂移。三处都有断言。
+        - **字节轮询必须防重入**（v0.6.4 加固）：`pollBytes` / `pollDrops` /
+          `pollShapeStats` 各有 `*InFlight` 闸，且 `.catch` 里也要解锁 ——
+          只 `.then` 解锁会在一次请求失败后让轮询永久停摆。1 秒档位下单次 RPC
+          最坏实测 1.9s，无闸时 30 秒内重叠 3 次（≥2 并发）。
+          实测方法：`performance.getEntriesByType('resource')` 过滤 `/ubus/`，
+          比对相邻请求的 `startTime` 与 `startTime+duration` 是否交叠；
+          **测量窗口不要跨页面加载**，否则会把首屏那一次正常并发算成重叠。
+        - **表格居中限定在 `.tc-table--center` 作用域（v0.6.5）**：三处真正的
+          表格（设备表 / 连接表 / 分组表）带该类，**扩展统计面板不带** ——
+          它是「标签 — 数值」两栏行，居中就读不成列表。两条易错：
+          - 两行式单元格（`.tc-cell-stack`）的子项对齐由容器 `align-items`
+            决定，**只设 `.td { text-align }` 管不到**，必须另加
+            `align-items: center`，否则 IP/MAC 与类型/厂商两列会左贴。
+          - **不要改全局的 `.tc-right` / `.tc-center`**（表格之外也在用），
+            一律限定在 `.tc-table--center` 内。
+          断言只数 `class':` 开头的真实代码行并要求**恰好 3 处** ——
+          直接 grep 类名会把注释行也算进去（实测虚报成 4 处）。
+        - **按钮组与弹出面板（v0.6.6）**：`tc-menu-group`（右对齐的按钮组）>
+          `tc-menu`（按钮 + 浮层）> `tc-menu-btn` + `tc-menu-panel`。
+          两个菜单共用 `mkPopupMenu()` 工厂：顺序固定为**可见列 | ☰**，
+          且**同一时刻只允许一个面板展开**（两个浮层贴着同一按钮组，同时开
+          会互相盖住）。类名是通用的，**不再叫 `tc-speed-menu*`** —— 改名后
+          旧断言会永远失败，同步更新 `tools/verify-trafficctl-invariants.sh`。
+        - **视图开关直接展示，不裹折叠卡片（v0.6.6）**：`tc-view-toggles`
+          常驻速率限制卡片尾部。v0.6.9 起该行只剩「扩展统计 / 反向DNS」
+          （统计 / 连接 / 活动日志三个开关已移除、恒开，见下）。
+          开关藏在折叠区里的症状是「内容不见了却不知道开关在哪」。
+        - **列表宽按每列最小预算算，不要写回 CSS 百分比（v0.6.6）**：
+          `COL_MIN_PX` 给每列一个像素预算，总和即表的 `min-width`，
+          各列百分比按「预算/总和」以**内联样式**写到表头。CSS 百分比是
+          「占表宽的比例」，列一多就被摊薄 —— 实测 20 列时图表/限制/丢弃/队列
+          被压到 **11px**、MAC 折成三行。两处共存必然矛盾（内联赢），
+          故 CSS 里那批写死的列宽已删除，并有断言禁止它回来。
+        - **统计条与上联概览在同一张卡片里（v0.6.7）**：`overviewCard`
+          （`.tc-overview`）内含 `statsDiv`（抬头行）+ `overviewDiv`
+          （`.tc-ov-body`，即概览本体）。三条易错：
+          - **定义顺序**：`statsDiv` 必须**先**定义，否则 `E(..., [statsDiv, …])`
+            因 var 提升拿到 `undefined` → 整页空白（本仓库踩过两次，已加断言）。
+          - **两个开关独立**（统计 / 概览），卡片只是外壳：可见性由
+            `updateOverviewCard()` 按「至少一个子块**有内容**且未关掉」决定。
+            判据必须含 `firstChild` —— 子块首帧是空的，只看 `tc-hidden`
+            会画出一个**空边框**。
+          - **`statsDiv.className` 是整体赋值**（`'alert-message info'`），会把
+            `tc-hidden` 一起丢掉 → 关掉「统计」后下次轮询又显示出来。
+            必须先记下隐藏态、赋完再还原（`renderSummary` 与单设备分支各一处）。
+        - **上联图按容器实宽重绘，别用 CSS 拉伸（v0.6.7）**：图带 `viewBox`，
+          `width:100%` 会把坐标轴与刻度文字一起放大。故按 `graphWidth`
+          （容器实宽 − padding − border，用 `getComputedStyle` 读）重绘，
+          并监听 `resize`（只在宽度变化 ≥2px 时重画，否则拖窗口会每帧重建表格行）。
+          监听器具名挂到实例、在 `handleTeardown` 摘除。
+        - **例行轮询不得写状态行（v0.6.7）**：`runAll` / `runSingle` 走
+          `setRoutineStatus()` —— 只在**失败**时显示，成功时只清自己的旧错误。
+          此前每秒写「扫描中…/✓ 完成」，1 秒档位下一直闪，是噪声不是信息。
+          **动作类反馈（限速/切断/WiFi）仍必须走 `setStatus()`** 并逐字保留：
+          那些是用户主动触发、必须看到结果的操作；全改成静默会让「切断成功」
+          也没有提示。两者分工有断言守住。
+        - **按钮组与表格之间要有行距**：`.tc-menu-group` 的 `margin: 8px 0 12px`。
+          表格自身没有上边距，只写上边距会让按钮贴住表头（实测间距曾为 0）。
+        - **可见列是复选框，且只列「未显示」的列（v0.6.8）**：清单
+          （`colChipDefs`）**恰好等于 `TC_COL_DEFAULT_HIDDEN`**，不含默认显示的列 ——
+          默认就看得见的列再给个开关，只会让人以为「没勾上就是没有」。
+          断言按此校验（相等 + 每个 key 都在 `cols` 里 + 默认列不得混入）。
+          `cols` 与清单**不再要求键集相等**（旧断言已改）。
+        - **列开关必须写显式布尔，两个方向都写**（v0.6.8 起是
+          `self._hiddenCols[ct.key] = !cb.checked`）：`delete` 会让
+          `isColHidden` 回落默认隐藏，表现为「勾是勾了、表格里却没有这一列」
+          （已用运行时语义复现验证）。
+        - **默认显示列（v0.6.8）**：IP/MAC、连接数、四个速率列、类型厂商、名称、
+          操作、**TCP、UDP、互联网、限制**（共 13 列）默认可见。后四个是 v0.6.8
+          从隐藏提升为显示的，断言会逐个校验它们不在 `TC_COL_DEFAULT_HIDDEN` 里。
+        - **概览常显、无开关、在速率限制之上（v0.6.8）**：`showOverview` 选项已作废，
+          `pollIfaces` / `renderOverview` / `resize` 三处判据**只看 `isAllMode()`**。
+          渲染顺序上 `overviewCard` 必须在 `rateLimitRow` **之前**（读数是先看的、
+          操作是后改的）。改这块时注意两处断言坑（都踩过）：
+          - `grep '^\t\t…'` 用单引号时 `\t` 是**字面反斜杠 t**，不是制表符 →
+            断言永远匹配不到。改用 awk 的 `[ \t]` 字符类。
+          - 改写法后要同步相关断言（如 `= false` → `= !cb.checked`），
+            否则旧断言永远失败、变成噪声。
+        - **三个视图开关已移除、恒开（v0.6.9）**：`showStats` / `showConns` /
+          `showActivity` 作废；开关行只剩「扩展统计 / 反向DNS」。
+          两个易漏点：
+          - **活动日志的内容要首屏主动加载**：原先那一步挂在开关回调里，
+            开关移除后没人触发，整段永远空白。
+          - 容器不得再带初始 `tc-hidden` 门。
+        - **限速入口在设备表行内，不在卡片里（v0.6.9）**：卡片里的速率档位行
+          与「目标/共享/网段」已删除。点某行「限制」打开 `tc-limit-popup`，
+          目标取自 `_limitIp`（由 `mkLimitPopup`/`openLimitPopup` 设置）。
+          **`scopeInput` 已删除**，不要在别处引用。
+          - 弹层挂在 `document.body`，必须随 `handleTeardown` 摘 DOM 与两个
+            `document` 监听器。
+          - **定位要先显示再量 `offsetHeight`**：弹层高度随内容变化（自定义行、
+            上行分栏可展开），用固定估值会把它放到视口外（实测 192px 高、
+            只剩 40px 空间）。下方放不下且上方更宽裕时翻到行上方。
+        - **「已有的网段限制」列表必须保留**（`renderSubnetLimits`）：它是既有
+          全局限速**唯一**可见、可删的地方。删掉它，此前设过全网/网段限速的人
+          再也去不掉那条规则。
+        - **`upRow` 曾经是孤儿节点**：构造后从未挂进 DOM，「上下行分别设置」
+          按钮切换的是一个游离节点，点了永远看不到输入框。v0.6.9 已挂进弹层。
+          改这块时确保它仍在某个渲染树里。
    新增/修改该包的中文字符串后，跑 `python3 tools/check-trafficctl-i18n.py`
-     （缺失会失败；用 `--write-pot` 同步模板）。
+     （缺失会失败；用 `--write-pot` 同步模板）。**新增的视图/共用文件要一并加进
+     `tools/check-trafficctl-i18n.py` 的 `JS_FILES`**，否则该页的中文缺译
+     不会被校验发现（表现为页面中英混排）。当前已列入 `status.js` / `portfw.js` /
+     `host.js` / `settings.js` / `common.js`。
 
 ---
 
@@ -141,17 +319,216 @@
 
 ```
 LAN 客户端
-  └─ dnsmasq:53                     (noresolv=1, server=127.0.0.1#5353)
+  └─ dnsmasq:53                     (noresolv=1, server=127.0.0.1#5353, dns-forward-max=1024)
        ├─ 默认 → dnsproxy:5353      (ALL_DOH 加密主链, upstream_mode=parallel)
-       │     ├─ 国内域名 → 阿里 / 1.12.12.12 / 360 DoH
-       │     └─ 24 个硬编码国外域名 → 127.0.0.1:5335
-       └─ gfw_list.conf(23614 条) + black.list → 127.0.0.1#5335
+       │     └─ 国内 DoH 三上游：阿里 / 1.12.12.12 / 360
+       │        （v0.8.0 起 dnsproxy **不再**持有任何指向 :5335 的上游）
+       └─ gfw_list.conf(23701 条) + black.list → 127.0.0.1#5335
              └─ mosdns:5335         (SSR-Plus 管理, pdnsd_enable=4)
                    └─ 国外 DoH（dns.google / cloudflare）经代理出站
 ```
 
 **分流是分裂的**：只有 `gfw_list.conf` 与 `black.list` 里的域名走 mosdns，
-其余（含大多数境外域名）走 dnsproxy 的国内 DoH。这一点是理解 §5 的前提。
+其余境外域名走 dnsproxy 的国内 DoH（**这些会拿到被污染的答案**）。
+这一点是理解 §5 的前提。
+
+> **v0.8.0：dnsproxy 的「24 个硬编码国外域名 → 127.0.0.1:5335」例外清单已删除。**
+> 该清单 24/24 全部命中 `gfw_list.conf`，属重复声明；而 SSR-Plus **禁用**时
+> 它是纯故障源（`:5335` 无监听 → `connection refused` → 回落 `1.12.12.12`
+> → 污染答案，实测 `youtube.com → 31.13.92.37`、`wikipedia.org → 31.13.94.36`）。
+> **不要把它加回去。** 详见 CHANGELOG v0.8.0 与「启用后全挂」一节。
+
+**`dns-forward-max` 必须显式抬高。** dnsmasq 默认仅 **150** 个并发转发槽，
+而本固件 `noresolv=1` 无兜底、且有 23701 个域名指向 `:5335`。
+MosDNS 上游挂死时这些查询会在槽内挂到超时（实测单查询挂满 15 秒），
+槽位耗尽会连带拖垮**国内**解析。现值为 `1024`，
+写在 `files/etc/uci-defaults/99-gaming-optimize`；验证方式是看
+`/var/etc/dnsmasq.conf.cfg01411c` 里是否出现 `dns-forward-max=1024`。
+
+### 4.1 ⚠️ `enable_switch` 必须为 `'0'`（v0.8.1 起的硬约束）
+
+`enable_switch='1'` 会让 `/usr/bin/ssr-switch` 每 `switch_time` 秒（本机 667s）
+探测当前节点，失败即 `/etc/init.d/shadowsocksr restart`（ssr-switch 第 155 行）。
+这条路径是**周期性 DNS 故障源**，机制如下：
+
+1. `start()` 先 `start_rules` + `gfw2ipset`，把 23701 条
+   `server=/域名/127.0.0.1#5335` 拷进 dnsmasq —— **此刻分流已生效**；
+2. 约 2 秒后才 `start_dns`/`start_server` 拉起 MosDNS 与 Xray；
+3. 于是有约 **4 秒空窗**：分流指向 `:5335`，而 `:5335` 尚无人监听。
+   实测（0.5 秒粒度）：
+   ```
+   21:39:35  gs=cfg014a8f  5335=0  1234=1  nft=0  gfw=23701   ← 危险窗口
+   21:39:37  gs=cfg014a8f  5335=1  1234=1  nft=2  gfw=23701   ← 才就绪
+   ```
+
+而且探测本身容易误判：`switch_time=3` 是 **curl 超时 3 秒**，跨境节点
+TLS 握手常超过它。全部候选节点判失败时，`select_proxy` 返回 `nil`，
+`switch_proxy` 就 `uci set global_server=nil` —— 界面仍显示「已启用」，
+但 `load_config()` `return 1`，**一条规则都不装**，进入半死状态。
+
+**结论：单节点家用场景关闭自动切换。** 若日后确需开启，必须同时满足
+①探测超时 ≥ 10s；②全节点失败时保留原 `global_server`（不写 nil）；
+③`start()` 改为「后端就绪后再装分流」。
+
+### 4.2 ⚠️ `global_server` 绝不能是 `nil`（v0.8.2 起的硬约束）
+
+`global_server='nil'` 是**客户机全挂的直接开关**，但界面看不出来：
+
+- `load_config()` 见 `GLOBAL_SERVER=nil` 直接 `return 1`
+  → **一条 nft 规则都不装**、MosDNS(:5335)/Xray(:1234) 全不启动
+- 而 LuCI 里 `enable=1` 仍显示「运行中」，`ss_spec` 表也已消失
+- 客户机 DNS 全部 timeout；**路由器自身却正常**（走 `/etc/resolv.conf`
+  的运营商 DNS，完全绕过 dnsmasq）
+
+**根因在 `/usr/bin/ssr-switch` 的 `set_main_server()`**：原实现只判空串
+`[ -n "$sid" ] || return 1`，而 `select_proxy()` 失败时把 `ENABLE_SERVER`
+置为**字符串 `"nil"`**（不是空串），于是 `set_main_server "nil"` 通过检查并
+`uci set global_server=nil` **落盘**。监控日志实证：
+
+```
+22:02:31 *** gs=cfg014a8f → cfg194a8f   ← 被自动切换
+22:04:09 *** gs=cfg194a8f → nil          ← 再被写成 nil，客户机全挂
+```
+
+v0.8.2 起 `files/etc/uci-defaults/99-gaming-optimize` 打两处**幂等**补丁
+（带 `修复 v0.8.2` 标记，打前 `grep -q` 判重，补后 `sh -n` 校验，失败回滚）：
+
+| 补丁 | 内容 |
+|---|---|
+| (a) | `set_main_server()` 增加 `[ "$sid" != "nil" ] \|\| return 1` |
+| (b) | `run_once()` 的 else 分支不再盲写 `CURRENT_SERVER`，改为「保留原节点只重启」 |
+
+**判定客户机故障是否属于这一类**，看三样：
+
+```sh
+uci -q get shadowsocksr.@global[0].global_server      # 必须是节点名，不能是 nil
+nft list tables | grep -c ss_spec                     # 应为 2
+netstat -lnu | grep -cE ':(5335|1234)'                # 各应为 1
+```
+
+**排查这类问题必须监控 `global_server` 的变化，不能只看某一时刻的组件状态。**
+在健康态里测永远通过；只有按 2 秒粒度连续采样才看得见
+`cfg014a8f → cfg194a8f → nil` 的轨迹。
+
+**客户端症状会伪装成「连通性问题」而非「DNS 问题」**：`conntrack` 里
+国内 TCP 是 `[OFFLOAD]`（正常），国外 TCP 全停在 `SYN_SENT [UNREPLIED]`
+（无回应）。用户侧的表述是「ping 通、HTTP 无 200」或
+`os error 11001`（不知道这样的主机）。
+
+### 4.3 ⚠️ tproxy 端口列表绝不能含 53（v0.8.4 起的硬约束）
+
+`dports='2'`（常用端口）的端口列表**曾经**含 `53`：
+
+```sh
+proxyport="-m multiport --dports 22,53,587,465,995,993,143,80,443,853,9418"
+```
+
+这是「启用 SSR-Plus 后客户机连 baidu 都解析不了、过一阵又自己好」的
+**真正根因**，也是本仓库历史上最难定位的一处。
+
+**机制**：客户机 DNS 会同时命中两条拦截路径，而 tproxy 那条先赢 ——
+
+| 路径 | 表/链 | 优先级 | 结果 |
+|---|---|---|---|
+| TPROXY | `ip ss_spec_mangle prerouting` | **mangle = -150**（先执行） | DNS 被送进 `:1234` 给 v2ray |
+| 劫持 | `inet fw4 dns_intercept_lan` | dstnat+1 = **-99**（后执行） | 本该到 dnsmasq，但已被抢走 |
+
+**nft 计数器实证**（插三个计数器后发一次查询）：
+
+```
+DBG-dns-pre   packets 48    ← 到达 prerouting/mangle
+DBG-dns-nat   packets 0     ← 从未到达 dns_intercept_lan
+DBG-dns-in    packets 0     ← 从未进入 input
+```
+
+**v2ray 会为每个被 tproxy 的 DNS 打开一个绑定 `192.168.3.254:53` 的 UDP
+socket 且不释放**，累积后反过来抢走 dnsmasq 的 DNS 包。实测累积过程：
+
+```
+23:11:49  socket=1    解析=1   ← 正常
+23:11:56  socket=4    解析=0   ← 开始堆积
+23:12:10  socket=50   解析=0
+23:12:24  socket=167  解析=0
+23:12:38  socket=246  解析=0   ← 完全不可用，连 baidu 也超时
+```
+
+峰值观测到 **283 个** socket 全部绑定 `192.168.3.254:53`，`rx_queue` 全部非零
+（数据积压从未排空）。用 inode 反查确认属于 v2ray：PID 持有 22/23 个，
+而 dnsmasq 只有 1 个。
+
+**「自己会好」的原因**：v2ray 重启后 socket 归零 → 短暂恢复 → 再次堆积。
+
+**正确做法**：
+
+```sh
+proxyport="-m multiport --dports 22,587,465,995,993,143,80,443,853,9418"
+```
+
+**关键坑：只改运行时 nft 规则不够。** 持久化规则
+`/usr/share/nftables.d/ruleset-post/99-shadowsocksr.nft` 里仍含 53，
+`fw4` 重载会把它加回来。必须同时改 init 脚本的端口列表，让
+`ssr-rules -P` 重建的持久化文件也不含 53。
+
+**排查这条的正确顺序**（缺一步都会走偏）：
+
+```sh
+# 1. 客户机实际使用的地址上，socket 数是否 >1
+netstat -lnup | grep -c '192.168.3.254:53'     # 正常应为 1
+# 2. 规则里还有没有 53
+nft list chain ip ss_spec_mangle prerouting | grep dport
+# 3. 持久化文件里还有没有 53（fw4 重载会复活它）
+grep -l '22, 53,' /usr/share/nftables.d/ruleset-post/*.nft
+# 4. 分段计数器：确认 DNS 包被谁吃掉
+nft add rule ip ss_spec_mangle prerouting iifname "br-lan" udp dport 53 counter
+nft add rule inet fw4 dns_intercept_lan iifname "br-lan" udp dport 53 counter
+nft add rule inet fw4 input iifname "br-lan" udp dport 53 counter
+```
+
+**不要只测 `127.0.0.1:53`。** 客户机用的是 `192.168.3.254:53`，
+后者被 v2ray 抢占时前者仍然正常 —— 这是最容易误判的一点。
+
+**`netstat` 对多 socket 归因不可靠。** 要确认 socket 属于谁，
+用 `/proc/net/udp` 取 inode 再反查 `/proc/<pid>/fd`：
+
+```sh
+INODES=$(awk 'NR>1 && $2 == "FE03A8C0:0035" {print $10}' /proc/net/udp)
+for pid in <候选PID>; do
+  n=0; for ino in $INODES; do ls -l /proc/$pid/fd 2>/dev/null | grep -q "socket:\[$ino\]" && n=$((n+1)); done
+  echo "PID $pid 持有 :53 socket 数 = $n"
+done
+```
+
+### 4.4 dnsmasq 一律用 `reload` 而非 `restart`（v0.8.3 起的硬约束）
+
+`restart` 会杀进程再拉起，实测造成约 **3 秒完全不可用**，期间客户机
+连 `www.baidu.com` 都无法解析。`reload`（SIGHUP 重读配置）实测失败 **0 次**，
+且能正确加载新增的 `server=/域名/127.0.0.1#5335` 分流。
+
+`init.d/shadowsocksr` 的 `stop()` 与 `start()` 原本**各自**重启一次 dnsmasq，
+而 `restart` = `stop + start` → 一次 restart 断**两次**：
+
+```
+修复前：22:45:18 → 22:45:21   又  22:45:32 → 22:45:35   ← 断两次约 8 秒
+修复后：22:48:09 → 22:48:12                              ← 只断一次
+```
+
+现已在 `files/etc/uci-defaults/99-gaming-optimize` 里打三处补丁：
+覆写 `restart()` 设 `SSR_IN_RESTART=1`、`stop()` 内那次加标志守卫、
+两处 `restart` 一律改 `reload`（`grep -c 'dnsmasq restart'` 应为 **0**）。
+
+**判定进程是否存在，不要用 `pgrep -x <名字>`。** SSR-Plus 的二进制以完整路径
+运行（`/var/etc/ssrplus/bin/v2ray`、`.../mosdns`），`pgrep -x xray` /
+`pgrep -x mosdns` **恒为 0**，会误判成「后端没起」。应改用
+`pgrep -f '/var/etc/ssrplus/bin/'` 或遍历 `/proc/*/cmdline`。
+
+**`pgrep -f` 还会匹配到诊断命令自身。** 用
+`pgrep -f "ssr-switch start"` 判定时，它会把执行该命令的 `ash -c`
+也算进去（实测虚报成 2 个进程）。遍历 `/proc/*/cmdline` 时必须
+`grep -v "ash -c"` 排除。
+
+**`nc -z` 不能判断代理节点可用性。** Cloudflare 前置的节点对裸 TCP 不响应，
+但 TLS 握手正常。判据应看 `netstat -antp` 是否有 **ESTABLISHED** 到节点的
+连接，或直接测经代理的解析/访问结果。
 
 - **SSR-Plus 透明代理只代理 IPv4。** 在 fw4/nftables 固件上体现为
   `table inet ss_spec` 的 `redirect to :1234`（**不是** iptables 的
@@ -194,8 +571,8 @@ dnsmasq 把哪些域名指向 mosdns:5335**。当前仓库值 **`'1'`**（v0.4.0
 | dnsmasq 路由 | `filter_aaaa` | 实际效果 |
 |---|---|---|
 | **全量**指向 `#5335`（v0.3.5 时代） | `'1'` | 所有国外域名失去 AAAA → 双栈客户端「有 IPv6 但上不了网」（v0.3.5 修的就是这个） |
-| **分裂**（现状：默认 `#5353`，仅 `gfw_list.conf` 的 23614 条 + `black.list` 走 `#5335`） | `'1'` | 只有**需走代理的域名**失去 AAAA → 被墙域名回落 IPv4 走代理；其余国外域名保留 AAAA 走 IPv6 直连 |
-| 分裂 | `'0'` | 那 23614 个被墙域名拿到真实 AAAA → IPv6 直连被 **RST** → 「有 IPv6 但打不开站点」 |
+| **分裂**（现状：默认 `#5353`，仅 `gfw_list.conf` 的 23701 条 + `black.list` 走 `#5335`） | `'1'` | 只有**需走代理的域名**失去 AAAA → 被墙域名回落 IPv4 走代理；其余国外域名保留 AAAA 走 IPv6 直连 |
+| 分裂 | `'0'` | 那 23701 个被墙域名拿到真实 AAAA → IPv6 直连被 **RST** → 「有 IPv6 但打不开站点」 |
 
 - **判定方法**：`grep -c '127.0.0.1#5335' /tmp/dnsmasq.d/dnsmasq-ssrplus.d/gfw_list.conf`
   与 `/var/etc/dnsmasq.conf.cfg01411c` 的 `server=` 行。先看路由，再判开关值。
@@ -208,6 +585,41 @@ dnsmasq 把哪些域名指向 mosdns:5335**。当前仓库值 **`'1'`**（v0.4.0
   改 UCI 后需 `/etc/init.d/shadowsocksr restart` 重新生成运行时配置
   （`/var/etc/ssrplus/mosdns-config.yaml`）。
 - **改动此开关前必须同时确认路由形态，并同步 CHANGELOG 与 ADR-0001。**
+
+### 5.1 用户的明确要求与当前实现（2026-10-17 实测确认）
+
+用户要求：**国外不要 IPv6 直连**（避免被 RST），**国内保持双栈**。
+当前 `filter_aaaa='1'` **已精确实现该语义，不要改动它**。实测：
+
+| 域名 | 归类 | A | AAAA | AAAA 耗时 |
+|---|---|---|---|---|
+| `www.moe.gov.cn` | 国内（不在 gfw_list） | ✅ 真实 | ✅ `2408:875c:0:80::6c` | 28ms |
+| `www.cac.gov.cn` | 国内（不在 gfw_list） | ✅ 真实 | ✅ `240e:95c:806:40::413` | 36ms |
+| `www.github.com` | 国外（在 gfw_list） | ✅ 经代理 | ⛔ 空答复 | **1ms** |
+| `www.youtube.com` | 国外（在 gfw_list） | ✅ 真实 | ⛔ 空答复 | **1ms** |
+
+**⚠️ 极易误判的一点：国外 AAAA 是「1ms 空答复」，不是「5 秒超时」。**
+
+MosDNS 的 `reject 0` 返回的是 `rcode=0` + `ancount=0`（合法答复：明确告知
+「没有此类型记录」）。客户端收到后会**立刻**回落查 A，不会等待。
+只有**收不到任何包**才是 `TIMEOUT`，那才会卡住客户端 5 秒。
+
+排查时必须把四种结果分开判定，写检查脚本时尤其注意：
+
+| 判定 | 条件 | 是否故障 |
+|---|---|---|
+| `OK` | rcode=0 且 ancount>0 | 否 |
+| `EMPTY` | rcode=0 且 ancount=0 | **否**（`filter_aaaa` 的预期形态） |
+| `NX` | rcode=3 | 否（域名不存在） |
+| `TIMEOUT` | 完全无响应 | **是**（会卡住客户端） |
+| `FAIL` | rcode=2 等 | **是**（上游故障） |
+
+把 `EMPTY` 当成失败，会得出「国内也全挂」这种完全错误的结论 ——
+本轮排查正是栽在这里。
+
+**禁用 SSR-Plus 时国外 AAAA 会变回污染值**（实测 `2001:0:0:0:0:0:0:1`、
+`2001:df2:e500:ed1a::1`）。这正是「国外 IPv6 直连被 RST」的成因，
+也是必须启用 SSR 的理由之一 —— 不要以为禁用 SSR 更「干净」。
 
 ---
 
@@ -337,7 +749,7 @@ dnsmasq 把哪些域名指向 mosdns:5335**。当前仓库值 **`'1'`**（v0.4.0
   - CI 步骤 `Verify luci-app-trafficctl local invariants` 会从 `UPSTREAM` 记录的 tag
     **真实克隆上游、重放全部 patch、要求与 vendored 包逐字节一致**，
     并断言本地改动仍在（nft 后端语法/三钩子/`@lan`、`LUCI_DEPENDS` 不含
-    hostapd-utils、`optRefresh` 与 `1s` 档位、Telegram 为页面级 tab、
+    hostapd-utils、`optRefresh` 与 `1s` 档位、**Telegram 已全链路移除**、
     中文翻译完整性）。
   全部断言集中在 `tools/verify-trafficctl-invariants.sh`（本地可复跑，
   与 CI 同一份逻辑；`TCTL_UPSTREAM_LOCAL=<上游包目录>` 可离线运行）。
@@ -347,12 +759,42 @@ dnsmasq 把哪些域名指向 mosdns:5335**。当前仓库值 **`'1'`**（v0.4.0
      （见红线 7/8 与第 4 节的「代理流量走 INPUT/OUTPUT」）。丢掉它 → **速率列恒为 `—`**。
   2. `Makefile` 去掉 `LUCI_DEPENDS` 里的 `+hostapd-utils` —— 见第 3 节。
      丢掉它 → **整包与中文包一起被 kconfig 丢弃，界面变英文**（构建不报错）。
-  3. `status.js` / `status.css` / `telegram.js` / `menu.d` / `config` / `rpcd` 的
+  3. `status.js` / `status.css` / `menu.d` / `config` / `rpcd` 的
      刷新与 tab 改动 —— 默认 5 秒自动刷新、1s/2s 档位、`refresh_interval` 端到端
-     接线、**Telegram 为页面级独立 tab**（顶部行：设备 | Telegram机器人 | 端口转发）。
-     丢掉它 → **冷启动不再自动刷新**、Telegram 变回超长折叠小节、或设置区冒出
-     内层 tab（两级 tab 让人分不清层级）。
+     接线、页面级 tab 为**设备 | 设置 | 端口转发**。
+     丢掉它 → **冷启动不再自动刷新**、或设置区冒出内层 tab（两级 tab 让人分不清层级）。
   4. `po/zh-cn/luci-app-trafficctl.po` —— 丢掉它 → **中文界面变英文**。
+  5. `host.js` + `trafficctl-device.sh` 的**主机实时连接详情页**（v0.5.0，见红线 9）——
+     丢掉它 → 概览「流量排行」与设备表 IP 的链接 404。
+  6. `settings.js` + `common.js` 的**设置独立 tab**（v0.6.0；布局于 v0.6.2 再调整）
+     —— 配置项从设备页迁到 `admin/status/trafficctl/settings`，两页共用
+     `resources/trafficctl/common.js`；同时移除软件卸载的橙黄横幅。
+     丢掉它 → 配置重新挤回设备页、横幅复现，或两页各持一份定义。
+     v0.6.2 起设备页操作区收拢为一张卡片（设备选择 + 目标 + 档位 + 切断 +
+     View & Table），「表格与速率」档位则从设置页迁回**设备页设备表上方**
+     （见红线 9 第 6 项与 CHANGELOG v0.6.2 的说明）。
+     v0.6.3 起设备表为**两行式**（IP/MAC、类型/厂商、操作各一列两行）、
+     16 列压到 9 列、新增「累计上行/下行」与「设备厂商」（OUI）、底部有分页条 ——
+     详见红线 9 第 6 项的补充与 CHANGELOG v0.6.3。
+     v0.6.4 起四组档位（轮询/窗口/方法/刷新）收进 ☰ 菜单（默认收起），
+     冷启动轮询默认 2s → 1s（前端 / UCI / rpcd 三处一致），
+     三类字节轮询加防重入闸 —— 详见红线 9 第 6 项的补充与 CHANGELOG v0.6.4。
+     v0.6.9 起设备页操作区进一步简化（picker 行只剩「所有设备 | 搜索框」、
+     三个视图开关移除恒开），限速入口移进设备表每行的「限制」弹层。
+     v0.7.0 起 **Telegram 全链路移除**（视图 / menu.d / acl.d / rpcd 三方法 /
+     init.d 服务 / 两个脚本 / UCI 段 / hotplug 通知 / 日志分类开关），
+     并把三个被复用的 `tg-*` 类名改为中性的 `tc-*`。
+- **[v0.7.0 起] `luci-app-trafficctl` 的 patch 生成器支持「删除文件」。**
+  `tools/regen-trafficctl-patches.py` 的分组此前只支持「改/加文件」，而移除
+  Telegram 必须删掉实现（`init.d` + 两个脚本）。现在四元组
+  `(patch, desc, files, deletes)` 的第二份清单会被 `unlink` 后再 `git add -A`，
+  于是 patch 里出现 `deleted file mode`，套用时真正删除。
+  **两条约束**：
+  - 删除清单里只能写**上游存在**的文件。`telegram.js` 是本仓库新增的视图
+    （上游没有），对它做「删除上游不存在的文件」会让 `git apply` 直接失败 ——
+    它只需不再出现在 0002 的新增清单里，重放后自然不存在。
+  - 改动 `package/` 后 100755/100644 的索引计数会变，`verify-trafficctl-invariants.sh`
+    里的硬编码数字（现为 **26**）要同步更新，否则断言会误报「执行位丢了」。
 - **[已解决] 上游依赖把整包拖下水（v0.4.7 起潜伏，v0.4.9 修）**：
   上游 1.21.4 的 `LUCI_DEPENDS` 含 `+hostapd-utils`，而该包在 lede 里是
   `DEPENDS:=@<某个 hostapd/wpad 变体>` + `VARIANT:=*` —— 只有选中 hostapd/wpad
