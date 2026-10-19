@@ -2,6 +2,77 @@
 
 本仓库所有功能/配置改动均记录于此。版本判型遵循全局规范（PATCH / MINOR / MAJOR）。
 
+## [v0.8.5] - 2026-10-19
+
+### 修复 — 定时构建连续失败：校验脚本用了 dash 不支持的进程替换
+
+**症状**：10-18、10-19 两次定时构建在 `Verify luci-app-trafficctl local invariants`
+步骤失败，报错只有一行：
+
+```
+tools/verify-trafficctl-invariants.sh: 494: Syntax error: "(" unexpected
+##[error]Process completed with exit code 2.
+```
+
+**根因**：该脚本在 v0.7.0 提交里被大幅扩写（337 行 → 984 行），新增的列键集
+断言用了 **bash 专有的进程替换** `<(...)`：
+
+```sh
+diff <(printf '%s\n' "$_HIDDEN_KEYS") <(printf '%s\n' "$_CHIP_KEYS") || true
+```
+
+而 CI 用 `sh tools/verify-trafficctl-invariants.sh` 调用，ubuntu runner 的
+`/bin/sh` 是 **dash**。进程替换在 dash 里不是运行时错误，而是**解析期语法错误** ——
+整个脚本连第一行都没执行就 exit 2，于是编译步骤全部 skipped，
+`Compile firmware` / `Upload artifacts` 都是 `skipped`，自然没有产物。
+
+**为什么本地看不出来**：本机（WSL）用 `bash` 跑同一脚本时 163 条断言全绿。
+只有用 `sh` 才会暴露 —— 这正是「本地过了 CI 挂」的形态。
+
+**共 3 处进程替换**（全部改为临时文件，临时目录由脚本头部 `$TMPD` 提供，
+`trap ... EXIT` 统一清理）：
+
+| 行 | 用途 | 改法 |
+|---|---|---|
+| 494 | `diff` 两个键集 | 先 `printf > "$TMPD/*.keys"` 再 `diff 两文件` |
+| 508 | `comm -23` 求差集 | 两个键集落盘后 `comm -23 文件 文件` |
+| 983 | `cmp` 比对去掉 CR 后的内容 | 各自 `tr -d '\r' > "$TMPD/cr_a"` 后 `cmp` |
+
+### 新增 — 三道守卫，防止同类问题再次静默通过
+
+1. **`sh -n` 解析前置检查**（`Verify invariants script is POSIX sh (dash) compatible`，
+   排在跑断言**之前**）：解析失败时直接打印「含 bash 专有语法」，不再让人对着
+   `Syntax error: "(" unexpected` 猜第 494 行是什么。
+2. **`Upload artifacts` 改 `if-no-files-found: error`**：该参数默认是 `warn`，
+   语义是「没匹配到文件也照样成功」→「构建绿了、Actions 上却没有产物」。
+   固件是本流水线唯一交付物，缺了就该红。
+3. **`Assert firmware artifact exists`**：`upload-artifact` 之后用 Actions API
+   (`gh api .../actions/runs/<id>/artifacts`) 核对本次 run 的实际 artifact 计数，
+   为 0 则 `exit 1`。`if-no-files-found` 只保证「有文件被匹配到」，不保证上传成功；
+   这里以 API 计数为准。为此在 `permissions` 补 `actions: read`
+   （声明 permissions 后未列出的 scope 一律为 none，不会回落到仓库默认）。
+
+### 变更
+
+- `.github/workflows/build-openwrt.yml`：新增 2 步（解析检查、产物断言），
+  `Upload artifacts` 加 `if-no-files-found: error`，`permissions` 补 `actions: read`。
+- `tools/verify-trafficctl-invariants.sh`：3 处进程替换改为临时文件；
+  文件头补「必须保持 POSIX sh 兼容」的说明与 `$TMPD`/`trap`。
+
+### 验证
+
+- `sh -n tools/verify-trafficctl-invariants.sh` → 退出码 0（修复前该命令在 dash 下
+  直接报 `Syntax error: "(" unexpected`）。
+- `sh tools/verify-trafficctl-invariants.sh`（**用 dash，与 CI 同一条命令**）→
+  退出码 0，163 条 `OK`、0 条 `FAIL`；第 5/7 节（文件模式、patch 重放）均实际执行到
+  「重放结果与 vendored 包逐字节一致」。
+- 工作流经 PyYAML 解析：`permissions` 为 `{contents: write, actions: read}`；
+  步骤顺序为 …→ 解析检查(9) → 跑断言(10) → … → 编译(24) → 改名(25) →
+  上传产物(26) → 产物断言(27) → 上传 Release(28)。
+- **尚未经真实 CI 构建验证**：本地无 GitHub Actions runner，上述为静态与脚本级
+  验证。下一次 master 推送或定时构建通过、且 Actions 页面确实出现 artifact，
+  才算端到端闭环。
+
 ## [v0.8.4] - 2026-10-17
 
 ### 修复 — tproxy 端口列表含 53，导致 v2ray 抢走 dnsmasq 的 DNS 包

@@ -25,8 +25,19 @@
 # 包逐字节一致」，这是「日后能跟进上游」的核心保证。
 #
 # 退出码 0 = 全部通过；1 = 有失败项（CI 据此中止）。
+#
+# 【必须保持 POSIX sh 兼容】CI 用 `sh tools/verify-trafficctl-invariants.sh` 调用，
+# 而 ubuntu runner 的 /bin/sh 是 dash。bash 专有语法（进程替换 `<(...)`、`[[ ]]`、
+# 数组、`local`）在这里**不是运行时失败，而是解析期 Syntax error**，整步直接
+# exit 2、编译根本不会开始。v0.8.4 的 tag 构建与 10-18/10-19 的定时构建正是栽在
+# 进程替换 `<(...)` 上（报 `Syntax error: "(" unexpected`）。
+# 因此：新增断言时只用 POSIX 语法；需要临时文件就写进下面的 $TMPD。
 
 set -u
+
+# 临时目录：替代 bash 的进程替换。退出时统一清理。
+TMPD="$(mktemp -d)"
+trap 'rm -rf "$TMPD"' EXIT INT TERM HUP
 
 PKG=package/luci-app-trafficctl
 V="$PKG/htdocs/luci-static/resources/view/trafficctl"
@@ -491,7 +502,10 @@ elif [ "$_CHIP_KEYS" = "$_HIDDEN_KEYS" ]; then
     ok "可见列清单 == 默认隐藏列集（$(printf '%s\n' "$_CHIP_KEYS" | grep -c .) 项）"
 else
     bad "可见列清单与默认隐藏列集不一致 —— 会出现「能开关但没有列」或「有列但开关缺失」"
-    diff <(printf '%s\n' "$_HIDDEN_KEYS") <(printf '%s\n' "$_CHIP_KEYS") || true
+    # 用临时文件代替进程替换（dash 不支持 `<(...)`，见文件头说明）。
+    printf '%s\n' "$_HIDDEN_KEYS" > "$TMPD/hidden.keys"
+    printf '%s\n' "$_CHIP_KEYS" > "$TMPD/chip.keys"
+    diff "$TMPD/hidden.keys" "$TMPD/chip.keys" || true
 fi
 # 清单里的每个 key 都必须在 cols 里存在（否则开关点了没反应）。
 _MISSING=""
@@ -505,7 +519,10 @@ else
 fi
 # 默认显示的列**不得**出现在清单里（用户要求：默认已显示的不纳入可见列）。
 _LEAK=""
-for _k in $(printf '%s\n' "$_COLS_KEYS" | comm -23 - <(printf '%s\n' "$_HIDDEN_KEYS")); do
+# comm 需要两个已排序的**文件**；dash 没有进程替换，故先落盘。
+printf '%s\n' "$_COLS_KEYS" > "$TMPD/cols.keys"
+printf '%s\n' "$_HIDDEN_KEYS" > "$TMPD/hidden2.keys"
+for _k in $(comm -23 "$TMPD/cols.keys" "$TMPD/hidden2.keys"); do
     printf '%s\n' "$_CHIP_KEYS" | grep -qx "$_k" && _LEAK="$_LEAK $_k"
 done
 if [ -z "$_LEAK" ]; then
@@ -817,13 +834,11 @@ grep -q 'tc-table--center .td.tc-cell-stack' "$CSS" \
     || bad "两行式单元格的子项未对齐：IP/MAC 与 类型/厂商 会左贴"
 
 # 选择器不得退回带 td 前缀的写法（元素是 div.td，永不匹配）
-# （telegram.js 已于 v0.7.0 移除，故不再收录 $T）
-for f in "$S"; do
-    if grep -qE "querySelector(All)?\('td\[data-|closest\('td\[data-" "$f"; then
-        bad "$f 出现 td[data-…] 前缀选择器（元素是 div.td，永不匹配）"
-        grep -nE "querySelector(All)?\('td\[data-|closest\('td\[data-" "$f"
-    fi
-done
+# （telegram.js 已于 v0.7.0 移除，故这里只查 status.js）
+if grep -qE "querySelector(All)?\('td\[data-|closest\('td\[data-" "$S"; then
+    bad "$S 出现 td[data-…] 前缀选择器（元素是 div.td，永不匹配）"
+    grep -nE "querySelector(All)?\('td\[data-|closest\('td\[data-" "$S"
+fi
 ok "无 td[data-…] 前缀选择器"
 
 # ─────────────────────────────────────────────────────────────
@@ -979,8 +994,11 @@ PYEOF
                 if diff -rq -x .git -x LICENSE -x README.md "$REPLAY" "$PKG" 2>/dev/null \
                      | sed -n 's/^Files \(.*\) and \(.*\) differ$/\1/p' \
                      | while read -r f; do
-                           rel="${f#$REPLAY/}"
-                           cmp -s <(tr -d '\r' < "$f") <(tr -d '\r' < "$PKG/$rel") || exit 1
+                           rel="${f#"$REPLAY"/}"
+                           # 去掉 CR 后再比 —— 用临时文件代替进程替换（dash 不支持）。
+                           tr -d '\r' < "$f" > "$TMPD/cr_a"
+                           tr -d '\r' < "$PKG/$rel" > "$TMPD/cr_b"
+                           cmp -s "$TMPD/cr_a" "$TMPD/cr_b" || exit 1
                        done; then
                     note "        ^ 上述差异去掉 CR 后完全相同 → 仅为行尾差异（core.autocrlf）。"
                 fi

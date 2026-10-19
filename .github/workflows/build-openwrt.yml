@@ -46,8 +46,14 @@ env:
 #
 # v0.4.5 ~ v0.4.11 期间「Release 建得出来、固件一个都传不上去」就是这个原因
 # （叠加 GH_REPO 缺失，两个问题互相掩盖）。
+#
+# 另需 actions: read —— 末尾的「Assert firmware artifact exists」用
+# `gh api .../actions/runs/<id>/artifacts` 查询本次 run 的产物。
+# 声明 permissions 后**未列出的 scope 一律为 none**（不是回落到仓库默认 read），
+# 故必须显式列出；否则该断言会以 403 失败，把一次正常构建判成红灯。
 permissions:
   contents: write
+  actions: read
 
 jobs:
   build:
@@ -139,6 +145,24 @@ jobs:
         run: |
           cp -r ../openwrt-build/package/luci-app-trafficctl package/
 
+      - name: Verify invariants script is POSIX sh (dash) compatible
+        working-directory: openwrt-build
+        run: |
+          # 【必须排在「跑断言」之前】
+          # 该脚本的失败形态之一是**解析期**语法错误，报错只有一句
+          #   tools/verify-trafficctl-invariants.sh: 494: Syntax error: "(" unexpected
+          # 既没有 FAIL 行也没有断言上下文，极易被误判成「某条断言不通过」。
+          # 这里先用 `sh -n` 做纯解析检查，让同类问题在日志里有一句明确的
+          # 「用了 bash 专有语法」，而不是让人去猜第 494 行出了什么事。
+          if ! sh -n tools/verify-trafficctl-invariants.sh; then
+            echo "!!! tools/verify-trafficctl-invariants.sh 含 bash 专有语法，dash 无法解析。" >&2
+            echo "    CI 用 /bin/sh（dash）执行该脚本；进程替换 <(...)、[[ ]]、数组、" >&2
+            echo "    local/function 关键字都会在解析期直接 Syntax error，构建不会开始。" >&2
+            echo "    需要临时文件请写进脚本里的 \$TMPD（已在脚本头部建立）。" >&2
+            exit 1
+          fi
+          echo "OK   tools/verify-trafficctl-invariants.sh 可被 dash 解析"
+
       - name: Verify luci-app-trafficctl local invariants (速度监控 / 中文翻译 / 刷新)
         working-directory: openwrt-build
         run: |
@@ -152,6 +176,11 @@ jobs:
           #
           # 该脚本校验的核心是「四项本地改动仍在」+「patch 可复现 vendored 包」，
           # 详见脚本头部注释与 AGENTS.md 红线 9。
+          #
+          # 【调用方式必须保持 `sh`】runner 的 /bin/sh 是 dash。用 bash 调用会让
+          # bash 专有语法（进程替换 `<(...)` 等）通过本地自测，却在 CI 解析期
+          # 直接 `Syntax error` → exit 2 → 编译根本不会开始。
+          # v0.8.4 的 tag 构建与 10-18/10-19 两次定时构建正是这样连续失败三天。
           sh tools/verify-trafficctl-invariants.sh
 
       - name: Fetch luci-app-dnsproxy upstream and apply local patches (ALL_DOH)
@@ -716,9 +745,54 @@ jobs:
         with:
           # artifact 名带版本号，便于在 Actions 页区分每次构建
           name: openwrt-x86-64-ssrplus-${{ env.VERSION }}-${{ env.SHORT_SHA }}
+          # 【必须 error，不能留默认的 warn】
+          # 默认值 warn 的语义是「没匹配到文件也照样成功」——于是会出现
+          # 「构建显示成功、Actions 上却没有任何产物」这种最难发现的静默失效
+          # （用户侧的描述正是「完成编译但是没有产物」）。固件是本流水线唯一的
+          # 交付物，没有它就该红。
+          if-no-files-found: error
           path: |
             lede/bin/targets/x86/64/*.img.gz
             lede/bin/targets/x86/64/*.img.gz.sha256
+
+      # ------------------------------------------------------------------
+      # 产物兜底断言：直接查 Actions API 确认本次 run 真的有 artifact。
+      #
+      # 为什么在 upload-artifact 之后还要再查一次：
+      #   `if-no-files-found: error` 只保证「有文件被匹配到」，不保证上传后
+      #   产物可下载；而「构建绿了但产物没有」是本仓库反复踩过的形态
+      #   （v0.4.5~v0.4.11 的空 Release 也是同一类静默失效）。
+      #   这里以 API 的实际计数为准，不看步骤退出码。
+      # ------------------------------------------------------------------
+      - name: Assert firmware artifact exists
+        env:
+          GH_TOKEN: ${{ github.token }}
+          GH_REPO: ${{ github.repository }}
+          RUN_ID: ${{ github.run_id }}
+        run: |
+          set -e
+          # 有界重试：artifact 刚上传完时，Actions API 可能还读不到（最终一致）。
+          # 最多等 30s；超时才算失败。固定 sleep 会既拖慢成功路径、
+          # 又在 API 慢时误判成「没有产物」。
+          n=0
+          for i in $(seq 1 6); do
+            n="$(gh api "repos/$GH_REPO/actions/runs/$RUN_ID/artifacts" --jq '.total_count')"
+            [ "${n:-0}" -ge 1 ] && break
+            echo "第 $i 次查询未见 artifact，等待 5s 后重试…"
+            sleep 5
+          done
+
+          echo ">>> 本次 run 的 artifact 数：$n"
+          gh api "repos/$GH_REPO/actions/runs/$RUN_ID/artifacts" \
+            --jq '.artifacts[] | "    \(.name)  \(.size_in_bytes) bytes  expired=\(.expired)"'
+
+          if [ "${n:-0}" -lt 1 ]; then
+            echo "!!! 编译完成但本次 run 没有任何 artifact —— 产物未上传成功" >&2
+            echo "    （检查上一步 Upload artifacts 的日志；本断言就是为了让这种" >&2
+            echo "      「构建绿、产物空」的情况显式失败，而不是静默通过）" >&2
+            exit 1
+          fi
+          echo ">>> 产物断言通过"
 
       # ------------------------------------------------------------------
       # 发版（tag v* push）时：把编译产物上传到 GitHub Release。

@@ -667,8 +667,22 @@ MosDNS 的 `reject 0` 返回的是 `rcode=0` + `ancount=0`（合法答复：明�
    几分钟内就能看到，**不必等 3.5 小时构建结束**。
    `permissions` 是**按工作流**申请的，不是按仓库 —— 同一仓库里声明了的能用写权限、
    未声明的取仓库默认（本项目默认 `read`）。
-10. 改动前**先备份**：`/etc/config/*`、`/var/etc/ssrplus/*` 到 `/root/ssrfix-backup-<ts>/`，
+   **注意：一旦工作流自己声明了 `permissions`，未列出的 scope 一律为 `none`**，
+   不再回落到仓库默认。故用 `gh api` 查 Actions 相关接口时要显式加 `actions: read`，
+   否则会 403、把一次正常构建判成红灯。
+10. **改动前先备份**：`/etc/config/*`、`/var/etc/ssrplus/*` 到 `/root/ssrfix-backup-<ts>/`，
     并在报告中写明回滚命令。
+11. **`tools/*.sh` 必须用 `sh` 自测，不能用 bash**：CI 用 `sh` 调用，runner 的
+    `/bin/sh` 是 **dash**。bash 专有语法（进程替换 `<(...)`、`[[ ]]`、数组、`local`）
+    在 dash 里是**解析期**错误 —— 脚本一行未执行即 exit 2，编译全部 skipped、
+    没有任何产物。**本仓库已因此连续失败三天**（v0.8.4 tag + 10-18/10-19 定时构建）。
+    自测：`sh -n <脚本>`、`sh <脚本>`、`shellcheck -s sh -S error <脚本>`。
+    用 bash 跑会全绿、看不出问题。临时文件用脚本头部的 `$TMPD`（`mktemp -d`+`trap`），
+    不要用进程替换。CI 有前置守卫 `Verify invariants script is POSIX sh (dash) compatible`。
+12. **「构建绿了但没有产物」要当成失败**：`actions/upload-artifact` 的
+    `if-no-files-found` **默认 `warn`**（没匹配到文件也算成功）。固件是唯一交付物，
+    故显式设 `error`，并由 `Assert firmware artifact exists` 用 Actions API 计数兜底。
+    只看步骤退出码会漏掉这类静默失效 —— 空 Release 是同一类。
 
 ---
 
