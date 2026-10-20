@@ -63,13 +63,12 @@ done
 # 包是否安装
 opkg list-installed | grep -E 'luci-app-dnschain|luci-i18n-dnschain'
 
-# 页面文件是否就位（6 个关键文件）
+# 页面文件是否就位（5 个关键文件）
 for f in /usr/share/luci/menu.d/luci-app-dnschain.json \
          /usr/share/rpcd/acl.d/luci-app-dnschain.json \
          /usr/lib/lua/luci/controller/dnschain.lua \
          /usr/lib/lua/luci/model/cbi/dnschain/general.lua \
-         /usr/lib/lua/luci/model/cbi/dnschain/dnschain.lua \
-         /usr/lib/lua/luci/i18n/dnschain.zh-cn.lmo; do
+         /usr/lib/lua/luci/model/cbi/dnschain/dnschain.lua; do
   [ -e "$f" ] && echo "OK   $f" || echo "MISS $f"
 done
 ```
@@ -77,10 +76,26 @@ done
 | 期望 | 失败含义 |
 |---|---|
 | `opkg` 有 `luci-app-dnschain` 与 `luci-i18n-dnschain-zh-cn` | 包未编入 → CI 的 `Add luci-app-dnschain` 步骤缺失，或 `.config` 里符号被依赖求解丢弃（查 CI 日志 `=== dnschain 本体与中文语言包都必须入配置 ===`） |
-| 6 个文件全 `OK` | 有 `MISS` → 包装了但内容不全，检查 `package/luci-app-dnschain/` 的 `root/` 与 `luasrc/` 布局 |
+| 5 个文件全 `OK` | 有 `MISS` → 包装了但内容不全，检查 `package/luci-app-dnschain/` 的 `root/` 与 `luasrc/` 布局 |
+
+**关于 `.lmo`（中文翻译二进制）：本页不需要它。**
+
+本页面的 `translate()` 里直接写中文，即 po 里 `msgid` 与 `msgstr` 都是中文
+（源语言就是中文）。因此：
+
+- `po2lmo` 不产出有效映射表 → 没有 `luci-app-dnschain.zh-cn.lmo`
+- 但 LuCI 找不到翻译时会**回退到原文**，而原文就是中文 → 页面显示中文
+
+这与 `trafficctl` 不同：后者源码用英文（`translate("Accelerates routing…")`），
+po 的 `msgstr` 才是中文，故必须有 `.lmo`。
+
+| 包 | `translate()` 参数 | 需要 `.lmo` |
+|---|---|---|
+| `luci-app-trafficctl` | 英文 | **是** |
+| `luci-app-dnschain` | 中文 | 否（回退到原文） |
 
 **最后确认页面真的能打开**：浏览器访问 `http://192.168.3.254/cgi-bin/luci/admin/network/dns_chain`。
-返回 404 或空白 → 页面没注册；能打开但显示英文 → i18n 包缺失。
+返回 404 或空白 → 页面没注册。
 
 ### 1.3 执行位
 
@@ -586,29 +601,47 @@ ls -d /root/dnschain-backup-* 2>/dev/null
 ## 12.1 构建产物预检（刷机**前**做，不必等刷完）
 
 刷机前就能确认产物是否完整，避免「刷完才发现页面没有」。
-在**能读固件的机器上**执行（Linux 或 WSL）。
+
+### 一键执行（推荐）
 
 ```sh
-# 1. 解出 squashfs（偏移随镜像不同，用这条命令找）
+# 1. 下载产物
+gh run download <run-id> -D /tmp/fw
+
+# 2. 预检（脚本在仓库里）
+sh tools/verify-firmware-artifact.sh /tmp/fw/<artifact 目录>
+```
+
+脚本做 7 项检查：sha256、定位 squashfs、列全量清单、**overlay 层 10 项**、
+**LuCI 层 5 项**、opkg 包登记 2 项、条目总数。任一项失败即非零退出。
+
+输出末尾会明确给出 `=== 预检通过：可以刷机 ===` 或
+`=== 预检失败：不要刷机，先查 CI 日志 ===`。
+
+### 手工执行（脚本不可用时）
+
+```sh
 IMG=openwrt-x86-64-ssrplus-vX.Y.Z-abcdef0-squashfs-combined-efi.img.gz
-gunzip -c "$IMG" > /tmp/fw.img
+# gunzip 会报 trailing garbage 并返回非 0，但结果正确，忽略退出码
+gunzip -c "$IMG" > /tmp/fw.img 2>/dev/null || true
 OFF=$(python3 - <<'PY'
-data = open('/tmp/fw.img','rb').read(1024*1024*16)
-i = data.find(b'hsqs')
-print(i if i >= 0 else -1)
+with open('/tmp/fw.img','rb') as f:
+    pos = 0
+    while True:
+        c = f.read(1024*1024*8)
+        if not c: print(-1); break
+        i = c.find(b'hsqs')
+        if i >= 0: print(pos + i); break
+        pos += len(c)
 PY
 )
 echo "squashfs 偏移: $OFF"
 tail -c +$((OFF + 1)) /tmp/fw.img > /tmp/root.squashfs
 
-# 2. 列出全部 dnschain 相关条目（含权限）
-unsquashfs -ll /tmp/root.squashfs | grep -E 'dnschain|applechina'
-
-# 3. 逐项核对（数量与权限）
-unsquashfs -ll /tmp/root.squashfs | grep -cE 'dnschain'          # 期望 >= 14
-unsquashfs -ll /tmp/root.squashfs | grep 'init.d/dnschain'       # 期望 -rwxr-xr-x
-unsquashfs -ll /tmp/root.squashfs | grep 'rc.d/S95dnschain'      # 期望 symlink 存在
-unsquashfs -ll /tmp/root.squashfs | grep 'luci/menu.d/luci-app-dnschain.json'  # 期望存在
+# 关键：用 -ll 列全量，不要用 -l <path>
+unsquashfs -ll /tmp/root.squashfs > /tmp/list.txt
+grep -E 'dnschain|applechina' /tmp/list.txt
+grep -c 'dnschain' /tmp/list.txt            # 期望 >= 20（v0.9.0 首包为 0）
 ```
 
 **⚠️ 不要用 `unsquashfs -l <path>` 判断单个文件是否存在。**
