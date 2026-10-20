@@ -1,0 +1,367 @@
+#!/bin/sh
+# ============================================================
+# dnschain-selftest — 全链路自检
+# ------------------------------------------------------------
+# 设计依据：docs/adr/0003-dns-chain-framework.md §11（16 项）
+#
+# 输出：每行 "<序号> <PASS|FAIL|SKIP> <项目名> — <证据/原因>"
+# 退出码：全 PASS 或 SKIP 时为 0；任一 FAIL 为 1
+#
+# 调用方：
+#   - 页面「一键自检」
+#   - init.d/dnschain 启动后
+#   - 定时任务（selftest.interval，默认 300s）
+#   - CI 契约校验
+#
+# 测试纪律（AGENTS §5.1、§6.2）：
+#   - 必须区分 OK / EMPTY / NX / TIMEOUT / FAIL 五种结果
+#   - 国外 AAAA 的预期是 EMPTY（rcode=0 ancount=0），不是 TIMEOUT
+#   - 必须用客户机真实地址测，不能只测 127.0.0.1
+#   - 测延迟不能用 date +%s%N（BusyBox 不支持，会静默返回秒级）
+# ============================================================
+
+. /usr/share/dnschain/dnschain.sh
+
+PASS_CNT=0
+FAIL_CNT=0
+SKIP_CNT=0
+
+# 机器可读输出
+emit() {
+	local no status name detail
+	no="$1"; status="$2"; name="$3"; detail="$4"
+
+	printf '%s %s %s — %s\n' "$no" "$status" "$name" "$detail"
+
+	case "$status" in
+		PASS) PASS_CNT=$((PASS_CNT + 1)) ;;
+		FAIL) FAIL_CNT=$((FAIL_CNT + 1)) ;;
+		SKIP) SKIP_CNT=$((SKIP_CNT + 1)) ;;
+	esac
+}
+
+# ------------------------------------------------------------
+# DNS 查询结果分类：OK / EMPTY / NX / TIMEOUT / FAIL
+# 用法: dns_class <域名> <服务器[:端口]> [qtype]
+#
+# 判据（AGENTS §5.1）：
+#   OK      rcode=0 且 ancount>0
+#   EMPTY   rcode=0 且 ancount=0   ← filter_aaaa 的预期形态，不是故障
+#   NX      rcode=3
+#   TIMEOUT 完全无响应              ← 故障
+#   FAIL    rcode=2 等              ← 上游故障
+# ------------------------------------------------------------
+dns_class() {
+	local name server qtype out rc an
+
+	name="$1"
+	server="$2"
+	qtype="${3:-a}"
+
+	if [ "$qtype" = "a" ]; then
+		out=$(nslookup "$name" "$server" 2>&1)
+	else
+		out=$(nslookup "-type=${qtype}" "$name" "$server" 2>&1)
+	fi
+	rc=$?
+
+	# BusyBox nslookup 超时/失败时 rc 非 0 且输出含 "can't resolve" 或为空
+	if [ $rc -ne 0 ]; then
+		case "$out" in
+			*"can't resolve"*|*"timed out"*|*"TIMEOUT"*)
+				echo "TIMEOUT"; return 0 ;;
+			*"NXDOMAIN"*|*"does not exist"*)
+				echo "NX"; return 0 ;;
+			*)
+				# 输出里没有任何 Address 行
+				if echo "$out" | grep -q '^Address'; then
+					echo "OK"; return 0
+				fi
+				echo "TIMEOUT"; return 0 ;;
+		esac
+	fi
+
+	# 有 Address 行（排除服务器自身那行）
+	an=$(echo "$out" | grep -c 'Address' 2>/dev/null || echo 0)
+	# 第一行 Address 是 "Address: 127.0.0.1:53" 这种服务器地址
+	# 真正的答案行形如 "Address: 1.2.3.4"
+	an=$(echo "$out" | grep '^Address:' | grep -vc ':' 2>/dev/null || echo 0)
+
+	if [ "$an" -gt 0 ] 2>/dev/null; then
+		echo "OK"
+	else
+		echo "EMPTY"
+	fi
+}
+
+# 取第一个解析出的地址（用于判断是否污染）
+dns_first_addr() {
+	local name server qtype out
+	name="$1"; server="$2"; qtype="${3:-a}"
+
+	if [ "$qtype" = "a" ]; then
+		out=$(nslookup "$name" "$server" 2>&1)
+	else
+		out=$(nslookup "-type=${qtype}" "$name" "$server" 2>&1)
+	fi
+	echo "$out" | sed -n 's/^Address: \([0-9a-fA-F.:]*\)$/\1/p' | head -1
+}
+
+# 污染 IP 判定：GFW 注入的典型值
+is_polluted() {
+	case "$1" in
+		2001::1|2001:0:0:0:0:0:0:1) return 0 ;;
+		31.13.*|157.240.*|104.244.*) return 0 ;;
+		*) return 1 ;;
+	esac
+}
+
+# ------------------------------------------------------------
+# 客户机路径地址：取 LAN 地址，而不是 127.0.0.1
+# ------------------------------------------------------------
+lan_addr() {
+	local ip
+	ip=$(uci -q get network.lan.ipaddr)
+	[ -n "$ip" ] && { echo "$ip"; return 0; }
+	echo "127.0.0.1"
+}
+
+# ------------------------------------------------------------
+# 逐项检查
+# ------------------------------------------------------------
+check_all() {
+	local entry filter_port lan cn_up foreign_up owner pid
+	local cls addr tables chains fw4_ok
+	local dnsmasq_cache dp_args fl_args
+
+	entry=$(dc_get main entry_port 5353)
+	filter_port=$(dc_filter_port)
+	lan=$(lan_addr)
+
+	# 1. fw4 劫持在位
+	chains=$(nft list chain inet fw4 dns_intercept_lan 2>/dev/null)
+	if echo "$chains" | grep -q 'udp dport 53' && echo "$chains" | grep -q 'tcp dport 53'; then
+		emit 1 PASS "fw4 劫持在位" "dns_intercept_lan 含 udp/tcp dport 53"
+	else
+		emit 1 FAIL "fw4 劫持在位" "dns_intercept_lan 缺失或不完整"
+	fi
+
+	# 2. dnsmasq 分流目标唯一（端口集合 ⊆ 允许集）
+	#
+	# 允许集按档案不同：
+	#   primary：{entry, 5335} —— SSR 的旁路指向 :5335，即框架过滤器，
+	#            两条路径收敛到同一个解析器（ADR §9.1）
+	#   coexist：{entry, 5337, 5335} —— 框架过滤器在 :5337，而 SSR 的旁路
+	#            仍指向 :5335（那是 SSR 自己的后端，框架不重写它的文件）。
+	#            此时两条路径**不收敛**，这是 coexist 的已知代价（ADR §7.3）。
+	local ports_found bad_ports profile allow_extra
+	profile=$(dc_get main profile primary)
+	if [ "$profile" = "coexist" ]; then
+		allow_extra="5335"
+	else
+		allow_extra=""
+	fi
+
+	ports_found=$(grep -hoE 'server=/[^/]+/127\.0\.0\.1#[0-9]+' \
+		"$DNSCHAIN_SSR_CONF_DIR"/*.conf 2>/dev/null \
+		| sed 's/.*#//' | sort -u | tr '\n' ' ')
+	bad_ports=""
+	for p in $ports_found; do
+		case "$p" in
+			"$entry"|"$filter_port") ;;
+			"$allow_extra") [ -n "$allow_extra" ] || bad_ports="${bad_ports}${p} " ;;
+			*) bad_ports="${bad_ports}${p} " ;;
+		esac
+	done
+	if [ -z "$bad_ports" ]; then
+		emit 2 PASS "dnsmasq 分流目标唯一" "profile=${profile}，端口集合 {${ports_found}} 合规"
+	else
+		emit 2 FAIL "dnsmasq 分流目标唯一" "出现未预期端口: ${bad_ports}"
+	fi
+
+	# 3. dnsmasq 唯一默认上游恰好一条
+	local srv_cnt
+	srv_cnt=$(grep -c "^server=127.0.0.1#${entry}\$" /var/etc/dnsmasq.conf.* 2>/dev/null | head -1)
+	[ -z "$srv_cnt" ] && srv_cnt=0
+	if [ "$srv_cnt" = "1" ]; then
+		emit 3 PASS "dnsmasq 唯一默认上游" "server=127.0.0.1#${entry} 恰好 1 条"
+	else
+		emit 3 FAIL "dnsmasq 唯一默认上游" "server=127.0.0.1#${entry} 出现 ${srv_cnt} 条（应为 1）"
+	fi
+
+	# 4. dnsproxy 在监听（127.0.0.1 与 ::1）
+	if dc_port_listening "$entry" udp; then
+		local v4 v6
+		v4=$(dns_class "www.baidu.com" "127.0.0.1:${entry}")
+		v6=$(dns_class "www.baidu.com" "[::1]:${entry}")
+		if [ "$v4" = "OK" ] || [ "$v4" = "EMPTY" ]; then
+			emit 4 PASS "dnsproxy 在监听" "127.0.0.1:${entry} 应答 ${v4}"
+		else
+			emit 4 FAIL "dnsproxy 在监听" "127.0.0.1:${entry} 应答 ${v4}"
+		fi
+	else
+		emit 4 FAIL "dnsproxy 在监听" ":${entry} 无监听"
+	fi
+
+	# 5. dnsproxy 参数与配置一致，且不含 --cache
+	pid=$(dc_port_owner "$entry" udp)
+	if [ -n "$pid" ] && [ -r "/proc/${pid}/cmdline" ]; then
+		dp_args=$(tr '\0' '\n' < "/proc/${pid}/cmdline")
+		if echo "$dp_args" | grep -q '^--cache'; then
+			emit 5 FAIL "dnsproxy 参数一致" "出现 --cache，违反「缓存只在 dnsmasq 一层」"
+		elif echo "$dp_args" | grep -q '^--fallback'; then
+			emit 5 FAIL "dnsproxy 参数一致" "出现 --fallback，会回落明文/污染上游"
+		else
+			emit 5 PASS "dnsproxy 参数一致" "无 --cache、无 --fallback"
+		fi
+	else
+		emit 5 SKIP "dnsproxy 参数一致" "取不到 dnsproxy 的 pid"
+	fi
+
+	# 6. 过滤器在监听
+	owner=$(dc_port_owner "$filter_port" udp)
+	if [ -n "$owner" ] && dc_is_framework_filter "$owner"; then
+		emit 6 PASS "过滤器在监听" ":${filter_port} 由框架 chinadns-ng (pid=${owner}) 持有"
+	elif [ -n "$owner" ]; then
+		emit 6 FAIL "过滤器在监听" ":${filter_port} 被 PID ${owner} 占用，但不是框架的过滤器"
+	else
+		emit 6 FAIL "过滤器在监听" ":${filter_port} 无监听"
+	fi
+
+	# 7. 端口所有权无冲突（SSR 模式与档案匹配）
+	local ssr_mode profile
+	ssr_mode=$(uci -q get shadowsocksr.@global[0].pdnsd_enable 2>/dev/null)
+	profile=$(dc_get main profile primary)
+	if [ "$profile" = "primary" ]; then
+		if [ "$ssr_mode" = "0" ] || [ "$ssr_mode" = "7" ]; then
+			emit 7 PASS "端口所有权无冲突" "profile=primary, pdnsd_enable=${ssr_mode}"
+		else
+			emit 7 FAIL "端口所有权无冲突" "profile=primary 但 pdnsd_enable=${ssr_mode}（应为 0 或 7）"
+		fi
+	else
+		if [ "$filter_port" = "5337" ]; then
+			emit 7 PASS "端口所有权无冲突" "profile=coexist, 过滤器在 :5337"
+		else
+			emit 7 FAIL "端口所有权无冲突" "profile=coexist 但过滤器端口是 :${filter_port}"
+		fi
+	fi
+
+	# 8. 国内 A 正确（客户机路径）
+	addr=$(dns_first_addr "www.baidu.com" "$lan")
+	if [ -n "$addr" ] && ! is_polluted "$addr"; then
+		emit 8 PASS "国内 A 正确" "${lan} 查 www.baidu.com -> ${addr}"
+	else
+		emit 8 FAIL "国内 A 正确" "${lan} 查 www.baidu.com -> ${addr:-无结果}"
+	fi
+
+	# 9. 国内 AAAA 保留
+	cls=$(dns_class "www.taobao.com" "$lan" aaaa)
+	if [ "$cls" = "OK" ]; then
+		addr=$(dns_first_addr "www.taobao.com" "$lan" aaaa)
+		emit 9 PASS "国内 AAAA 保留" "www.taobao.com -> ${addr}"
+	else
+		emit 9 FAIL "国内 AAAA 保留" "www.taobao.com AAAA 结果 ${cls}（应为 OK）"
+	fi
+
+	# 10. 国外 A 正确（非污染）
+	addr=$(dns_first_addr "www.google.com" "$lan")
+	if [ -n "$addr" ] && ! is_polluted "$addr"; then
+		emit 10 PASS "国外 A 正确" "www.google.com -> ${addr}"
+	elif [ -z "$addr" ]; then
+		emit 10 FAIL "国外 A 正确" "www.google.com 无结果（过滤器或代理可能未运行）"
+	else
+		emit 10 FAIL "国外 A 正确" "www.google.com -> ${addr}（污染值）"
+	fi
+
+	# 11. 国外 AAAA 抑制 —— 预期 EMPTY，不是 TIMEOUT
+	cls=$(dns_class "www.google.com" "$lan" aaaa)
+	case "$cls" in
+		EMPTY) emit 11 PASS "国外 AAAA 抑制" "rcode=0 ancount=0（预期形态）" ;;
+		TIMEOUT) emit 11 FAIL "国外 AAAA 抑制" "TIMEOUT —— 会卡住客户端 5 秒，属故障" ;;
+		OK) emit 11 FAIL "国外 AAAA 抑制" "返回了真实 AAAA，国外 IPv6 会直连被 RST" ;;
+		*) emit 11 FAIL "国外 AAAA 抑制" "结果 ${cls}" ;;
+	esac
+
+	# 12. 国外 DoT 出站
+	local est
+	est=$(netstat -antp 2>/dev/null | grep -E '8\.8\.8\.8:853|1\.1\.1\.1:853' | grep -c ESTABLISHED 2>/dev/null || echo 0)
+	if [ "$est" -gt 0 ] 2>/dev/null; then
+		emit 12 PASS "国外 DoT 出站" "${est} 条到 8.8.8.8:853 / 1.1.1.1:853 的 ESTABLISHED"
+	else
+		emit 12 SKIP "国外 DoT 出站" "当前无活跃连接（空闲时正常，可忽略）"
+	fi
+
+	# 13. 代理与分流在位
+	tables=$(nft list tables 2>/dev/null | grep -c ss_spec)
+	local port1234 gs
+	port1234=$(dc_port_listening 1234 tcp && echo yes || echo no)
+	gs=$(uci -q get shadowsocksr.@global[0].global_server 2>/dev/null)
+	if [ "$tables" = "2" ] && [ "$port1234" = "yes" ] && [ "$gs" != "nil" ] && [ -n "$gs" ]; then
+		emit 13 PASS "代理与分流在位" "ss_spec 表 2 个、:1234 在监听、global_server=${gs}"
+	else
+		emit 13 FAIL "代理与分流在位" "ss_spec=${tables}、:1234=${port1234}、global_server=${gs:-空}"
+	fi
+
+	# 14. fw4 规则可加载
+	if fw4 check >/dev/null 2>&1; then
+		emit 14 PASS "fw4 规则可加载" "fw4 check 通过"
+	else
+		emit 14 FAIL "fw4 规则可加载" "fw4 check 失败"
+	fi
+
+	# 15. 无明文旁路（applechina.conf 的 173 条必须已改）
+	local plain
+	plain=$(grep -rnE 'server=/[^/]+/([0-9]{1,3}\.){3}[0-9]{1,3}' \
+		"$DNSCHAIN_DNSMASQ_CONF_DIR" 2>/dev/null \
+		| grep -v '#5353' | grep -v '#5335' | grep -v '#5337' | wc -l)
+	if [ "$plain" -eq 0 ] 2>/dev/null; then
+		emit 15 PASS "无明文旁路" "conf-dir 内无指向明文 IP 的 server="
+	else
+		emit 15 FAIL "无明文旁路" "${plain} 条明文旁路（applechina.conf 需改为 #5353）"
+	fi
+
+	# 16. 缓存层唯一
+	dnsmasq_cache=$(grep -oE '^cache-size=[0-9]+' /var/etc/dnsmasq.conf.* 2>/dev/null | head -1 | cut -d= -f2)
+	dp_args=$(dc_args_to_cmdline "$DNSCHAIN_RUN_DIR/dnsproxy.args" 2>/dev/null)
+	fl_args=$(dc_args_to_cmdline "$DNSCHAIN_RUN_DIR/filter.args" 2>/dev/null)
+
+	local cache_bad
+	cache_bad=""
+	case "$dp_args" in *--cache*) cache_bad="${cache_bad}dnsproxy "; esac
+	case "$fl_args" in *--cache*) cache_bad="${cache_bad}chinadns-ng "; esac
+
+	if [ -z "$cache_bad" ] && [ -n "$dnsmasq_cache" ] && [ "$dnsmasq_cache" -gt 0 ] 2>/dev/null; then
+		emit 16 PASS "缓存层唯一" "dnsmasq cache-size=${dnsmasq_cache}，其余两层无 --cache"
+	else
+		emit 16 FAIL "缓存层唯一" "越界缓存: ${cache_bad:-无}；dnsmasq cache-size=${dnsmasq_cache:-未设置}"
+	fi
+}
+
+# ------------------------------------------------------------
+# 入口
+# ------------------------------------------------------------
+main() {
+	local verbose
+	verbose=0
+	[ "$1" = "-v" ] && verbose=1
+
+	check_all
+
+	echo ""
+	printf 'SUMMARY PASS=%s FAIL=%s SKIP=%s\n' "$PASS_CNT" "$FAIL_CNT" "$SKIP_CNT"
+
+	if [ "$FAIL_CNT" -gt 0 ]; then
+		# 结论行（页面用它做「一句话状态」）
+		local concl
+		concl=""
+		[ "$(dns_class www.baidu.com "$(lan_addr)")" = "OK" ] || concl="${concl}国内解析异常 "
+		[ "$(dc_port_owner "$(dc_filter_port)" udp)" ] || concl="${concl}gfw 域名将 SERVFAIL（过滤器未监听） "
+		[ -n "$concl" ] && echo "CONCLUSION: ${concl}"
+		return 1
+	fi
+
+	echo "CONCLUSION: 链路正常"
+	return 0
+}
+
+main "$@"

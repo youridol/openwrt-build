@@ -1,0 +1,99 @@
+#!/bin/sh
+# ============================================================
+# 99-zz-dnschain — DNS 链路框架首刷默认值
+# ------------------------------------------------------------
+# 设计依据：docs/adr/0003-dns-chain-framework.md
+#
+# 命名约束：必须排在 99-gaming-optimize **之后**（'zz' > 'g'），
+# 因为本脚本要覆盖 99-gaming-optimize 写入的 pdnsd_enable=4。
+#
+# 幂等：只在键缺失或值不符时写入；不删任何用户已有配置。
+# ============================================================
+
+. /usr/share/dnschain/dnschain.sh
+
+log() {
+	logger -t dnschain-defaults "$*"
+	echo "dnschain-defaults: $*"
+}
+
+# ------------------------------------------------------------
+# 1. 框架自身配置兜底
+# ------------------------------------------------------------
+[ -f /etc/config/dnschain ] || {
+	log "ERROR: /etc/config/dnschain 缺失（overlay 未生效？）"
+	exit 1
+}
+
+# ------------------------------------------------------------
+# 2. SSR-Plus：把 DNS 后端交给框架
+#
+# 99-gaming-optimize 写入 pdnsd_enable=4（MosDNS），而本框架要求
+# SSR-Plus 不启任何 DNS 后端（模式 0），否则它会抢占 :5335。
+#
+# 顺序保证：uci-defaults 按文件名排序，'99-gaming-optimize' 先于
+# '99-zz-dnschain' 执行，故这里能覆盖前者的写入。
+# ------------------------------------------------------------
+if [ ! -s /etc/config/shadowsocksr ]; then
+	# 与 99-gaming-optimize 同源判断：空配置先用模板铺底
+	/etc/init.d/shadowsocksr reset 2>/dev/null
+	log "ssr-plus: 空配置 → 已用模板铺底"
+fi
+
+uci -q get shadowsocksr.@global[0] >/dev/null 2>&1 || uci add shadowsocksr global
+
+_cur_pdnsd=$(uci -q get shadowsocksr.@global[0].pdnsd_enable)
+if [ "$_cur_pdnsd" != "0" ]; then
+	uci set shadowsocksr.@global[0].pdnsd_enable='0' \
+		|| log "ERROR: 写入 pdnsd_enable=0 失败"
+	log "ssr-plus: pdnsd_enable ${_cur_pdnsd:-空} -> 0（:5335 交给 dnschain 过滤器）"
+fi
+
+# tunnel_forward_mosdns 不再使用（MosDNS 不在默认链路上）
+# 不删除该键（用户可能临时切回模式 4），只是不再写入。
+
+# ------------------------------------------------------------
+# 3. dnsproxy：唯一上游指向框架入口
+#
+# 注意：不在这里改 files/etc/config/dnsproxy 的 servers.upstream，
+# 那由 dnschain 生成的 dnsproxy.args 接管（init.d/dnsproxy 与
+# init.d/dnschain 二者只应有一个在跑，见 ADR §13.1）。
+# 这里只确保 LAN 拦截开关打开，避免「框架在跑但拦截没开」。
+# ------------------------------------------------------------
+uci -q get dnsproxy.global >/dev/null 2>&1 || {
+	uci set dnsproxy.global=global 2>/dev/null
+}
+uci set dnsproxy.global.enabled='1' 2>/dev/null
+uci set dnsproxy.global.lan_dns_intercept='1' 2>/dev/null
+
+uci commit dnsproxy 2>/dev/null
+
+# ------------------------------------------------------------
+# 4. dnsmasq：唯一默认上游 + 并发槽
+# ------------------------------------------------------------
+uci -q delete dhcp.@dnsmasq[0].server 2>/dev/null
+uci add_list dhcp.@dnsmasq[0].server='127.0.0.1#5353' 2>/dev/null
+uci set dhcp.@dnsmasq[0].noresolv='1' 2>/dev/null
+uci set dhcp.@dnsmasq[0].dnsforwardmax='1024' 2>/dev/null
+uci set dhcp.@dnsmasq[0].cachesize='8192' 2>/dev/null
+uci commit dhcp 2>/dev/null
+
+log "dnsmasq: server=127.0.0.1#5353, noresolv=1, dnsforwardmax=1024, cachesize=8192"
+
+# ------------------------------------------------------------
+# 5. 首次生成运行时配置（不启动服务，由 init 负责）
+# ------------------------------------------------------------
+mkdir -p /var/etc/dnschain /var/run/dnschain 2>/dev/null
+
+if [ -r /etc/ssrplus/gfw_list.conf ]; then
+	dc_gen_upstream_file >/dev/null 2>&1 \
+		&& log "已生成 upstreams-domains.txt" \
+		|| log "WARN: 生成 upstreams-domains.txt 失败（gfw 名单可能未就绪）"
+else
+	log "WARN: /etc/ssrplus/gfw_list.conf 不存在，跳过首刷生成（SSR-Plus 首次启动时会创建）"
+fi
+
+uci commit shadowsocksr 2>/dev/null
+
+log "首刷默认值完成"
+exit 0

@@ -1,0 +1,251 @@
+#!/bin/sh
+# ============================================================
+# dnschain-reconcile — 收敛器
+# ------------------------------------------------------------
+# 设计依据：docs/adr/0003-dns-chain-framework.md §9
+#
+# 两个职责：
+#   1. 重放不变量集：把 SSR-Plus / dnsmasq / dnsproxy 的若干键归一，
+#      使「用户改了 LuCI 页面」不会把链路改坏。
+#   2. 名单单向导入：SSR-Plus 的 gfw 名单变化时重新生成框架的域名文件。
+#
+# 硬约束：
+#   - 只写白名单键，其余一律不动
+#   - 不改 global_server 的节点选择（为 nil 时只告警）
+#   - 不改 run_mode / dports / lan_ac_mode
+#   - 不删、不重写 SSR-Plus 生成的任何文件
+#   - 不重启 SSR-Plus
+#   - POSIX sh（dash）兼容
+# ============================================================
+
+. /usr/share/dnschain/dnschain.sh
+
+# ------------------------------------------------------------
+# 单个 UCI 键的「期望值 → 实际值」归一
+# 用法: reconcile_key <uci path> <期望值> <说明>
+# ------------------------------------------------------------
+reconcile_key() {
+	local path expect desc cur
+
+	path="$1"
+	expect="$2"
+	desc="$3"
+
+	cur=$(uci -q get "$path" 2>/dev/null)
+
+	if [ "$cur" = "$expect" ]; then
+		return 0
+	fi
+
+	uci -q set "${path}=${expect}" || {
+		dnschain_log "ERROR: 写入 ${path}=${expect} 失败（原值 '${cur}'）"
+		return 1
+	}
+	dnschain_log "归一: ${path} '${cur}' -> '${expect}'  （${desc}）"
+	return 0
+}
+
+# ------------------------------------------------------------
+# 重放不变量集（ADR §9.2）
+# ------------------------------------------------------------
+reconcile_invariants() {
+	local enforce profile ssr_mode rc entry servers cnt ports
+	rc=0
+
+	enforce=$(dc_get ssr enforce 1)
+	profile=$(dc_get main profile primary)
+
+	# ---- SSR-Plus ----
+	if [ "$enforce" = "1" ]; then
+		ssr_mode=$(dc_ssr_mode_for_profile)
+
+		# pdnsd_enable：primary 档案下必须是 0（SSR 不启 DNS 后端，:5335 归框架）
+		# coexist 档案下不强制（用户自己选了 1/4/5/6）
+		if [ -n "$ssr_mode" ]; then
+			reconcile_key "shadowsocksr.@global[0].pdnsd_enable" "$ssr_mode" \
+				"SSR 不提供 DNS，:5335 归框架过滤器" || rc=1
+		fi
+
+		# enable_switch 必须为 0：否则 ssr-switch 周期性 restart 造成 DNS 空窗
+		reconcile_key "shadowsocksr.@global[0].enable_switch" "0" \
+			"避免 ssr-switch 周期性 restart" || rc=1
+
+		# filter_aaaa 防御性保留为 1：primary 下 MosDNS 不在链路上、无实际影响，
+		# 但用户临时切回模式 4 时不至于立刻出现「有 IPv6 但打不开站点」（ADR §9.4）
+		reconcile_key "shadowsocksr.@global[0].filter_aaaa" "1" \
+			"防御性保留，见 ADR §9.4" || rc=1
+
+		# router_proxy 必须为 1：否则路由器自身的 DoT 不进代理 → 国外域名全超时
+		reconcile_key "access_control.@global[0].router_proxy" "1" \
+			"路由器自身出向走代理" || rc=1
+	fi
+
+	# ---- global_server：只告警，绝不擅自改节点 ----
+	if [ "$(uci -q get shadowsocksr.@global[0].global_server 2>/dev/null)" = "nil" ]; then
+		dnschain_log "WARN: global_server 为 nil —— SSR-Plus 不会装任何规则，客户机 DNS 会全部超时"
+		dnschain_log "WARN: 请在 SSR-Plus 页面重新选择一个节点（框架不代为选择）"
+	fi
+
+	# ---- dnsmasq ----
+	reconcile_key "dhcp.@dnsmasq[0].noresolv" "1" \
+		"不走运营商 DNS" || rc=1
+	reconcile_key "dhcp.@dnsmasq[0].dnsforwardmax" "1024" \
+		"抬高并发转发槽" || rc=1
+
+	# 唯一默认上游必须恰好一条 127.0.0.1#5353
+	entry=$(dc_get main entry_port 5353)
+	servers=$(uci -q get dhcp.@dnsmasq[0].server 2>/dev/null | tr ' ' '\n' | grep -v '^$')
+	cnt=$(echo "$servers" | grep -c . 2>/dev/null || echo 0)
+
+	if [ "$cnt" != "1" ] || [ "$servers" != "127.0.0.1#${entry}" ]; then
+		# 只在框架启用时重建
+		if [ "$(dc_get main enabled 1)" = "1" ]; then
+			uci -q delete dhcp.@dnsmasq[0].server
+			uci -q add_list "dhcp.@dnsmasq[0].server=127.0.0.1#${entry}" || rc=1
+			dnschain_log "归一: dhcp.@dnsmasq[0].server -> 127.0.0.1#${entry}（唯一上游）"
+		fi
+	fi
+
+	# ---- dnsproxy：LAN 拦截开关由框架接管 ----
+	reconcile_key "dnsproxy.global.lan_dns_intercept" "1" \
+		"LAN DNS 强制拦截" || rc=1
+
+	# ---- 缓存层唯一：dnsproxy 不能带 --cache ----
+	if grep -q '^--cache' "$DNSCHAIN_RUN_DIR/dnsproxy.args" 2>/dev/null; then
+		dnschain_log "ERROR: dnsproxy.args 里出现 --cache，违反「缓存只在 dnsmasq 一层」（ADR §10.5）"
+		rc=1
+	fi
+
+	# ---- 端口表只校验，不改 ----
+	ports=$(dc_output_ports)
+	if [ -n "$ports" ]; then
+		case " $ports " in
+			*" 53 "*)  dnschain_log "ERROR: ss_spec_output 端口集含 53 —— 会触发 v2ray socket 堆积（AGENTS §4.3）"; rc=1 ;;
+		esac
+		case " $ports " in
+			*" 853 "*) ;;
+			*) dnschain_log "ERROR: ss_spec_output 端口集不含 853 —— 路由器自身 DoT 不会进代理，国外域名会超时"; rc=1 ;;
+		esac
+	fi
+
+	uci -q commit shadowsocksr
+	uci -q commit dhcp
+	uci -q commit dnsproxy
+
+	return $rc
+}
+
+# ------------------------------------------------------------
+# 名单单向导入（ADR §9.3）
+#
+# 触发条件：源文件 md5 变化，且 auto_import=1
+# 重导只重建文件、不重启 dnsproxy，除非行数变化超过 restart_threshold
+# ------------------------------------------------------------
+reconcile_lists() {
+	local cur fp_old fp_new old_lines new_lines threshold delta pct
+
+	[ "$(dc_get lists auto_import 1)" = "1" ] || return 0
+
+	fp_new=$(dc_lists_fingerprint)
+	[ -n "$fp_new" ] || return 0
+
+	fp_old=$(cat "$DNSCHAIN_STATE_DIR/lists.fingerprint" 2>/dev/null)
+
+	# 指纹未变：什么都不做
+	[ "$fp_new" = "$fp_old" ] && return 0
+
+	dnschain_log "名单源已变化，重新导入..."
+
+	old_lines=$(echo "$fp_old" | awk '{print $2}')
+	new_lines=$(echo "$fp_new" | awk '{print $2}')
+
+	# 重建域名文件
+	dc_gen_upstream_file >/dev/null || {
+		dnschain_log "ERROR: 重新导入失败"
+		return 1
+	}
+
+	# 行数变化是否超过阈值
+	threshold=$(dc_get lists restart_threshold 1)
+	delta=0
+	pct=0
+	if [ -n "$old_lines" ] && [ "$old_lines" -gt 0 ] 2>/dev/null; then
+		delta=$(( new_lines - old_lines ))
+		[ "$delta" -lt 0 ] && delta=$(( -delta ))
+		pct=$(( delta * 100 / old_lines ))
+	fi
+
+	if [ "$pct" -ge "$threshold" ] 2>/dev/null; then
+		dnschain_log "名单行数变化 ${pct}% >= ${threshold}%，重启 dnsproxy 使新文件生效"
+		# 重启 dnsproxy 实例（约 1 秒解析中断，ADR R-1）
+		/etc/init.d/dnschain reload >/dev/null 2>&1 || \
+			dnschain_log "WARN: reload dnschain 失败，新名单未生效"
+	else
+		dnschain_log "名单行数变化 ${pct}% < ${threshold}%，只重建文件（dnsproxy 下次重启时生效）"
+	fi
+
+	echo "$fp_new" > "$DNSCHAIN_STATE_DIR/lists.fingerprint"
+	return 0
+}
+
+# ------------------------------------------------------------
+# 拦截总开关：按 intercept 的值决定是否下发 DHCP DNS
+# 注意：改动 dhcp-option 需要 dnsmasq restart 才生效（reload 不重读配置）
+# ------------------------------------------------------------
+reconcile_intercept() {
+	local intercept dns_list changed
+
+	intercept=$(dc_get main intercept 1)
+
+	if [ "$intercept" = "1" ]; then
+		# 拦截开启：DHCP 下发路由器自身地址（由 dnsmasq 默认行为提供），
+		# 故清掉自定义 dhcp-option 6
+		if uci -q get dhcp.@dnsmasq[0].dhcp_option 2>/dev/null | grep -q '^6,'; then
+			uci -q delete dhcp.@dnsmasq[0].dhcp_option
+			changed=1
+		fi
+	else
+		# 拦截关闭：按页面配置下发明文 DNS
+		if [ "$(dc_get dhcp_dns enabled 1)" = "1" ]; then
+			dns_list=$(dc_get_list dhcp_dns server | tr '\n' ',' | sed 's/,$//')
+			if [ -n "$dns_list" ]; then
+				uci -q delete dhcp.@dnsmasq[0].dhcp_option
+				uci -q add_list "dhcp.@dnsmasq[0].dhcp_option=6,${dns_list}"
+				changed=1
+			fi
+		fi
+	fi
+
+	if [ "$changed" = "1" ]; then
+		uci -q commit dhcp
+		dnschain_log "拦截开关变化，重启 dnsmasq 使 DHCP 下发值生效（约 3 秒中断）"
+		/etc/init.d/dnsmasq restart >/dev/null 2>&1
+	fi
+	return 0
+}
+
+# ------------------------------------------------------------
+# 入口
+# ------------------------------------------------------------
+main() {
+	local rc
+
+	mkdir -p "$DNSCHAIN_STATE_DIR" 2>/dev/null
+
+	reconcile_invariants
+	rc=$?
+
+	reconcile_lists
+	[ $? -ne 0 ] && rc=1
+
+	reconcile_intercept
+
+	if [ "$rc" -ne 0 ]; then
+		dnschain_log "收敛完成，但有错误（见上方日志）"
+		return 1
+	fi
+
+	return 0
+}
+
+main "$@"

@@ -1,0 +1,92 @@
+# ============================================================
+# dnschain — DNS 链路框架配置
+# ------------------------------------------------------------
+# 本文件由 openwrt-build 仓库 files/ overlay 提供。
+# 设计依据：docs/adr/0003-dns-chain-framework.md
+#
+# 链路：
+#   LAN 客户机 → fw4 拦截 53 → dnsmasq:53（唯一缓存层 + DHCP）
+#     ├─ 默认 → dnsproxy:5353（唯一路由入口）
+#     │    ├─ 国内 → 国内加密池（tls://223.5.5.5 等，直连）
+#     │    └─ gfw  → chinadns-ng:5335（框架自持策略过滤器）
+#     │              ├─ AAAA/HTTPS 抑制（-N tag:gfw --filter-qtype 64,65）
+#     │              └─ 国外 DoT（tls://8.8.8.8 等，经 :1234 代理）
+#     └─ 旁路 → SSR-Plus 生成的 server=/域名/#5335（同策略，不删不重写）
+#
+# 硬约束：
+#   - :5335 归本框架的 chinadns-ng 所有；SSR-Plus 必须处于模式 0 或 7
+#   - 缓存只在 dnsmasq 一层；dnsproxy 与 chinadns-ng 均不缓存
+#   - 国内 AAAA 保留、国外 AAAA 抑制（ADR-0001 拒绝集语义）
+#   - 任何一处故障都不回落明文上游（ADR §12 降级矩阵）
+# ============================================================
+
+config dnschain 'main'
+	# 总开关：关闭时整条框架不启（chinadns-ng 不监听 :5335）
+	option enabled '1'
+	# 拦截总开关（滑块）：开启时强制拦截静态 + DHCP 客户机的 53
+	option intercept '1'
+	# 端口档案：primary = 过滤器 :5335（SSR 模式 0/7）
+	#           coexist = 过滤器 :5337（SSR 模式 1/4/5/6）
+	option profile 'primary'
+	option entry_port '5353'
+	option filter_port '5335'
+	# 拒绝 LAN 出向 853（让自带 DoT 的客户端快速失败并回落明文）
+	option intercept_dot '1'
+	# 尽力而为地阻断已知公共 DoH（443 无法可靠区分，仅标注）
+	option intercept_doh '0'
+
+config upstream 'cn'
+	# 国内加密池：DoT 与 DoH 混用，dnsproxy 并行查询取最快
+	list server 'tls://223.5.5.5'
+	list server 'tls://223.6.6.6'
+	list server 'https://dns.alidns.com/dns-query'
+
+config upstream 'foreign'
+	# 国外加密池：必须是 IP 形式（dnsproxy 不支持 socks5，只能靠 IP 层送进 :1234；
+	# 域名形式会因 SNI 与 REDIRECT 后的目标 IP 不一致而握手失败）
+	list server 'tls://8.8.8.8'
+	list server 'tls://1.1.1.1'
+	option via_proxy '1'
+	# 证书校验：chinadns-ng 默认关闭，这里显式开启
+	option cert_verify '1'
+
+config aaaa 'policy'
+	# 以下两个字段是**只读**的：它们表达不可配置的物理约束（节点只有 IPv4），
+	# 写成可选项只会制造「配成 keep 然后国外被 RST」的故障。
+	# 页面把它们显示为只读并附原因。
+	option domestic 'keep'
+	option foreign 'suppress'
+	# 同时抑制 qtype 65（HTTPS/SVCB 携带 ipv6hint）
+	option filter_https_rr '1'
+
+config lists 'lists'
+	# 单向只读源：SSR-Plus 自带的 GFW 列表与基础列表
+	option gfw_source '/etc/ssrplus/gfw_list.conf'
+	option base_source '/etc/ssrplus/gfw_base.conf'
+	option black_source '/etc/ssrplus/black.list'
+	# 自动导入：收敛器轮询源文件 md5，变化即重导（页面有开关）
+	option auto_import '1'
+	option import_interval '60'
+	# 行数变化超过该百分比才重启 dnsproxy（避免小改动引起解析中断）
+	option restart_threshold '1'
+
+config dhcp_dns 'dhcp_dns'
+	# 仅在 intercept=0 时下发给 DHCP 客户机的明文 DNS（最多 4 个）
+	option enabled '1'
+	list server '223.5.5.5'
+	list server '119.29.29.29'
+
+config cache 'cache'
+	# 唯一缓存层：dnsmasq 的条目数
+	option enabled '1'
+	option size '8192'
+
+config selftest 'selftest'
+	option auto_rollback '1'
+	option interval '300'
+
+config ssr 'compat'
+	# 期望的 SSR-Plus DNS 后端模式：0 = 不启后端（:5335 归框架）
+	option mode '0'
+	# 收敛器强制写回（关闭时只告警，不修改 SSR 的键）
+	option enforce '1'

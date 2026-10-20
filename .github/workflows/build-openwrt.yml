@@ -477,8 +477,14 @@ jobs:
           chmod +x files/etc/uci-defaults/*
           if [ -d files/etc/hotplug.d/iface ]; then chmod +x files/etc/hotplug.d/iface/*; fi
           if [ -d files/etc/hotplug.d/dhcp ]; then chmod +x files/etc/hotplug.d/dhcp/*; fi
+          # dnschain（DNS 链路框架，见 docs/adr/0003-dns-chain-framework.md）
+          # 注意: 不使用 || true —— 缺失必须让 CI 明确失败（红线 3）。
+          if [ -f files/etc/init.d/dnschain ]; then chmod +x files/etc/init.d/dnschain; fi
+          if [ -f files/usr/bin/dnschain-reconcile ]; then chmod +x files/usr/bin/dnschain-reconcile; fi
+          if [ -f files/usr/bin/dnschain-selftest ]; then chmod +x files/usr/bin/dnschain-selftest; fi
+          if [ -f files/usr/share/dnschain/dnschain.sh ]; then chmod +x files/usr/share/dnschain/dnschain.sh; fi
           echo "files overlay 执行位设置完成:"
-          ls -l files/etc/init.d/dnsproxy files/etc/uci-defaults/ files/etc/hotplug.d/iface/ files/etc/rc.local 2>/dev/null
+          ls -l files/etc/init.d/ files/etc/uci-defaults/ files/etc/hotplug.d/iface/ files/etc/rc.local 2>/dev/null
 
       - name: Verify mosdns template contract (upstreams at line 14, reject before forward)
         working-directory: lede
@@ -518,6 +524,261 @@ jobs:
           grep -q 'DNS_PORT' "$T" || { echo "FAIL 模板缺少 DNS_PORT 占位符"; exit 1; }
           echo "OK   DNS_MODE / DNS_PORT 占位符存在"
           echo "mosdns 模板契约校验通过。"
+
+      - name: Verify dnschain framework contracts
+        working-directory: lede
+        run: |
+          # ── dnschain（DNS 链路框架）契约校验 ────────────────────────────
+          # 依据 docs/adr/0003-dns-chain-framework.md。
+          # 这些约束**无法被 shell 语法检查发现**，且违反后症状隐蔽
+          # （链路看似正常、实际拿到污染答案或缓存层矛盾），故在此显式断言。
+          rc=0
+
+          LIB=files/usr/share/dnschain/dnschain.sh
+          INIT=files/etc/init.d/dnschain
+          CONF=files/etc/config/dnschain
+
+          for f in "$LIB" "$INIT" "$CONF" \
+                   files/usr/bin/dnschain-reconcile \
+                   files/usr/bin/dnschain-selftest \
+                   files/etc/uci-defaults/99-zz-dnschain; do
+            if [ -f "$f" ]; then
+              echo "OK   存在 $f"
+            else
+              echo "FAIL 缺少 $f"
+              rc=1
+            fi
+          done
+
+          # ── 1. POSIX sh（dash）兼容 ─────────────────────────────────
+          # CI 用 sh 调用，runner 的 /bin/sh 是 dash。
+          # bash 专有语法（进程替换、[[ ]]、数组）在 dash 里是**解析期**错误，
+          # 脚本一行未执行即 exit 2（本仓库曾因此连续失败三天，AGENTS §6 第 11 条）。
+          for f in "$LIB" "$INIT" files/usr/bin/dnschain-reconcile \
+                   files/usr/bin/dnschain-selftest files/etc/uci-defaults/99-zz-dnschain; do
+            [ -f "$f" ] || continue
+            if sh -n "$f" 2>/tmp/dnschain-shn.err; then
+              echo "OK   dash 语法通过: $f"
+            else
+              echo "FAIL dash 语法错误: $f"
+              cat /tmp/dnschain-shn.err
+              rc=1
+            fi
+          done
+
+          # ── 2. 禁止 bash 专有语法 ──────────────────────────────────
+          # 先剥掉注释行再判断，否则「解释错误写法的注释」会让断言永久误报
+          # （v0.4.7 的 nft 守卫踩过这个坑）。
+          #
+          # 注意: 只查真正不兼容的三种形态，不要误伤 $(( )) 算术展开 ——
+          #   $(( )) 是 POSIX，(( )) 作为**命令**才是 bash 专有。
+          #   早先的断言用了 `\(\([^)]*\)\)[[:space:]]*$`，把 `pct=$(( ... ))`
+          #   也判成 bash 语法，属误报，已改为「行首就是 ((」才算。
+          for f in "$LIB" "$INIT" files/usr/bin/dnschain-reconcile \
+                   files/usr/bin/dnschain-selftest files/etc/uci-defaults/99-zz-dnschain; do
+            [ -f "$f" ] || continue
+            body="$(grep -v '^[[:space:]]*#' "$f")"
+
+            # (a) 进程替换 <( ) 或 >( )
+            if printf '%s\n' "$body" | grep -qE '<\(|>\('; then
+              echo "FAIL $f 含进程替换 <(...) / >(...)（dash 解析期错误）"
+              printf '%s\n' "$body" | grep -nE '<\(|>\(' | head -5
+              rc=1
+            fi
+
+            # (b) [[ ]] 条件表达式
+            if printf '%s\n' "$body" | grep -qE '\[\['; then
+              echo "FAIL $f 含 [[ ]]（dash 不支持）"
+              printf '%s\n' "$body" | grep -n '\[\[' | head -5
+              rc=1
+            fi
+
+            # (c) bash 数组赋值 name=( ... )
+            if printf '%s\n' "$body" | grep -qE '^[[:space:]]*[A-Za-z_][A-Za-z0-9_]*=\('; then
+              echo "FAIL $f 含 bash 数组赋值"
+              rc=1
+            fi
+
+            # (d) (( )) 作为**命令**（行首或分号/&&/|| 之后紧跟 ((，
+            #     且不是 $(( 的算术展开）
+            if printf '%s\n' "$body" | grep -qE '(^|[;&|][[:space:]]*)\(\([^$]'; then
+              echo "FAIL $f 含 bash 的 (( )) 命令"
+              printf '%s\n' "$body" | grep -nE '(^|[;&|][[:space:]]*)\(\([^$]' | head -5
+              rc=1
+            fi
+          done
+          echo "OK   无 bash 专有语法"
+
+          # ── 3. 缓存层唯一（ADR §10.5）─────────────────────────────
+          # dnsproxy 与 chinadns-ng 都不得带 --cache；
+          # 缓存只允许在 dnsmasq 一层，否则同一域名会有两份答案。
+          if grep -v '^[[:space:]]*#' "$LIB" | grep -qE '^\s*echo\s+"--cache'; then
+            echo "FAIL 库脚本里生成 --cache（违反「缓存只在 dnsmasq 一层」）"
+            rc=1
+          fi
+          if grep -v '^[[:space:]]*#' "$LIB" | grep -q 'echo "\\-\\-fallback"'; then
+            echo "FAIL 库脚本里生成 --fallback（会回落污染上游，ADR §10.2）"
+            rc=1
+          fi
+          if grep -v '^[[:space:]]*#' "$LIB" | grep -q -- '--ipv6-disabled'; then
+            echo "FAIL 出现 --ipv6-disabled（全局关 AAAA 会连国内一起砍，ADR §5.4）"
+            rc=1
+          fi
+          echo "OK   无 --cache / --fallback / --ipv6-disabled"
+
+          # ── 4. chinadns-ng 必须用 -N tag:gfw（不能是裸 -N）────────
+          if grep -v '^[[:space:]]*#' "$LIB" | grep -q 'echo "tag:gfw"'; then
+            echo "OK   -N 带 tag:gfw（不是裸 -N）"
+          else
+            echo "FAIL 缺少 -N tag:gfw（裸 -N 会连带抑制未来引入的其他组）"
+            rc=1
+          fi
+
+          # ── 5. 不得写入明文 114.114.114.114 ────────────────────────
+          # chinadns-ng 的 -c 默认值就是明文 114，必须显式避开（ADR §10.3）
+          if grep -v '^[[:space:]]*#' "$LIB" | grep -q '114\.114\.114\.114'; then
+            echo "FAIL 出现明文 114.114.114.114"
+            rc=1
+          else
+            echo "OK   无明文 114.114.114.114"
+          fi
+
+          # ── 6. IDNA 过滤必须存在（否则 dnsproxy 整体起不来）────────
+          # 实测: 124 个 xn-- 域名会让 dnsproxy 报
+          #   idna: invalid label "wcvs22d1m"  并**整体拒绝启动**
+          if grep -v '^[[:space:]]*#' "$LIB" | grep -q "grep -vE 'xn--'"; then
+            echo "OK   生成上游文件时过滤 xn--"
+          else
+            echo "FAIL 未过滤 xn--（dnsproxy 会整体拒绝启动）"
+            rc=1
+          fi
+
+          # ── 7. nft 片段只能写裸 chain（AGENTS 红线 7）──────────────
+          if grep -v '^[[:space:]]*#' "$INIT" | grep -qE '^\s*table\s'; then
+            echo "FAIL init 脚本生成的 nft 片段含 table 声明（会形成嵌套 table → 断网）"
+            rc=1
+          else
+            echo "OK   nft 片段无 table 声明"
+          fi
+
+          # ── 8. uci-defaults 排序（必须晚于 99-gaming-optimize）────
+          # 本框架要覆盖 99-gaming-optimize 写入的 pdnsd_enable=4。
+          # uci-defaults 按文件名（C 排序）执行，要求 '99-zz-dnschain'
+          # 排在 '99-gaming-optimize' 之后 —— 用 sort 的实际结果判定，
+          # 而不是依赖 shell 的字符串比较（后者语义易混淆）。
+          order="$(printf '%s\n%s\n' '99-gaming-optimize' '99-zz-dnschain' | LC_ALL=C sort | head -1)"
+          if [ "$order" = "99-gaming-optimize" ]; then
+            echo "OK   uci-defaults 排序: 99-zz-dnschain 晚于 99-gaming-optimize"
+          else
+            echo "FAIL 99-zz-dnschain 排序错误（sort 首项为 $order），无法覆盖 pdnsd_enable=4"
+            rc=1
+          fi
+
+          # ── 9. 配置文件必须含关键默认值 ────────────────────────────
+          for kv in "profile 'primary'" "entry_port '5353'" \
+                    "foreign 'suppress'" "domestic 'keep'"; do
+            if grep -q "$kv" "$CONF"; then
+              echo "OK   配置含 $kv"
+            else
+              echo "FAIL 配置缺少 $kv"
+              rc=1
+            fi
+          done
+
+          # ── 10. P3：dnsproxy 的 cache 与 fallback 必须关闭/删除 ──────
+          # ADR-0003 §10.5：缓存只在 dnsmasq 一层。
+          # files/etc/config/dnsproxy 在框架关闭时仍会被 init.d/dnsproxy 使用，
+          # 故它也必须遵守同一条约束，否则「关掉框架」会切到一套不同的策略。
+          DP=files/etc/config/dnsproxy
+          if [ -f "$DP" ]; then
+            # cache.enabled 必须为 0
+            if awk '/^config dnsproxy .cache./{f=1} f&&/option enabled/{print; exit}' "$DP" | grep -q "'0'"; then
+              echo "OK   dnsproxy cache.enabled=0"
+            else
+              echo "FAIL dnsproxy cache.enabled 不是 0（违反「缓存只在 dnsmasq 一层」）"
+              rc=1
+            fi
+            # 不得有 fallback（注释行除外）
+            if grep -v '^[[:space:]]*#' "$DP" | grep -qE "^[[:space:]]*list fallback"; then
+              echo "FAIL dnsproxy 仍有 list fallback（会回落污染上游，ADR §10.2）"
+              rc=1
+            else
+              echo "OK   dnsproxy 无 fallback"
+            fi
+            # ipv6_disabled 必须为 0
+            if grep -qE "option ipv6_disabled '0'" "$DP"; then
+              echo "OK   dnsproxy ipv6_disabled=0"
+            else
+              echo "FAIL dnsproxy ipv6_disabled 不是 0（全局关 AAAA 会连国内一起砍）"
+              rc=1
+            fi
+          else
+            echo "FAIL 缺少 $DP"
+            rc=1
+          fi
+
+          # ── 11. P4：applechina.conf overlay 必须无明文 DNS ──────────
+          # ADR-0003 §10.9 选项 A：173 条明文 114.114.114.114 改为 127.0.0.1#5353
+          AP=files/etc/ssrplus/applechina.conf
+          if [ -f "$AP" ]; then
+            ap_data=$(grep -c '^server=' "$AP" 2>/dev/null || echo 0)
+            ap_plain=$(grep '^server=' "$AP" 2>/dev/null | grep -c '114\.114\.114\.114' || true)
+            ap_enc=$(grep '^server=' "$AP" 2>/dev/null | grep -c '127\.0\.0\.1#5353' || true)
+            if [ "$ap_data" -ne 173 ]; then
+              echo "FAIL applechina.conf 数据行数 $ap_data（应为 173，与上游一致）"
+              rc=1
+            fi
+            if [ "$ap_plain" -ne 0 ]; then
+              echo "FAIL applechina.conf 仍有 $ap_plain 条明文 114.114.114.114"
+              rc=1
+            fi
+            if [ "$ap_enc" -ne 173 ]; then
+              echo "FAIL applechina.conf 只有 $ap_enc 条指向 127.0.0.1#5353（应为 173）"
+              rc=1
+            fi
+            [ "$ap_data" -eq 173 ] && [ "$ap_plain" -eq 0 ] && [ "$ap_enc" -eq 173 ] \
+              && echo "OK   applechina.conf: 173 条全部指向加密入口"
+          else
+            echo "FAIL 缺少 $AP（Apple 域名会走明文 114）"
+            rc=1
+          fi
+
+          # ── 12. P4：853 拒绝片段必须是裸 chain 且优先级 -151 ────────
+          # 已在路由器实测：裸 chain 经 fw4 include 后 nft 显示 priority mangle - 1
+          INIT_DOT=$(grep -c 'priority -151' "$INIT" 2>/dev/null || echo 0)
+          if [ "$INIT_DOT" -ge 1 ]; then
+            echo "OK   init 脚本生成 priority -151 的 853 拒绝链"
+          else
+            echo "FAIL init 脚本缺少 priority -151（853 拒绝会被 tproxy 抢先）"
+            rc=1
+          fi
+
+          # ── 13. init.d/dnsproxy 必须有框架让位逻辑 ─────────────────
+          # 否则两个 procd 实例都绑 :5353，后起的静默失败
+          if grep -q 'dnschain_takes_over' files/etc/init.d/dnsproxy 2>/dev/null; then
+            echo "OK   init.d/dnsproxy 有 dnschain 让位逻辑"
+          else
+            echo "FAIL init.d/dnsproxy 缺让位逻辑（会与 dnschain 抢 :5353）"
+            rc=1
+          fi
+
+          # ── 14. 验证 ADR 文档存在 ──────────────────────────────────
+          for doc in docs/adr/0003-dns-chain-framework.md docs/adr/0004-dns-chain-verification.md; do
+            if [ -f "$doc" ]; then
+              echo "OK   文档存在 $doc"
+            else
+              echo "FAIL 缺少 $doc"
+              rc=1
+            fi
+          done
+
+          if [ "$rc" -ne 0 ]; then
+            echo ""
+            echo "!!! dnschain 契约校验失败，构建中止（禁止静默失败，AGENTS 红线 3）"
+            exit 1
+          fi
+          echo ""
+          echo "dnschain 框架契约校验通过。"
 
       - name: Verify no nested-table nft fragments (fw4 include contract)
         working-directory: lede

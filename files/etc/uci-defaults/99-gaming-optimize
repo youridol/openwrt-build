@@ -594,6 +594,137 @@ else
 	log "init.d/shadowsocksr: v0.8.4 补丁已存在或文件缺失，跳过"
 fi
 
+# ─────────────────────────────────────────────
+# 4.10 SSR-Plus: 修复并发 restart 导致「无法安装透明代理规则」（v0.8.6）
+# ─────────────────────────────────────────────
+# 症状：SSR-Plus 运行一段时间后偶发启动中止，日志只有一行
+#   `ERROR: 无法安装透明代理规则，启动中止。`
+# 且 `ssr-rules` 自己一条失败日志都没有（既无 `NFTables setup failed!`
+# 也无 `NFT forced rebuild failed!`）—— 说明它是**被杀死的**，不是跑失败的。
+#
+# 复现（本机 2026-10-20 实测，5/5 稳定复现）：
+#   并发两个 `/etc/init.d/shadowsocksr restart`，必定出现该 ERROR；
+#   串行连跑 5 次，增量恒为 0。
+#
+# 根因有两个，叠加生效：
+#
+#   根因 1 —— 互斥锁形同虚设。
+#     `set_lock()` 是 `flock -xn 1000`（`-n` 非阻塞）且**忽略返回值**，
+#     拿不到锁也照样往下走；`unset_lock()` 又 `rm -rf "$LOCK_FILE"`
+#     把**被锁的那个 inode 删掉**，下一个进程重新创建同名文件、
+#     锁到另一个 inode。实测：A 持锁时删文件后，B 立即也能拿到锁。
+#     于是 `start()` 与 `stop()` 真正并发执行。
+#
+#   根因 2 —— `stop()` 按 cmdline 杀 ssr-rules。
+#     `ps_list | grep ssr-rules | xargs kill -9` 会杀掉**并发实例**
+#     正在执行的 `/usr/bin/ssr-rules`。而 `start_rules()` 是
+#     `flush_r && ipset_r && fw_rule && ...` 的 && 链，中途被 SIGKILL
+#     必然返回非 0 → 打出「无法安装透明代理规则」。
+#     实测插桩：`step=flush_r ok` 之后就没有任何 step 日志，
+#     且 `kill -9` 目标列表里出现了正在跑的那个 pid。
+#
+# 为什么「运行一段时间后」才出现：开机是串行的，只有周期性触发器
+# （`ssr-monitor` 的 30s 巡检、`99-ssrplus-pppoe` 的 ifup+10s、
+# 订阅自动更新）撞在一起时才会并发。本机 `network.wan.proto=pppoe`，
+# 每次重拨都会触发一次 restart，与 monitor 巡检重叠即中招。
+#
+# 修法（三处，均幂等）：
+#   a) `set_lock()` 改为有界等待（最多 60s），超时明确报错退出；
+#   b) `unset_lock()` 只释放锁、不删文件；`unlock()` 不再以文件存在性判断；
+#   c) `stop()` 不再按 cmdline kill ssr-rules —— 自动更新守护进程
+#      已由前面的 `ssr-rules -K` 按 pid 文件正确停止。
+if [ -f "$SSR_INIT" ] && ! grep -q '修复 v0.8.6' "$SSR_INIT"; then
+	cp "$SSR_INIT" "${SSR_INIT}.orig-v086"
+	_tmpd086=$(mktemp -d /tmp/ssr086.XXXXXX) || _tmpd086=/tmp
+
+	cat >"$_tmpd086/set_lock" <<'EOS'
+set_lock() {
+	# [修复 v0.8.6] 原实现 `flock -xn 1000` 是非阻塞且**忽略返回值**，
+	# 拿不到锁也照样往下执行 —— 互斥完全失效。改为有界等待，
+	# 超时则明确失败（禁止静默继续，见 AGENTS.md 红线 3）。
+	local _i=0
+	exec 1000>"$LOCK_FILE"
+	while ! flock -xn 1000; do
+		_i=$((_i + 1))
+		if [ "$_i" -ge 60 ]; then
+			echolog "ERROR: 等待 SSR-Plus 锁超时（60s），放弃本次操作。"
+			exec 1000>&-
+			_exit 1
+		fi
+		sleep 1
+	done
+}
+EOS
+
+	cat >"$_tmpd086/unset_lock" <<'EOS'
+unset_lock() {
+	# [修复 v0.8.6] 原实现 `rm -rf "$LOCK_FILE"` 会删掉**被锁的那个 inode**，
+	# 下一个进程重新创建同名文件、锁到另一个 inode，
+	# 于是两个实例各自持有「自己的锁」同时进入。
+	# 实测：A 持锁时删文件后，B 立即也能拿到锁。
+	# 正确做法是只释放，文件常驻（内容无意义）。
+	flock -u 1000 2>/dev/null
+	exec 1000>&-
+}
+EOS
+
+	cat >"$_tmpd086/unlock" <<'EOS'
+unlock() {
+	# [修复 v0.8.6] 原实现用 `[ -f "$LOCK_FILE" ]` 判断别的实例是否在跑，
+	# 而 unset_lock 会删除该文件 —— 「文件不存在」既表示空闲、也表示锁被删掉，
+	# 无法区分。现在锁由 flock 持有、文件常驻，真正的等待由 set_lock 完成。
+	return 0
+}
+EOS
+
+	# 按函数名整块替换：从 `name() {` 到其后第一个裸 `}`
+	for _fn in set_lock unset_lock unlock; do
+		awk -v name="$_fn" -v body="$_tmpd086/$_fn" '
+			$0 == name "() {" && !done {
+				while ((getline line < body) > 0) print line
+				close(body)
+				skip = 1; done = 1; next
+			}
+			skip && $0 == "}" { skip = 0; next }
+			skip { next }
+			{ print }
+		' "$SSR_INIT" >"${SSR_INIT}.tmp" && mv "${SSR_INIT}.tmp" "$SSR_INIT"
+	done
+
+	# (c) 去掉按 cmdline kill ssr-rules 的那行
+	awk '
+	/grep ssr-rules \| awk/ {
+		print "\t\t# [修复 v0.8.6] 不再按 cmdline 匹配 kill ssr-rules。"
+		print "\t\t# 原写法 `ps_list | grep ssr-rules | xargs kill -9` 会杀掉**并发实例**"
+		print "\t\t# 正在执行的 /usr/bin/ssr-rules，使其在 flush_r && ipset_r && fw_rule"
+		print "\t\t# 链中被 SIGKILL，start_rules() 返回非 0 → 打「无法安装透明代理规则」。"
+		print "\t\t# 自动更新守护进程已由上面的 `ssr-rules -K` 按 pid 文件停止。"
+		print "\t\trm -f /var/run/ssr-rules-daemon.pid"
+		next
+	}
+	{ print }
+	' "$SSR_INIT" >"${SSR_INIT}.tmp" && mv "${SSR_INIT}.tmp" "$SSR_INIT"
+
+	chmod +x "$SSR_INIT"
+	rm -rf "$_tmpd086"
+
+	# 断言四项改动都在；任一缺失即回滚（禁止静默失败）
+	_v086_fail=0
+	grep -q 'flock -xn 1000; do' "$SSR_INIT" || _v086_fail=1
+	grep -q 'exec 1000>&-' "$SSR_INIT" || _v086_fail=1
+	grep -q 'grep ssr-rules | awk' "$SSR_INIT" && _v086_fail=1
+
+	if [ "$_v086_fail" = "0" ] && sh -n "$SSR_INIT"; then
+		log "init.d/shadowsocksr: v0.8.6 锁与 kill 修复已应用（语法通过）"
+	else
+		log "ERROR: init.d/shadowsocksr v0.8.6 补丁失败，回滚"
+		cp "${SSR_INIT}.orig-v086" "$SSR_INIT"
+		chmod +x "$SSR_INIT"
+	fi
+else
+	log "init.d/shadowsocksr: v0.8.6 补丁已存在或文件缺失，跳过"
+fi
+
 
 # ─────────────────────────────────────────────
 # 5. DNSMasq → 全部走 dnsproxy (ALL_DOH)

@@ -1,0 +1,13 @@
+{
+	"admin/network/dns_chain": {
+		"title": "DNS 链路",
+		"order": 45,
+		"action": {
+			"type": "cbi",
+			"path": "dnschain/general"
+		},
+		"depends": {
+			"acl": [ "luci-app-dnschain" ]
+		}
+	}
+}

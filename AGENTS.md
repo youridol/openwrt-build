@@ -332,6 +332,57 @@ LAN 客户端
 其余境外域名走 dnsproxy 的国内 DoH（**这些会拿到被污染的答案**）。
 这一点是理解 §5 的前提。
 
+> **目标架构见 [`docs/adr/0003-dns-chain-framework.md`](docs/adr/0003-dns-chain-framework.md)。**
+> **刷机后的逐项验证见 [`docs/adr/0004-dns-chain-verification.md`](docs/adr/0004-dns-chain-verification.md)。**
+>
+> 该 ADR 定义了取代上述现状的 DNS 链路框架（dnsproxy 唯一路由入口 + 框架自持
+> chinadns-ng 策略过滤器 + 单一缓存层）。
+>
+> **落地状态（2026-10-20）：P1–P4 全部完成，代码已进仓库。**
+> 已落地：
+> - 运行时：`files/etc/config/dnschain`、`files/usr/share/dnschain/dnschain.sh`、
+>   `files/etc/init.d/dnschain`、`files/usr/bin/dnschain-reconcile`、
+>   `files/usr/bin/dnschain-selftest`、`files/etc/uci-defaults/99-zz-dnschain`
+> - P3：`files/etc/config/dnsproxy` 已关闭缓存、删除 fallback
+> - P4：`init.d/dnsproxy` 让位逻辑、`files/etc/ssrplus/applechina.conf` overlay、
+>   853 拒绝的 `-151` 优先级（路由器实测通过）
+> - 页面：`package/luci-app-dnschain/`
+>
+> **但「代码在仓库」≠「现网已切换」**：需刷机后按 ADR-0004 逐项验证。
+> 判断现网是否已切换，看三样：
+> ```sh
+> netstat -lnup | grep -E ':(5335|5353)'        # :5335 应属 chinadns-ng
+> uci -q get shadowsocksr.@global[0].pdnsd_enable   # 0 = 交给框架；4 = MosDNS
+> /usr/bin/dnschain-selftest                     # 16 项
+> ```
+>
+> 该 ADR 取代了两份已撤回的文档（`0003-dns-chain-architecture.md`、
+> `0004-dns-chain-framework.md`），撤回原因见其 §15。撤回的核心教训：
+> 那两份都写「已实测」，但仓库里没有对应代码（`--upstream <path>` 的生成器
+> 从未存在），且是孤岛文档（除彼此外全仓库零引用）——**引用 ADR 前先确认
+> 其结论在代码里有支撑**。
+
+### 4.0 ⚠️ `dnschain` 框架的七条硬约束（改它之前必读）
+
+| # | 约束 | 违反的后果 | CI 断言 |
+|---|---|---|---|
+| 1 | **缓存只在 dnsmasq 一层**，`dnsproxy.args` / `filter.args` / `files/etc/config/dnsproxy` 都不得启用缓存 | 同一域名出现两份答案（实测：经 `:53` 与直连 `:5353` 返回不同 IP） | 有 |
+| 2 | **国外上游必须 IP 形式**，且端口必须在运行时 `ss_spec_output` 端口集内 | 路由器自身出向不进代理、静默直连后被墙 → 国外域名全 SERVFAIL | 有 |
+| 3 | **生成 dnsproxy 上游文件时必须过滤 `xn--`** | dnsproxy **整体拒绝启动**（不是跳过坏条目），实测 `idna: invalid label` | 有 |
+| 4 | **不配 `--fallback`、不用 `--ipv6-disabled`** | 前者回落污染上游并缓存；后者连国内 AAAA 一起砍 | 有 |
+| 5 | **`-N tag:gfw` 不能写成裸 `-N`；不得出现 `114.114.114.114`** | 裸 `-N` 会连带抑制将来引入的其他组；明文 114 是 chinadns-ng 的 `-c` 默认值 | 有 |
+| 6 | **`init.d/dnsproxy` 必须保留 `dnschain_takes_over` 让位逻辑** | 两个 procd 实例抢 `:5353`，后起的静默失败 | 有 |
+| 7 | **`applechina.conf` 必须保持 173 条且全部指向 `127.0.0.1#5353`** | 明文 `114.114.114.114` 绕过 dnsproxy，Apple 域名不走加密链路 | 有 |
+
+另有两条通用约束：**`dnschain` 不删、不重写 SSR-Plus 生成的任何文件**
+（保留 `server=/域名/#5335` 作为同策略旁路，ADR §9.1）；
+**所有脚本必须 POSIX sh（dash）兼容**（CI 用 `sh -n` + 禁 bash 语法双检）。
+
+**853 拒绝的优先级已实测**（2026-10-20，路由器上）：
+裸 chain + `priority -151` 单独 `nft -f` 会报语法错误（缺 table 上下文，属预期）；
+经 fw4 include 到 `table inet fw4` 内部后**语法有效**，`nft list` 显示
+`priority mangle - 1`，即先于 `ss_spec_mangle` 的 `mangle(-150)`。
+
 > **v0.8.0：dnsproxy 的「24 个硬编码国外域名 → 127.0.0.1:5335」例外清单已删除。**
 > 该清单 24/24 全部命中 `gfw_list.conf`，属重复声明；而 SSR-Plus **禁用**时
 > 它是纯故障源（`:5335` 无监听 → `connection refused` → 回落 `1.12.12.12`
@@ -514,7 +565,46 @@ done
 
 现已在 `files/etc/uci-defaults/99-gaming-optimize` 里打三处补丁：
 覆写 `restart()` 设 `SSR_IN_RESTART=1`、`stop()` 内那次加标志守卫、
-两处 `restart` 一律改 `reload`（`grep -c 'dnsmasq restart'` 应为 **0**）。
+两处 `restart` 一律改 `reload`。
+
+**⚠️ 断言写法（2026-10-20 修正）：不要用 `grep -c 'dnsmasq restart'` 应为 0。**
+
+该断言会**永久误报**。路由器实测（`/etc/init.d/shadowsocksr`，3324 行）：
+
+```
+grep -n 'dnsmasq reload\|dnsmasq restart' /etc/init.d/shadowsocksr
+3161:	/etc/init.d/dnsmasq reload >/dev/null 2>&1          ← 真调用
+3305:			echolog "restart: skip dnsmasq restart in stop()"   ← 只是日志字符串
+3309:			/etc/init.d/dnsmasq reload >/dev/null 2>&1      ← 真调用
+```
+
+`grep -c` 返回 **1**，但那是 `echolog` 里的**文本**，不是调用点。正确判据是
+**排除 `echolog` 行后**统计真正的 `/etc/init.d/dnsmasq restart` 调用，应为 0。
+
+**⚠️ 仓库 overlay 与固件实况已漂移（同期发现）。** 路由器上两处调用确实是
+`reload`（符合意图），但仓库 `files/etc/uci-defaults/99-gaming-optimize:503`
+生成的代码**仍是** `/etc/init.d/dnsmasq restart`。下一次刷机可能把 reload 改回
+restart。落地 DNS 链路框架时须一并修正（见 `docs/adr/0003-dns-chain-framework.md` §2.7 D8）。
+
+**⚠️ 但 `reload` 有一个已知副作用（v0.8.6 实测，尚未修）：它不重读 conf-dir。**
+dnsmasq 的 `SIGHUP` 只清缓存、不重新解析配置文件；而 OpenWrt 的
+`reload_service()` 是 `rc_procd start_service "$@"; procd_send_signal dnsmasq "$@"`
+—— `start_service` 会重新生成 `/var/etc/dnsmasq.conf.*`，但已运行的进程
+**不会**再读它。实测对照（往 `/tmp/dnsmasq.d/dnsmasq-ssrplus.d/` 放
+`address=/zz-probe.invalid/3.3.3.3`）：
+
+| 操作 | 探针解析结果 |
+|---|---|
+| `reload` | 无结果（未加载） |
+| `restart` | `3.3.3.3`（已加载） |
+
+后果：SSR-Plus 重建 `gfw_list.conf` 后，dnsmasq 可能仍用旧内容 →
+部分国外域名拿到污染答案（实测 `www.reddit.com` 返回 `157.240.7.20` /
+`2001::1`，而直连 `mosdns:5335` 返回正确的 `151.101.x.x`）。
+排查此类现象时，**必须分别测「经 dnsmasq:53」与「直连 5335」**，
+只测其中一个会把「分流未加载」误判成「mosdns 有问题」。
+
+改动这一取舍属修改 DNS 配置，**须先申请批准**（见第 9 节）。
 
 **判定进程是否存在，不要用 `pgrep -x <名字>`。** SSR-Plus 的二进制以完整路径
 运行（`/var/etc/ssrplus/bin/v2ray`、`.../mosdns`），`pgrep -x xray` /

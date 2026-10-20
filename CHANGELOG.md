@@ -2,6 +2,362 @@
 
 本仓库所有功能/配置改动均记录于此。版本判型遵循全局规范（PATCH / MINOR / MAJOR）。
 
+## [未发布] - 2026-10-20
+
+### 新增 — DNS 链路框架 `dnschain`（运行时骨架 + 控制页面）
+
+按 `docs/adr/0003-dns-chain-framework.md` 落地 P1/P2 阶段的运行时组件。
+**本版本只交付骨架与页面，默认不启用**：`dnschain.main.enabled` 虽为 `1`，
+但 `dnsproxy` 与 `chinadns-ng` 的实际启停由 `init.d/dnschain` 控制，
+且首刷后需在页面确认端口所有权后才生效。
+
+| 类型 | 路径 | 说明 |
+|---|---|---|
+| 新增 | `files/etc/config/dnschain` | UCI 配置（9 个 section） |
+| 新增 | `files/usr/share/dnschain/dnschain.sh` | 共用函数库（配置读取、参数生成、端口校验） |
+| 新增 | `files/etc/init.d/dnschain` | procd 托管 dnsproxy `:5353` 与过滤器 `:5335` |
+| 新增 | `files/usr/bin/dnschain-reconcile` | 收敛器：重放不变量集 + 名单单向导入 |
+| 新增 | `files/usr/bin/dnschain-selftest` | 16 项自检，输出机器可读结果 |
+| 新增 | `files/etc/uci-defaults/99-zz-dnschain` | 首刷默认（排在 `99-gaming-optimize` 之后） |
+| 新增 | `files/etc/capabilities/dnschain-filter.json` | 过滤器的 `CAP_NET_ADMIN`（`-A` 写 nftset 需要） |
+| 新增 | `package/luci-app-dnschain/` | LuCI 页面（菜单 `网络 → DNS 链路`） |
+| 修改 | `.gitattributes` | 5 条无扩展名路径强制 LF |
+| 修改 | `.github/workflows/build-openwrt.yml` | `chmod +x` 清单 + 契约校验步骤 |
+
+**核心设计要点**（每条都有 ADR 依据）：
+
+1. **缓存只在 dnsmasq 一层**。`dnsproxy.args` 与 `filter.args` 由脚本生成，
+   生成逻辑里**不存在** `--cache`（CI 有反向断言）。
+2. **国外上游必须 IP 形式**。`dc_upstream_port` 按 scheme 推断端口，
+   `preflight` 校验端口必须在运行时 `ss_spec_output` 端口集内，
+   越界即拒绝启动并列出越界项（否则路由器自身出向静默直连、国外域名全挂）。
+3. **IDNA 域名不进 dnsproxy 文件**。124 个 `xn--` 会让 dnsproxy
+   **整体拒绝启动**（实测 `idna: invalid label`），故生成时过滤，
+   另写 `idna-bypass.conf` 交由 dnsmasq 的 punycode 路径兜底。
+4. **不配 `--fallback`**。过滤器不可用时返回 SERVFAIL 而非回落国内上游
+   （后者会把 `youtube.com` 解析成 `31.13.92.37` 并缓存）。
+5. **`-N tag:gfw` 而非裸 `-N`**。裸 `-N` 会连带抑制将来引入的其他组。
+6. **不收 `114.114.114.114`**。chinadns-ng 的 `-c` 默认值就是明文 114，
+   生成逻辑不写该参数，CI 断言参数里不出现该地址。
+7. **收敛而非删除**。框架不删、不重写 SSR-Plus 生成的任何文件，
+   保留 `server=/域名/#5335` 作为同策略旁路（ADR §9.1）。
+
+**页面**（`网络 → DNS 链路`）：
+
+- 概览：一句话结论行（按组件实测状态归纳）+ 6 行状态表（fw4 劫持 / dnsmasq /
+  dnsproxy / 过滤器 / 代理 / 缓存统计）
+- 拦截总开关（滑块）+ 拒绝 LAN 出向 853
+- DHCP 下发 DNS（多个明文地址，仅拦截关闭时使用）
+- 解析策略（两侧上游，含端口校验）
+- 双栈策略（只读，附「1ms 空答复 ≠ 超时」说明）
+- 端口档案 `primary` / `coexist` + SSR-Plus 当前模式显示
+- 名单规模与导入（自动/手动 + 立即更新 GFW）
+- 缓存开关与统计
+- 16 项自检表格
+- 四个动作按钮：清空缓存（SIGHUP 零中断）/ 手动导入 / 立即更新 GFW / 一键归一
+
+### 修复 — CI 契约断言会把 `$(( ))` 误判成 bash 语法
+
+新增的 `Verify dnschain framework contracts` 步骤首版用了
+`\(\([^)]*\)\)[[:space:]]*$` 判定 bash 的 `(( ))` 命令，结果把
+`pct=$(( delta * 100 / old_lines ))` 这类**合法的 POSIX 算术展开**也判成违规，
+导致构建必然失败。已改为「行首或 `;`/`&&`/`||` 之后紧跟 `((` 且不是 `$((`」才判定。
+
+### 测试中发现并修掉的缺陷（骨架阶段）
+
+| # | 项目 | 方式 | 结果 |
+|---|---|---|---|
+| 1 | 5 个 shell 脚本语法 | `sh -n`（Ubuntu 22.04 的 `/bin/sh` = **dash**，与 CI runner 一致） | 全 PASS |
+| 2 | 3 个 Lua 文件语法 | `luac5.1 -p`（Lua 5.1，与 LuCI 运行时一致） | 全 PASS |
+| 3 | 3 个 JSON 文件 | `json.load` | 全 PASS |
+| 4 | PO 文件配对 | `msgid`/`msgstr` 计数 | 108/108 |
+| 5 | 行尾 | `od -c` 统计 CR 字节 | 全部 0 |
+| 6 | 上游端口推断 | 6 种 URL 形态（含 IPv6 与显式端口） | 全部正确 |
+| 7 | 名单提取与 IDNA 分离 | 仿真 `gfw_list.conf`（含 `xn--` 与无 TLD 非法域名） | 4 条合法 / 2 条 IDNA / 1 条非法被丢弃 |
+| 8 | 参数生成 | mock uci/nft 环境跑 `dc_gen_*` | `-t` 有值、无 `--cache`/`--fallback`/`--ipv6-disabled`/明文 114 |
+| 9 | 指纹幂等 | 连续两次 `dc_lists_fingerprint` | 相同；改名单后变化 |
+| 10 | **CI 断言有效性** | 逐项故意破坏 7 处后复跑 | **7/7 被拦住**，恢复后全 PASS |
+
+**测试中发现并修掉的真实缺陷**（都不是语法检查能发现的）：
+
+1. `dc_get_list` 调用点传参错误 —— `dc_get_list upstream cn` 读的是
+   `dnschain.upstream.cn`（一个 section），而配置里 option 名是 `server`，
+   正确写法是 `dc_get_list cn server`。症状：`-t` 参数为空、过滤器起不来。
+2. 库脚本里 `tr ' ' '\n'` 被写成 `tr '''\n'`（首个参数空格丢失），
+   在 dash 下退化为恒等变换 → 所有 list 读取返回空。已统一改为双引号形式。
+3. `dc_gen_filter_args` 在国外上游为空时会产出 `-t` 后跟空行；
+   已改为显式报错并返回非零（禁止生成非法参数）。
+4. `general.lua` 概览里有一段三元表达式两边都是 `"5353"` 的死代码，
+   已改为真实的四分支判断（dnsproxy / 过滤器 / 端口占用 / 代理）。
+
+### P3 — 收敛缓存层：dnsproxy 关闭缓存
+
+`files/etc/config/dnsproxy` 改为缓存关闭，并移除 fallback：
+
+| 项 | 改动 | 依据 |
+|---|---|---|
+| `cache.enabled` | `'1'` → `'0'` | 缓存只在 dnsmasq 一层（ADR §10.5）。三处并存会让同一域名出现两份答案 |
+| `cache.min_ttl` / `max_ttl` | `60`/`86400` → `0`/`0` | `--cache-min-ttl` 会人为延长 TTL，改上游后最坏 60 秒仍给旧答案 |
+| `list fallback` | **删除** | fallback 是全局的，过滤器不可用时回落污染上游（CHANGELOG v0.8.0 的 `youtube.com → 31.13.92.37` 就是这条路径） |
+| `servers.upstream` | 三条国内 DoH → 两条 DoT + 一条 DoH | 与 `dnschain` 的 `config upstream 'cn'` 一致，避免「关掉框架后行为变了」 |
+
+**新增 CI 断言**（3 条）：`cache.enabled` 必须为 `'0'`、不得有 `list fallback`、`ipv6_disabled` 必须为 `'0'`。
+
+### P4 — 四项收尾
+
+**1. `init.d/dnsproxy` 让位逻辑（解决端口抢占）**
+
+此前 `init.d/dnsproxy`（START=90）与 `init.d/dnschain`（START=95）**都**启动
+`/usr/bin/dnsproxy`，两个 procd 实例抢 `:5353`，后起的静默失败。
+
+现在 `init.d/dnsproxy` 检测 `dnschain.main.enabled=1` 时：
+- `start_service` 直接返回，打印「由 dnschain 框架托管」
+- `stop_service` 不动拦截规则（本服务从未起过实例）
+- `reload_service` 转发给 `dnschain reload`
+
+判断依据是**配置意图**而非进程状态（开机时序下用 `pgrep` 会误判，AGENTS §8）。
+
+**2. `applechina.conf` overlay（消除明文 DNS 旁路）**
+
+新增 `files/etc/ssrplus/applechina.conf`：173 条 `server=/<Apple 域名>/114.114.114.114`
+改为 `127.0.0.1#5353`。
+
+- **不设** `apple_dns`：init 脚本的 `old_appledns` 用 `grep -oE` 只抽 IP、丢端口，
+  二次启动会叠成 `127.0.0.1#5353#5353`（AGENTS §9 已记录）
+- 行数保持 173（CI 断言），数据行全部指向加密入口（CI 断言）
+
+**3. 853 拒绝的优先级已实测**
+
+在路由器上验证了 ADR 列为必测项的 T2 写法：
+
+```
+裸 chain + priority -151 单独 nft -f  → 语法错误（缺 table 上下文，预期）
+table 内嵌 priority -151 链           → ACCEPTED
+nft list 显示                          → priority mangle - 1（即 -151，先于 mangle -150）
+临时加载后 counter                     → 规则正常建立
+```
+
+结论：`/etc/nftables.d/15-dnschain-reject-dot.nft` 的裸 chain 写法**正确**，
+fw4 会把它 include 到 `table inet fw4` 内部，优先级生效。
+
+**4. `coexist` 档案的自检判据修正**
+
+`dnschain-selftest` 第 2 项原判据在 `coexist` 下会误报（SSR 的旁路指向 `:5335`，
+而 `filter_port` 是 `:5337`）。已改为按档案区分允许集，并在输出里显示 `profile`。
+
+### 新增 — `docs/adr/0004-dns-chain-verification.md`（全链路验证规程）
+
+刷机后逐项核对的执行文档，14 节：
+
+| 节 | 内容 |
+|---|---|
+| §1 | 文件/执行位/包是否就位 |
+| §2 | **端口所有权**（`:5335` 属谁、SSR 三个键） |
+| §3 | **缓存层唯一性**（含「两份答案是否消失」的最强证据） |
+| §4 | 四类域名解析（国内 A/AAAA、国外 AAAA 的 EMPTY 判据） |
+| §5 | 分流三层（DNS / IP / 出站） |
+| §6 | 双栈与 853 拒绝（含从客户机验证） |
+| §7 | 名单导入（规模、dnsproxy 是否加载、自动导入） |
+| §8 | **抗「改 LuCI 就坏」**（故意改坏三个键，看收敛器改回） |
+| §9 | 降级矩阵（五处故障） |
+| §10 | **失败排查树**（四类症状 → 定位路径） |
+| §11 | 回滚（只退框架 / 完整回退） |
+| §12 | 验证记录表（可勾选） |
+| §13 | 已知边界（8 条，不属故障） |
+| §14 | 与 ADR-0003 的章节对应 |
+
+### 验证
+
+| # | 项目 | 方式 | 结果 |
+|---|---|---|---|
+| 1 | 7 个 shell 脚本 | `sh -n`（Ubuntu 22.04 的 `/bin/sh` = dash） | 全 PASS |
+| 2 | 3 个 Lua | `luac5.1 -p` | 全 PASS |
+| 3 | 3 个 JSON | `json.load` | 全 PASS |
+| 4 | YAML | `yaml.safe_load` | PASS |
+| 5 | 行尾 | 全部改动文件 `od -c` 统计 CR | 全部 0 |
+| 6 | CI 契约校验 | 提取步骤脚本本地执行 | 31 项全 OK |
+| 7 | **断言有效性（第一批）** | 故意破坏 7 处 | **7/7 被拦住** |
+| 8 | **断言有效性（P3/P4 新增）** | 故意破坏 6 处 | **6/6 被拦住** |
+| 9 | 853 优先级 | 路由器实测 `nft -c -f` + 加载后 `nft list` | 显示 `priority mangle - 1`，语法有效 |
+
+**仍待刷机后验证**（已在 ADR-0004 §12 列为可勾选项）：
+- 页面在真机 LuCI 中的渲染（本地只有 Lua 语法校验）
+- `8.8.8.8:853` / `1.1.1.1:853` 证书是否含 IP SAN（`--cert-verify` 依赖它）
+- 端到端：`dnschain-selftest` 16 项在真机的实际输出
+- §8 的「故意改坏再收敛」实测
+
+### 文档 — 重写 DNS 链路框架 ADR，撤回两份与代码不符的旧稿
+
+**背景**：`docs/adr/0003-dns-chain-architecture.md` 与 `0004-dns-chain-framework.md`
+两份旧稿互相覆盖、都标「提议」，且多处写「已实测」但仓库里没有对应代码。
+本轮在路由器上逐条取证后重写为**一份** ADR。
+
+**删除**
+
+| 文件 | 原因 |
+|---|---|
+| `docs/adr/0003-dns-chain-architecture.md` | ① `gfw2ipset.sh` 路径写错（实际在 `/usr/share/shadowsocksr/`，不在 `/usr/bin/`）；② 把「行数」当「域名数」（47434 vs 23717）；③ 声称的 `--upstream <path>` 域名文件生成器**从未存在**；④ 留了四个未决问题，与 0004 互相覆盖 |
+| `docs/adr/0004-dns-chain-framework.md` | ① 自称取代 0003 但两者并存、都标「提议」；② 建立在「`dnsmasq restart` 已改 reload」之上，而仓库 overlay 实际生成的仍是 restart；③ `coexist` 档案下重写 `gfw_list.conf` 会引入新的时序依赖；④ 设计了三层缓存并存，与「只留一层」的结论相反 |
+
+两份都是**孤岛文档**：除彼此外全仓库零引用（0004 除自身标题行外无任何引用），
+CHANGELOG 无 v0.8.x 条目提及，`AGENTS.md` §4/§5 也未指向它们——因此能一路写着
+与代码不符的内容而没人发现。
+
+**新增**：`docs/adr/0003-dns-chain-framework.md`（编号复用 0003，不制造空洞）
+
+核心设计：
+
+| 项 | 决策 |
+|---|---|
+| 单一路由入口 | dnsproxy `:5353`，国内→国内加密池、gfw→策略过滤器 |
+| 策略过滤器 | 框架自持 chinadns-ng `:5335`，只做 gfw 域名的 AAAA/HTTPS 抑制 + 国外 DoT |
+| 单一缓存层 | 只在 dnsmasq（客户机唯一入口）；dnsproxy 与过滤器均不缓存 |
+| 分流抗漂移 | **收敛**而非删除：保留 SSR 生成的 `server=/域名/#5335` 作为同策略旁路 |
+| 名单导入 | 单向复制到 `/etc/dnschain/`，轮询 md5 自动导入 + 手动导入 |
+| 拦截开关 | 滑块决定拦不拦；关闭时按页面配置的明文 DNS 下发给 DHCP 客户机 |
+
+### 修复 — `AGENTS.md` §4.4 的断言会永久误报
+
+原文断言「两处 `restart` 一律改 `reload`（`grep -c 'dnsmasq restart'` 应为 **0**）」。
+路由器实测（`/etc/init.d/shadowsocksr`，3324 行）：
+
+```
+3161:	/etc/init.d/dnsmasq reload >/dev/null 2>&1          ← 真调用
+3305:			echolog "restart: skip dnsmasq restart in stop()"   ← 只是日志字符串
+3309:			/etc/init.d/dnsmasq reload >/dev/null 2>&1      ← 真调用
+```
+
+`grep -c` 返回 **1**，但那是 `echolog` 里的**文本**，不是调用点。已改为
+「排除 `echolog` 行后统计真正的调用，应为 0」，并记下另一处漂移：
+仓库 `files/etc/uci-defaults/99-gaming-optimize:503` 生成的代码**仍是**
+`/etc/init.d/dnsmasq restart`，与固件实况不一致，下次刷机可能把 reload 改回 restart。
+
+### 修复 — `GLOSSARY.md` 的组件角色已失效
+
+- `dnsproxy` 条目仍写「另有 24 条硬编码国外域名例外指向 mosdns」——该清单
+  v0.8.0 已删，且 `AGENTS.md` 明令不要加回。已重写为「唯一路由型解析器」。
+- `dnsmasq` 改为「唯一入口 + 唯一缓存层 + DHCP」，删除「按域名分派」的旧描述。
+- `mosdns` 改为「仅 SSR 模式 4 时存在，不在默认链路中」。
+- 新增术语：`策略过滤器`、`端口所有权`、`档案`、`收敛器`。
+- `跳数` 更新为 dnsmasq → dnsproxy → 过滤器 → 上游 DoT。
+
+### 验证
+
+本轮所有结论均来自路由器只读取证（`192.168.3.254`，OpenWrt 24.10.5 x86/64）。
+关键实测：
+
+| # | 事实 | 证据 |
+|---|---|---|
+| 1 | **dnsproxy 用国内上游直接答 gfw 域名会返回污染答案** | `www.google.com` → `2001::1` + `104.244.42.197`；同域名经 `:53` 分流得 `142.251.x.x` |
+| 2 | 124 个 `xn--` 域名使 dnsproxy **整体拒绝启动** | `bad domain name "xn--wcvs22d1m.hk": idna: invalid label` |
+| 3 | `gfw_list.conf` 47434 行 = 23717 域名 × 2 | `grep -c '^server='` = 23717，`^ipset=` = 23717 |
+| 4 | 运行时副本 `ipset=` 被**整行删除**（不是转换） | `^ipset=`=0、`^nftset=`=0、行数 23717 |
+| 5 | `gfw2ipset.sh` 在 `/usr/share/shadowsocksr/` | `find / -name 'gfw2ipset*'` |
+| 6 | 三层缓存只有两层在工作 | mosdns `:5335` 连查 5 次全为 60–80ms（从不命中）；dnsmasq `:53` 为 80/0/0/10/0ms |
+| 7 | dnsproxy `--cache-size` 单位是**字节**，当前 8192 = 8KB | `--help`：`Cache size (in bytes). Default: 64k.` |
+| 8 | `ss_spec_output` 只匹配 TCP，端口集含 853 不含 53 | `nft list chain inet ss_spec ss_spec_output` |
+| 9 | `blacklist` 7 元素（全来自 `wan_fw_ips`）、`whitelist` 空 | `nft list set` 实测 |
+| 10 | 国内 IPv6 库是死路径 | `ipv6_support=0` → `ipv6_rules_apply` 首步 `return 0`；`nft list set inet ss_spec china6` 报不存在 |
+
+**测量纪律**：`date +%s%N` 在 BusyBox 上**不支持**，会静默返回秒级值、全部显示
+0ms（本轮首次测量因此作废）。测延迟必须用 `/proc/uptime`（厘秒）。
+
+**未做**：本轮只交付文档，未改任何 `files/`、CI、`.gitattributes` 或页面代码。
+固件代码落地按 ADR §13.4 的 P1–P4 分阶段进行。
+
+## [v0.8.6] - 2026-10-20
+
+### 修复 — SSR-Plus 运行一段时间后「无法安装透明代理规则，启动中止」
+
+**症状**：SSR-Plus 偶发启动中止，日志只有一行：
+
+```
+2026-10-20 04:48:01: ERROR: 无法安装透明代理规则，启动中止。
+```
+
+紧接着 `restart` 会自己再试一次并成功，所以表现为「偶发、能自愈」，
+但期间透明代理与 DNS 分流全部中断。
+
+**关键线索**：`ssr-rules` 自己**一条失败日志都没有** —— 既无
+`NFTables setup failed!`，也无 `NFT forced rebuild failed!`。
+它所有失败分支都会 `loger 3` 记一笔，一条都没有说明它**不是跑失败的，
+是被杀死的**。
+
+**复现（5/5 稳定）**：并发两个 `/etc/init.d/shadowsocksr restart` 必定触发；
+串行连跑 5 次增量恒为 0。
+
+**根因（两个叠加）**：
+
+1. **互斥锁形同虚设。** `set_lock()` 是 `flock -xn 1000`（`-n` 非阻塞）
+   且**忽略返回值** —— 拿不到锁也照样往下走；`unset_lock()` 又
+   `rm -rf "$LOCK_FILE"` 把**被锁的那个 inode 删掉**，下一个进程重新创建
+   同名文件、锁到另一个 inode。实测：A 持锁时删文件后 B 立即也能拿到锁。
+   于是 `start()` 与 `stop()` 真正并发执行。
+
+2. **`stop()` 按 cmdline 杀 ssr-rules。**
+   `ps_list | grep ssr-rules | xargs kill -9` 会杀掉**并发实例**正在执行的
+   `/usr/bin/ssr-rules`。而 `start_rules()` 是
+   `flush_r && ipset_r && fw_rule && ac_rule && tp_rule && ipv6_rules_apply && gen_include`
+   的 `&&` 链，中途被 SIGKILL 必然返回非 0 → 打出该 ERROR。
+   插桩实证：`step=flush_r ok` 之后不再有任何 step 日志。
+
+**为什么「运行一段时间后」才出现**：开机是串行的。只有周期性触发器撞在一起
+才并发 —— `ssr-monitor` 每 30s 巡检、`99-ssrplus-pppoe` 在 `ifup wan` 后
+10s 触发、订阅自动更新。本机 `network.wan.proto=pppoe`，每次重拨都会触发
+一次 restart，与 monitor 巡检重叠即中招。这解释了 04:09 / 04:11 / 04:47
+三个时间点各出现一次的形态。
+
+**修法**（`files/etc/uci-defaults/99-gaming-optimize` 第 4.10 节，幂等）：
+
+| 改动 | 内容 |
+|---|---|
+| `set_lock()` | 改为有界等待（最多 60s），超时明确报错退出，不再静默继续 |
+| `unset_lock()` | 只 `flock -u` + 关 fd，**不删锁文件**（文件常驻） |
+| `unlock()` | 不再以「文件是否存在」判断（该判据与删除行为互相矛盾） |
+| `stop()` | 不再按 cmdline kill ssr-rules；守护进程已由 `ssr-rules -K` 按 pid 文件停止 |
+
+**验证**：
+
+- 并发 restart × 5 轮、三并发 × 3 轮：ERROR 增量**全部为 0**
+  （修复前每轮必现）。
+- 锁的 A/B 对照（两个持锁 3s 的 worker 并发）：
+  修复后总耗时 **6s**（真正串行），原版 **3s**（同时进入）。
+- 串行 restart × 5 次：增量 0（未引入回归）。
+- 端到端：`nft list tables` 含 2 个 ss_spec 表、`:5335`/`:1234` 均在监听、
+  `fwmark 0x53535250` 规则在位、`global_server` 未被写成 nil、
+  国内域名解析正常、`curl https://www.google.com` 经代理返回 302。
+- `fw4 check` → `Ruleset passes nftables check.`
+- 语法：`sh -n`（dash）通过；`.gitattributes` 要求的 LF 行尾保持（CR 字节 = 0）。
+
+### 已知问题（本次未修，独立缺陷）
+
+**`dnsmasq reload` 不会重新读取 conf-dir，导致 SSR-Plus 的 gfw 分流在
+某些时机不生效。** 这是排查本轮故障时**顺带发现**的独立问题，
+与上面的并发缺陷无关，未在本次改动范围内。
+
+实测证据：往 `/tmp/dnsmasq.d/dnsmasq-ssrplus.d/` 放
+`address=/zz-probe.invalid/3.3.3.3` 后，
+`/etc/init.d/dnsmasq reload` → 探针解析**无结果**；
+`/etc/init.d/dnsmasq restart` → 解析得 `3.3.3.3`。
+dnsmasq 的 `SIGHUP` 只清缓存、不重读配置文件。
+
+而 OpenWrt 的 `reload_service()` 是
+`rc_procd start_service "$@"; procd_send_signal dnsmasq "$@"` ——
+`start_service` 会重新生成 `/var/etc/dnsmasq.conf.*`，但 `SIGHUP` 不会
+让已运行的进程重新读它，因此**新增的 conf-dir 文件对运行中的 dnsmasq 不可见**。
+
+v0.8.3 把 `stop()`/`start()` 里的 `dnsmasq restart` 改成 `reload`，
+目的是避免 restart 期间约 3 秒全断。这个目的达到了，但副作用是：
+**SSR-Plus 重建 gfw_list.conf 后，dnsmasq 可能仍用旧内容**，
+表现为部分国外域名拿到污染答案（实测 `www.reddit.com` 曾返回
+`157.240.7.20` / `2001::1`，而直连 mosdns:5335 返回正确的
+`151.101.x.x`）。
+
+需在「零中断」与「配置必生效」之间重新取舍（候选：只在
+gfw_list.conf 的 md5 变化时才 restart；或改用
+`/etc/init.d/dnsmasq restart` 但把中断窗口压到最小）。
+**改动此项属修改 DNS 配置，须先申请批准**（见 AGENTS.md 第 9 节）。
+
 ## [v0.8.5] - 2026-10-19
 
 ### 修复 — 定时构建连续失败：校验脚本用了 dash 不支持的进程替换

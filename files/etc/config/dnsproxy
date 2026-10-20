@@ -1,15 +1,21 @@
 # ============================================================
-# dnsproxy — ALL_DOH 默认配置（openwrt-build 仓库 files/ overlay）
+# dnsproxy — 配置（openwrt-build 仓库 files/ overlay）
 # ------------------------------------------------------------
-# 主链路（ALL_DOH 加密解析）:
-#   LAN → dnsmasq:53 → dnsproxy:5353 → DoH/DoT → Internet
-#   走 MosDNS 的域名由 dnsmasq 的 gfw_list.conf 分流（见下方 servers 段，
-#   v0.8.0 起 dnsproxy 自身不再持有任何指向 127.0.0.1:5335 的上游）。
-# 规则:
-#   - 上游一律加密（https:// = DoH），bootstrap 仅用于解析加密上游主机名
-#   - 无明文 DNS 上游、无明文 fallback（fallback 亦为 DoH）
-#   - UCI 键 dnsproxy.global.lan_dns_intercept 控制 LAN DNS 强制拦截
-#     （LuCI 开关「拦截所有客户端 DNS」，由 init 管理；fw3 用 iptables、fw4 用 nftables）
+# 设计依据：docs/adr/0003-dns-chain-framework.md
+#
+# ⚠️ 2026-10-20（P3）：本文件在**框架启用**（dnschain.main.enabled=1）时
+# 不再决定 dnsproxy 的实际启动参数 —— 那时由 /var/etc/dnschain/dnsproxy.args
+# 接管（init.d/dnschain 直接 procd 托管，见 ADR §13.1）。
+# 本文件保留的原因有二：
+#   1. luci-app-dnsproxy 页面仍读写它（用户可能临时关掉框架、回退旧链路）
+#   2. 框架关闭时 init.d/dnsproxy 按本文件启动
+#
+# 因此本文件的取值必须与框架的默认值**保持一致**，否则「关掉框架」
+# 会切到一套不同的解析策略，表现为「关了框架之后行为变了」。
+# 一致性由 CI 契约校验断言（Verify dnschain framework contracts）。
+#
+# 链路（框架启用时）:
+#   LAN → dnsmasq:53 → dnsproxy:5353 → { 国内加密池 | gfw 域名→过滤器:5335 }
 # ============================================================
 
 config dnsproxy 'global'
@@ -17,11 +23,13 @@ config dnsproxy 'global'
 	list listen_addr '127.0.0.1'
 	list listen_addr '::1'
 	list listen_port '5353'
-	# ALL_DOH: 拦截所有客户端 DNS（默认 ON，LuCI 可切换）
+	# LAN DNS 强制拦截（框架启用时也保留，作为 dnsproxy 侧的兜底片段）
 	option lan_dns_intercept '1'
 	option log_file ''
 	option http3 '0'
 	option insecure '0'
+	# ⚠️ 必须为 0：--ipv6-disabled 是**全局**开关，会连国内 AAAA 一起砍
+	# （ADR §5.4）。国外 AAAA 的抑制由过滤器的 -N tag:gfw 按域名做。
 	option ipv6_disabled '0'
 	option timeout '10s'
 	option max_go_routines ''
@@ -29,20 +37,30 @@ config dnsproxy 'global'
 	option refuse_any '0'
 	option udp_buf_size ''
 	# 上游模式: parallel（并行查全部上游取最快响应）
-	# 实测(冷查询中位数): parallel 39.6ms < load_balance 62.5ms < fastest_addr 97.7ms
-	# fastest_addr 每次查询额外做 IP 连通性探测，国内 DoH 同质场景纯属开销，不推荐。
 	option upstream_mode 'parallel'
 	option verbose '0'
 
 config dnsproxy 'bogus_nxdomain'
 	list ip_addr ''
 
+# ⚠️ 2026-10-20（P3）：缓存**关闭**。
+#
+# 缓存只在 dnsmasq 一层（ADR §10.5）。三处并存会让同一域名出现两份答案：
+# 实测经 :53 与直连 :5353 返回不同 IP（google.com → 142.251.x.x vs 2001::1）。
+#
+# 另外两条与 dnsproxy 缓存有关的实测事实，也是关闭它的理由：
+#   1. --cache-size 的单位是**字节**，默认 64KB。此前配的 8192 = 8KB，
+#      比默认值还小 8 倍，只够存几十条记录（--help 原文：
+#      "Cache size (in bytes). Default: 64k."）
+#   2. --cache-min-ttl 会**人为延长** TTL（--help 原文：
+#      "Artificially extending TTLs should only be done with careful consideration"），
+#      此前配 60 → 改了上游后最坏 60 秒仍给旧答案
 config dnsproxy 'cache'
-	option enabled '1'
-	option cache_optimistic '1'
+	option enabled '0'
+	option cache_optimistic '0'
 	option size '8192'
-	option min_ttl '60'
-	option max_ttl '86400'
+	option min_ttl '0'
+	option max_ttl '0'
 
 config dnsproxy 'dns64'
 	option enabled '0'
@@ -61,60 +79,69 @@ config dnsproxy 'private_rdns'
 	list upstream '127.0.0.1:53'
 
 config dnsproxy 'servers'
-	# 国内/国外统一加密解析主链：主上游为国内 DoH（稳定可达）
-	#
-	# 2026-09-04 修复（v0.3.4）：
-	# - doh.pub（域名型、偶发 502、依赖 bootstrap）→ 1.12.12.12（IP 型直连，china ipset 命中不代理）
-	# - fallback 删除 8.8.8.8（其流量被 SSR-Plus 代理接管，SSR 重建窗口必超时 → 日志刷 ERROR）
-	#   保留 1.12.12.12（国内可直连、不依赖代理）作最兜底
+	# 国内加密池：DoT 与 DoH 混用，并行取最快。
+	# 与 dnschain 的默认值（config upstream 'cn'）保持一致。
+	list upstream 'tls://223.5.5.5'
+	list upstream 'tls://223.6.6.6'
 	list upstream 'https://dns.alidns.com/dns-query'
-	list upstream 'https://1.12.12.12/dns-query'
-	list upstream 'https://doh.360.cn/dns-query'
-	# ── 2026-10-17 移除「24 个国外域名 → 127.0.0.1:5335」例外清单（v0.8.0）──
+
+	# ── 关于「国外域名 → 过滤器」的分流 ──────────────────────────
 	#
-	# 移除理由（三条，均有实测）：
+	# 框架启用时，这条分流由 /var/etc/dnschain/upstreams-domains.txt 承担
+	# （约 2.36 万条 `[/域名/]127.0.0.1:5335`，由 gfw 名单生成）。
 	#
-	# 1) 它 100% 冗余。这 24 个域名在 dnsmasq 的 gfw_list.conf 里**全部命中**
-	#    （逐个 grep：google.com / youtube.com / github.com / twitter.com / x.com /
+	# 框架关闭时，dnsmasq 的 gfw_list.conf 旁路仍然存在（SSR-Plus 生成），
+	# 故这里**不需要**再列国外域名 —— 列出就是第二个真相源。
+	#
+	# ── 2026-10-17 移除「24 个硬编码国外域名 → 127.0.0.1:5335」（v0.8.0）──
+	#
+	# 三条移除理由（均有实测，不要加回）：
+	#
+	# 1) 100% 冗余。这 24 个域名在 dnsmasq 的 gfw_list.conf 里全部命中
+	#    （google.com / youtube.com / github.com / twitter.com / x.com /
 	#    facebook.com / instagram.com / whatsapp.com / telegram.org / reddit.com /
 	#    discord.com / spotify.com / netflix.com / cloudflare.com /
 	#    cloudflare-dns.com / amazon.com / amazonaws.com / stackoverflow.com /
 	#    wikipedia.org / medium.com / notion.so / figma.com / vercel.com /
 	#    herokuapp.com —— 24/24 命中，行形如 server=/<域名>/127.0.0.1#5335）。
-	#    SSR-Plus 启用时它们本来就会被 dnsmasq 转去 :5335，此处是重复声明。
 	#
 	# 2) SSR-Plus **禁用**时它把答案污染掉。此时 :5335 无监听，dnsproxy 打
 	#    `connection refused` 后回落到 fallback https://1.12.12.12/dns-query，
 	#    拿到的是污染答案。2026-10-17 实测：
 	#        youtube.com    → 31.13.92.37    （Facebook 的 IP）
 	#        wikipedia.org  → 31.13.94.36    （Facebook 的 IP）
-	#        wikipedia.org  → 199.59.148.96 / 31.13.73.169
 	#    同一时刻不在清单里的域名全部正常：
-	#        blogspot.com → 65.49.68.152、wordpress.com → 192.0.78.9、
-	#        www.bing.com → 202.89.233.100
-	#    dnsproxy 日志相应刷
-	#        ERROR exchange failed prefix=dnsproxy upstream=127.0.0.1:5335
-	#          question=";www.google.com.\tIN\t HTTPS"
-	#          err="... read: connection refused"
+	#        blogspot.com → 65.49.68.152、wordpress.com → 192.0.78.9
 	#
-	# 3) 它让 dnsproxy 的解析结果隐式依赖「SSR-Plus 是否在运行」。这条耦合本身就是
-	#    故障来源：SSR 停止 → 这 24 个域名的所有子域（含冷门子域）解析异常，
-	#    而用户看不出与 SSR 有关。移除后 dnsproxy 只依赖国内 DoH 主链，行为可预期。
+	# 3) 它让 dnsproxy 的解析结果隐式依赖「SSR-Plus 是否在运行」——
+	#    这条耦合本身就是故障来源。
 	#
-	# 移除不影响分流能力：国外域名仍经 dnsmasq 的 gfw_list.conf（23701 条）
-	# 转去 mosdns:5335，由 MosDNS 经代理查国外 DoH。判定依据见
-	#   grep -c '127.0.0.1#5335' /tmp/dnsmasq.d/dnsmasq-ssrplus.d/gfw_list.conf
-	#
-	# 相关：AGENTS.md 第 5 节（filter_aaaa 语义）、docs/adr/0001。
-	# bootstrap 仅用于解析加密上游主机名（明文是它唯一且应有的用途）
+	# 相关：AGENTS.md §4、§5，docs/adr/0001、docs/adr/0003。
+
+	# bootstrap 仅用于解析加密上游的主机名（明文是它唯一且应有的用途）
 	list bootstrap '223.5.5.5'
 	list bootstrap '223.6.6.6'
-	# fallback 备用通道同样加密（DoH），绝不明文；
-	# v0.3.4 起仅保留国内可直连 IP-DoH（1.12.12.12），删除依赖 SSR-Plus 代理的 8.8.8.8，
-	# 避免 SSR 规则重建窗口内 fallback 必然超时刷 ERROR
-	list fallback 'https://1.12.12.12/dns-query'
+
+	# ⚠️ 2026-10-20（P3）：fallback **删除**。
+	#
+	# fallback 是**全局**的，不区分域名。过滤器一旦不可用（SSR 模式切换、
+	# 进程被杀、:5335 未被占用），gfw 域名就落到 fallback，拿到污染答案。
+	#
+	# CHANGELOG v0.8.0 记录的就是这条路径：
+	#   [/google.com/…]127.0.0.1:5335 连不上
+	#   → 日志 ERROR exchange failed … connection refused
+	#   → 回落 https://1.12.12.12/dns-query
+	#   → youtube.com → 31.13.92.37、wikipedia.org → 31.13.94.36
+	#
+	# 去掉 fallback 后，过滤器不可用时 gfw 域名得到 SERVFAIL，
+	# 客户端立刻失败、不缓存污染答案，自检第 6/10/11 项能明确指出原因。
+	# 这是诚实信号，优于「看起来能解析但地址是错的」（ADR §10.2）。
+	#
+	# 若确实需要 fallback，请在 dnschain 页面开启对应开关（默认关）。
 
 config dnsproxy 'tls'
+	# 对客户机提供 DoH/DoT 服务端：默认关闭。
+	# 开启需要证书分发与客户端信任，且与「拒绝 LAN 出向 853」互斥（ADR §10.4）。
 	option enabled '0'
 	option tls_crt ''
 	option tls_key ''

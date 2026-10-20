@@ -52,6 +52,15 @@
 **/etc/rc.local                       text eol=lf
 **/etc/sysctl.conf                    text eol=lf
 
+# dnschain（DNS 链路框架）—— 见 docs/adr/0003-dns-chain-framework.md
+# 全部为无扩展名文件，必须显式强制 LF，否则路由器上 shell 解析失败
+**/etc/config/dnschain                 text eol=lf
+**/etc/init.d/dnschain                 text eol=lf
+**/etc/uci-defaults/99-zz-dnschain     text eol=lf
+**/usr/bin/dnschain-reconcile          text eol=lf
+**/usr/bin/dnschain-selftest           text eol=lf
+**/etc/capabilities/dnschain-filter.json text eol=lf
+
 # package/ 下 vendored 包的全部文件（含无扩展名的 Makefile / LICENSE /
 # root/etc/config/* / root/etc/hotplug.d/* / root/etc/init.d/*）
 package/**                            text eol=lf

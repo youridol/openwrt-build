@@ -1,0 +1,257 @@
+#!/bin/sh /etc/rc.common
+# ============================================================
+# dnschain — DNS 链路框架服务脚本（procd）
+# ------------------------------------------------------------
+# 本文件由 openwrt-build 仓库 files/ overlay 提供（非上游源码）。
+# 设计依据：docs/adr/0003-dns-chain-framework.md
+#
+# 职责：
+#   1. 生成 /var/etc/dnschain/*（dnsproxy.args、filter.args、upstreams-domains.txt）
+#   2. procd 托管两个进程：
+#        dnsproxy   :5353  唯一路由型解析器（不缓存）
+#        chinadns-ng :5335 策略过滤器（不缓存）
+#   3. 写 fw4 片段：拒绝 LAN 出向 853（T2）
+#   4. 启动前做端口所有权与上游端口校验，失败即拒绝启动并说明原因
+#
+# 硬约束：
+#   - :5335 归本框架；SSR-Plus 必须处于模式 0 或 7（由收敛器强制）
+#   - 缓存只在 dnsmasq 一层（ADR §10.5）
+#   - /etc/nftables.d/*.nft 只能写裸 chain，禁止 table 声明（AGENTS 红线 7）
+# ============================================================
+
+START=95
+STOP=10
+USE_PROCD=1
+
+. /usr/share/dnschain/dnschain.sh
+
+PROG_DP="/usr/bin/dnsproxy"
+PROG_FILTER="/usr/bin/chinadns-ng"
+
+# fw4 片段（fw4 自动 include /etc/nftables.d/*.nft）
+DOT_NFT_FILE="/etc/nftables.d/15-dnschain-reject-dot.nft"
+
+# ------------------------------------------------------------
+# 生成全部运行时配置
+# ------------------------------------------------------------
+generate_all() {
+	mkdir -p "$DNSCHAIN_RUN_DIR" "$DNSCHAIN_STATE_DIR" || return 1
+
+	dnschain_log "生成 dnsproxy 域名上游文件..."
+	dc_gen_upstream_file >/dev/null || return 1
+
+	dnschain_log "生成 dnsproxy 参数..."
+	dc_gen_dnsproxy_args >/dev/null || return 1
+
+	dnschain_log "生成过滤器参数..."
+	dc_gen_filter_args >/dev/null || return 1
+
+	# 记录本次名单指纹，供收敛器判断是否需要重导
+	dc_lists_fingerprint > "$DNSCHAIN_STATE_DIR/lists.fingerprint"
+
+	return 0
+}
+
+# ------------------------------------------------------------
+# 启动前校验
+# 失败返回非 0，调用方须拒绝启动（禁止静默失败，AGENTS 红线 3）
+# ------------------------------------------------------------
+preflight() {
+	local port owner cn_up foreign_up bad rc
+
+	port=$(dc_filter_port)
+
+	# 1. 端口所有权：:5335 若被非框架进程占用（典型是 SSR-Plus 的
+	#    mosdns/dns2tcp/chinadns-ng），必须拒绝启动并指出是谁。
+	owner=$(dc_port_owner "$port" udp)
+	if [ -n "$owner" ] && ! dc_is_framework_filter "$owner"; then
+		dnschain_log "ERROR: 端口 ${port} 已被 PID ${owner} 占用，且不是框架的过滤器"
+		dnschain_log "ERROR: 请在 SSR-Plus 页面把「DNS 解析方式」改为「使用本机端口 5335 的 DNS 服务」"
+		dnschain_log "ERROR: （即 pdnsd_enable=0），或把本框架档案改为 coexist（过滤器用 :5337）"
+		return 1
+	fi
+
+	# 2. 上游端口必须落在 ss_spec_output 的 TCP 端口集内，
+	#    否则路由器自身出向不进代理、静默直连后被墙（ADR §10.8）
+	cn_up=$(dc_get_list cn server | tr '\n' ' ')
+	foreign_up=$(dc_get_list foreign server | tr '\n' ' ')
+
+	bad=$(dc_validate_upstream_ports $cn_up $foreign_up)
+	rc=$?
+	if [ "$rc" -ne 0 ]; then
+		dnschain_log "ERROR: 以下上游端口不在 ss_spec_output 的代理端口集内，"
+		dnschain_log "ERROR: 路由器自身出向不会被代理，国外域名会静默失败："
+		echo "$bad" | while read -r line; do
+			[ -n "$line" ] && dnschain_log "ERROR:   $line"
+		done
+		return 1
+	fi
+
+	# 3. 二进制必须存在
+	[ -x "$PROG_DP" ] || { dnschain_log "ERROR: 缺少 ${PROG_DP}"; return 1; }
+	[ -x "$PROG_FILTER" ] || { dnschain_log "ERROR: 缺少 ${PROG_FILTER}"; return 1; }
+
+	# 4. 域名上游文件非空（空文件意味着所有 gfw 域名都会走国内上游 → 污染）
+	if [ ! -s "$DNSCHAIN_RUN_DIR/upstreams-domains.txt" ]; then
+		dnschain_log "ERROR: upstreams-domains.txt 为空，gfw 域名会全部走国内上游（污染）"
+		dnschain_log "ERROR: 请确认 ${DNSCHAIN_SSR_CONF_DIR}/gfw_list.conf 或 /etc/ssrplus/gfw_list.conf 存在"
+		return 1
+	fi
+
+	return 0
+}
+
+# ------------------------------------------------------------
+# fw4 片段：拒绝 LAN 出向 853
+#
+# 为什么必须写：ss_spec_mangle prerouting 的优先级是 mangle(-150)，
+# 而 fw4 的 dns_intercept_lan 是 dstnat+1(-99)，tproxy 先执行。
+# 客户机自带 DoT 时会先进 :1234，拿到真实 AAAA 并绕过我们的抑制策略。
+#
+# 写法约束（AGENTS 红线 7）：只能写裸 chain，禁止 table 声明。
+#
+# 优先级 -151 已在路由器上实测（2026-10-20）：
+#   - 作为 fw4 include 的裸 chain（在 table inet fw4 内部）**语法有效**
+#   - nft 将其规范化为 `mangle - 1`，即比 mangle(-150) 更早执行
+#   - 单独 `nft -f` 一个裸 chain 会报语法错误（缺 table 上下文），
+#     但 fw4 的加载路径是 include 到 table 内，故写法正确
+#   - 实测加载后 `nft list chain` 显示 `priority mangle - 1`
+# ------------------------------------------------------------
+update_dot_reject() {
+	local dev enable
+
+	enable=$(dc_get main intercept_dot 1)
+	dev=$(uci -q get network.lan.device)
+	[ -z "$dev" ] && dev=$(uci -q get network.lan.ifname)
+	[ -z "$dev" ] && dev="br-lan"
+
+	mkdir -p /etc/nftables.d || return 1
+
+	if [ "$enable" = "1" ] && [ "$(dc_get main enabled 1)" = "1" ]; then
+		cat > "$DOT_NFT_FILE" <<-EOF
+			# dnschain: 拒绝 LAN 出向 853（由 init.d/dnschain 管理，勿手工编辑）
+			# 目的: 让自带 DoT 的客户端快速失败并回落明文 53，从而被 DNS 策略覆盖。
+			# 优先级 -151（nft 显示为 mangle - 1）先于 ss_spec_mangle 的
+			# mangle(-150)，否则 tproxy 会抢先。
+			# 裸 chain（fw4 在 table inet fw4 内部 include 本目录，禁止再写 table）。
+			chain dnschain_reject_dot {
+				type filter hook prerouting priority -151; policy accept;
+				iifname "$dev" tcp dport 853 reject comment "!dnschain: reject LAN DoT"
+				iifname "$dev" udp dport 853 reject comment "!dnschain: reject LAN DoQ"
+			}
+		EOF
+	else
+		# 关闭时不删文件，只清空为注释占位。
+		# 原因: fw4 对 /etc/nftables.d/*.nft 用 glob include，
+		#       目录为空会导致 include 无匹配、fw4 reload 失败。
+		cat > "$DOT_NFT_FILE" <<-EOF
+			# dnschain: LAN 出向 853 拒绝已关闭（由 init.d/dnschain 管理）
+		EOF
+	fi
+
+	# 触发 fw4 重载使规则生效/移除
+	if [ -x /etc/init.d/firewall ]; then
+		/etc/init.d/firewall reload >/dev/null 2>&1
+	fi
+}
+
+# ------------------------------------------------------------
+# 启动 dnsproxy（procd 实例）
+# ------------------------------------------------------------
+start_dnsproxy() {
+	local args
+
+	args=$(dc_args_to_cmdline "$DNSCHAIN_RUN_DIR/dnsproxy.args")
+	[ -n "$args" ] || { dnschain_log "ERROR: dnsproxy.args 为空"; return 1; }
+
+	procd_open_instance "dnsproxy"
+	procd_set_param command "$PROG_DP" $args
+	procd_set_param respawn 3600 5 5
+	procd_set_param stdout 1
+	procd_set_param stderr 1
+	# dnsproxy 需要读 /etc/hosts 与 CA 证书；不需要绑定低端口
+	procd_add_jail_mount "/etc/hosts"
+	procd_add_jail_mount "/etc/ssl/certs/ca-certificates.crt"
+	procd_add_jail_mount "$DNSCHAIN_RUN_DIR"
+	procd_close_instance
+}
+
+# ------------------------------------------------------------
+# 启动过滤器（procd 实例）
+# ------------------------------------------------------------
+start_filter() {
+	local args
+
+	args=$(dc_args_to_cmdline "$DNSCHAIN_RUN_DIR/filter.args")
+	[ -n "$args" ] || { dnschain_log "ERROR: filter.args 为空"; return 1; }
+
+	procd_open_instance "filter"
+	procd_set_param command "$PROG_FILTER" $args
+	procd_set_param respawn 3600 5 5
+	procd_set_param stdout 1
+	procd_set_param stderr 1
+	# -A 写 nftset 需要 CAP_NET_ADMIN
+	procd_set_param capabilities "/etc/capabilities/dnschain-filter.json"
+	procd_add_jail_mount "/etc/ssl/certs/ca-certificates.crt"
+	procd_add_jail_mount "$DNSCHAIN_RUN_DIR"
+	procd_close_instance
+}
+
+start_service() {
+	config_load "$DNSCHAIN_CONF"
+
+	if [ "$(dc_get main enabled 1)" != "1" ]; then
+		dnschain_log "框架未启用（dnschain.main.enabled=0），不启动任何进程"
+		update_dot_reject
+		return 0
+	fi
+
+	# 生成配置 → 校验 → 启动
+	generate_all || { dnschain_log "ERROR: 生成运行时配置失败，中止启动"; return 1; }
+
+	if ! preflight; then
+		dnschain_log "ERROR: 启动前校验失败，拒绝启动（禁止静默失败）"
+		return 1
+	fi
+
+	start_dnsproxy
+	start_filter
+
+	update_dot_reject
+
+	dnschain_log "已启动：dnsproxy :$(dc_get main entry_port 5353)、过滤器 :$(dc_filter_port)"
+
+	# 名单指纹留给收敛器比较
+	dc_lists_fingerprint > "$DNSCHAIN_STATE_DIR/lists.fingerprint" 2>/dev/null
+	return 0
+}
+
+stop_service() {
+	# procd 会负责杀进程；这里只清理 fw4 片段
+	# 注意：不删文件，清空为注释占位（理由同 update_dot_reject）
+	mkdir -p /etc/nftables.d 2>/dev/null
+	cat > "$DOT_NFT_FILE" <<-EOF
+		# dnschain: 服务已停止（由 init.d/dnschain 管理）
+	EOF
+	if [ -x /etc/init.d/firewall ]; then
+		/etc/init.d/firewall reload >/dev/null 2>&1
+	fi
+	dnschain_log "已停止"
+}
+
+reload_service() {
+	# 配置变更后重新生成并重启两个实例
+	config_load "$DNSCHAIN_CONF"
+	generate_all || return 1
+	if [ "$(dc_get main enabled 1)" = "1" ]; then
+		preflight || return 1
+	fi
+	update_dot_reject
+	# 让 procd 重启实例
+	stop
+	start
+}
+
+service_triggers() {
+	procd_add_reload_trigger "$DNSCHAIN_CONF"
+}

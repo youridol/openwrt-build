@@ -1,0 +1,331 @@
+msgid ""
+msgstr "Content-Type: text/plain; charset=UTF-8\n"
+
+msgid "DNS 链路"
+msgstr "DNS 链路"
+
+msgid ""
+"集中控制 DNS 解析链路。本页面只负责配置与校验，不实现解析逻辑——解析由 dnsproxy 与策略过滤器完成。"
+msgstr ""
+"集中控制 DNS 解析链路。本页面只负责配置与校验，不实现解析逻辑——解析由 dnsproxy 与策略过滤器完成。"
+
+msgid "概览"
+msgstr "概览"
+
+msgid "当前状态"
+msgstr "当前状态"
+
+msgid "链路状态"
+msgstr "链路状态"
+
+msgid "组件"
+msgstr "组件"
+
+msgid "端口"
+msgstr "端口"
+
+msgid "说明"
+msgstr "说明"
+
+msgid "fw4 DNS 劫持"
+msgstr "fw4 DNS 劫持"
+
+msgid "已拦截 LAN 的 53"
+msgstr "已拦截 LAN 的 53"
+
+msgid "规则缺失"
+msgstr "规则缺失"
+
+msgid "唯一缓存层 + DHCP"
+msgstr "唯一缓存层 + DHCP"
+
+msgid "未监听"
+msgstr "未监听"
+
+msgid "唯一路由入口"
+msgstr "唯一路由入口"
+
+msgid "策略过滤器"
+msgstr "策略过滤器"
+
+msgid "chinadns-ng，AAAA 抑制"
+msgstr "chinadns-ng，AAAA 抑制"
+
+msgid "被其他进程占用 (PID "
+msgstr "被其他进程占用 (PID "
+
+msgid "SSR-Plus 代理"
+msgstr "SSR-Plus 代理"
+
+msgid "透明代理"
+msgstr "透明代理"
+
+msgid "未运行 —— 国外域名将失败"
+msgstr "未运行 —— 国外域名将失败"
+
+msgid "缓存"
+msgstr "缓存"
+
+msgid "插入 %d / 本地应答 %d / 转发 %d"
+msgstr "插入 %d / 本地应答 %d / 转发 %d"
+
+msgid "dnsproxy 未监听 —— 客户机全部无法解析"
+msgstr "dnsproxy 未监听 —— 客户机全部无法解析"
+
+msgid "过滤器未监听 —— gfw 域名将 SERVFAIL，国内不受影响"
+msgstr "过滤器未监听 —— gfw 域名将 SERVFAIL，国内不受影响"
+
+msgid "过滤器端口被其他进程占用 —— gfw 域名会走错解析器"
+msgstr "过滤器端口被其他进程占用 —— gfw 域名会走错解析器"
+
+msgid "代理未运行 —— 国外域名将失败（国内不受影响）"
+msgstr "代理未运行 —— 国外域名将失败（国内不受影响）"
+
+msgid "链路正常"
+msgstr "链路正常"
+
+msgid "拦截总开关"
+msgstr "拦截总开关"
+
+msgid "强制拦截客户机 DNS"
+msgstr "强制拦截客户机 DNS"
+
+msgid ""
+"开启：拦截静态 IP 客户机与 DHCP 客户机的 53，DHCP 下发路由器自身地址。关闭：停用拦截规则，客户机自行解析；DHCP 客户机按下方「DHCP 下发 DNS」配置的地址解析。<br/><b>注意</b>：切换约 3 秒内新客户机拿不到地址、现有客户机 DNS 短暂中断（需重启 dnsmasq）。"
+msgstr ""
+"开启：拦截静态 IP 客户机与 DHCP 客户机的 53，DHCP 下发路由器自身地址。关闭：停用拦截规则，客户机自行解析；DHCP 客户机按下方「DHCP 下发 DNS」配置的地址解析。<br/><b>注意</b>：切换约 3 秒内新客户机拿不到地址、现有客户机 DNS 短暂中断（需重启 dnsmasq）。"
+
+msgid "启用 DNS 链路框架"
+msgstr "启用 DNS 链路框架"
+
+msgid "关闭后过滤器不再监听，gfw 域名会 SERVFAIL（不会回落明文上游）。"
+msgstr "关闭后过滤器不再监听，gfw 域名会 SERVFAIL（不会回落明文上游）。"
+
+msgid "拒绝 LAN 出向 853（DoT/DoQ）"
+msgstr "拒绝 LAN 出向 853（DoT/DoQ）"
+
+msgid ""
+"让自带 DoT 的客户端快速失败并回落明文 53，从而被本框架的策略覆盖。若不开启，客户端可能绕过 AAAA 抑制直接拿到真实 IPv6 地址。<br/><b>与「对客户机提供 DoH/DoT 服务端」互斥。</b>"
+msgstr ""
+"让自带 DoT 的客户端快速失败并回落明文 53，从而被本框架的策略覆盖。若不开启，客户端可能绕过 AAAA 抑制直接拿到真实 IPv6 地址。<br/><b>与「对客户机提供 DoH/DoT 服务端」互斥。</b>"
+
+msgid "DHCP 下发 DNS（明文）"
+msgstr "DHCP 下发 DNS（明文）"
+
+msgid "仅在「强制拦截客户机 DNS」关闭时下发给 DHCP 客户机。拦截开启时，DHCP 一律下发路由器自身地址。最多 4 个。"
+msgstr "仅在「强制拦截客户机 DNS」关闭时下发给 DHCP 客户机。拦截开启时，DHCP 一律下发路由器自身地址。最多 4 个。"
+
+msgid "启用自定义下发"
+msgstr "启用自定义下发"
+
+msgid "DNS 地址"
+msgstr "DNS 地址"
+
+msgid "解析策略"
+msgstr "解析策略"
+
+msgid ""
+"两侧上游都必须加密（DoT 或 DoH）。国外上游必须是 <b>IP 形式</b>——dnsproxy 不支持 socks5，只能靠 IP 层把连接送进代理；用域名形式会因 SNI 与目标 IP 不一致而握手失败。"
+msgstr ""
+"两侧上游都必须加密（DoT 或 DoH）。国外上游必须是 <b>IP 形式</b>——dnsproxy 不支持 socks5，只能靠 IP 层把连接送进代理；用域名形式会因 SNI 与目标 IP 不一致而握手失败。"
+
+msgid "上游服务器"
+msgstr "上游服务器"
+
+msgid "以下上游端口不在代理端口集内，路由器自身出向不会被代理："
+msgstr "以下上游端口不在代理端口集内，路由器自身出向不会被代理："
+
+msgid "校验上游证书"
+msgstr "校验上游证书"
+
+msgid "chinadns-ng 的 --cert-verify 默认关闭（只加密、不验证证书）。开启后要求上游证书含匹配的 IP SAN。"
+msgstr "chinadns-ng 的 --cert-verify 默认关闭（只加密、不验证证书）。开启后要求上游证书含匹配的 IP SAN。"
+
+msgid "经代理出站"
+msgstr "经代理出站"
+
+msgid "国外上游的连接走 SSR-Plus 的 OUTPUT 链。要求 access_control.router_proxy=1 且 dports 含 853。"
+msgstr "国外上游的连接走 SSR-Plus 的 OUTPUT 链。要求 access_control.router_proxy=1 且 dports 含 853。"
+
+msgid "双栈策略（只读）"
+msgstr "双栈策略（只读）"
+
+msgid "这两项表达的是不可配置的物理约束：国外节点通常只有 IPv4。若让国外域名拿到真实 AAAA，双栈客户端会走 IPv6 直连并被 RST。"
+msgstr "这两项表达的是不可配置的物理约束：国外节点通常只有 IPv4。若让国外域名拿到真实 AAAA，双栈客户端会走 IPv6 直连并被 RST。"
+
+msgid "国内 AAAA"
+msgstr "国内 AAAA"
+
+msgid "保留（国内双栈）"
+msgstr "保留（国内双栈）"
+
+msgid "国外 AAAA / HTTPS"
+msgstr "国外 AAAA / HTTPS"
+
+msgid "抑制（返回空答复 rcode=0 ancount=0，不是超时）"
+msgstr "抑制（返回空答复 rcode=0 ancount=0，不是超时）"
+
+msgid "国外 AAAA 是「1ms 空答复」，客户端会立刻回落查 A。只有收不到任何包才是超时（会卡住客户端 5 秒）。"
+msgstr "国外 AAAA 是「1ms 空答复」，客户端会立刻回落查 A。只有收不到任何包才是超时（会卡住客户端 5 秒）。"
+
+msgid "端口档案与 SSR-Plus 兼容"
+msgstr "端口档案与 SSR-Plus 兼容"
+
+msgid "端口档案"
+msgstr "端口档案"
+
+msgid "primary：过滤器占 :5335，SSR-Plus 必须处于模式 0 或 7。coexist：过滤器迁 :5337，适用于用户坚持选 SSR 模式 1/4/5/6 的场景。"
+msgstr "primary：过滤器占 :5335，SSR-Plus 必须处于模式 0 或 7。coexist：过滤器迁 :5337，适用于用户坚持选 SSR 模式 1/4/5/6 的场景。"
+
+msgid "primary（推荐）"
+msgstr "primary（推荐）"
+
+msgid "coexist（兼容）"
+msgstr "coexist（兼容）"
+
+msgid "当前 SSR-Plus DNS 模式"
+msgstr "当前 SSR-Plus DNS 模式"
+
+msgid "使用本机端口 5335 的 DNS 服务（不启后端，:5335 归框架）"
+msgstr "使用本机端口 5335 的 DNS 服务（不启后端，:5335 归框架）"
+
+msgid "使用 DNS2TCP 查询（会抢占 :5335）"
+msgstr "使用 DNS2TCP 查询（会抢占 :5335）"
+
+msgid "DNS2SOCKS（本固件未安装该后端）"
+msgstr "DNS2SOCKS（本固件未安装该后端）"
+
+msgid "RUST（本固件未安装该后端）"
+msgstr "RUST（本固件未安装该后端）"
+
+msgid "使用 MOSDNS 查询（会抢占 :5335）"
+msgstr "使用 MOSDNS 查询（会抢占 :5335）"
+
+msgid "使用 DNSPROXY 查询（会再起一个 dnsproxy 占 :5335）"
+msgstr "使用 DNSPROXY 查询（会再起一个 dnsproxy 占 :5335）"
+
+msgid "使用 ChinaDNS-NG 查询（会抢占 :5335，且全局过滤 AAAA）"
+msgstr "使用 ChinaDNS-NG 查询（会抢占 :5335，且全局过滤 AAAA）"
+
+msgid "优先使用模块内置 DNS（不绑 :5335）"
+msgstr "优先使用模块内置 DNS（不绑 :5335）"
+
+msgid "未知"
+msgstr "未知"
+
+msgid "SSR-Plus 兼容"
+msgstr "SSR-Plus 兼容"
+
+msgid "目标模式"
+msgstr "目标模式"
+
+msgid "0 — 使用本机端口 5335（推荐）"
+msgstr "0 — 使用本机端口 5335（推荐）"
+
+msgid "7 — 模块内置 DNS"
+msgstr "7 — 模块内置 DNS"
+
+msgid "强制写回"
+msgstr "强制写回"
+
+msgid "收敛器在开机、SSR 配置变更、定时三处重放不变量集。关闭后只告警、不修改 SSR-Plus 的键。"
+msgstr "收敛器在开机、SSR 配置变更、定时三处重放不变量集。关闭后只告警、不修改 SSR-Plus 的键。"
+
+msgid "名单与导入"
+msgstr "名单与导入"
+
+msgid "名单规模"
+msgstr "名单规模"
+
+msgid "GFW 源 %d 行 · 基础 %d 行 · 已导入 %d 条 · IDNA 跳过 %d 条<br/>最近更新：%s"
+msgstr "GFW 源 %d 行 · 基础 %d 行 · 已导入 %d 条 · IDNA 跳过 %d 条<br/>最近更新：%s"
+
+msgid "自动导入"
+msgstr "自动导入"
+
+msgid "SSR-Plus 更新名单后，收敛器按间隔轮询源文件指纹并自动重新导入。"
+msgstr "SSR-Plus 更新名单后，收敛器按间隔轮询源文件指纹并自动重新导入。"
+
+msgid "轮询间隔（秒）"
+msgstr "轮询间隔（秒）"
+
+msgid "重启阈值（%）"
+msgstr "重启阈值（%）"
+
+msgid "名单行数变化超过该百分比时才重启 dnsproxy（约 1 秒解析中断）。"
+msgstr "名单行数变化超过该百分比时才重启 dnsproxy（约 1 秒解析中断）。"
+
+msgid "缓存只在 dnsmasq 一层。dnsproxy 与过滤器都不缓存——三处并存会让同一域名出现两份答案（实测：经 :53 与直连 :5353 返回不同 IP）。"
+msgstr "缓存只在 dnsmasq 一层。dnsproxy 与过滤器都不缓存——三处并存会让同一域名出现两份答案（实测：经 :53 与直连 :5353 返回不同 IP）。"
+
+msgid "启用缓存"
+msgstr "启用缓存"
+
+msgid "条目数"
+msgstr "条目数"
+
+msgid "当前统计"
+msgstr "当前统计"
+
+msgid "取不到统计（dnsmasq 可能未运行）"
+msgstr "取不到统计（dnsmasq 可能未运行）"
+
+msgid "已插入 %d 条 · 本地应答 %d 次 · 已转发 %d 次 · 陈旧应答 %d 次"
+msgstr "已插入 %d 条 · 本地应答 %d 次 · 已转发 %d 次 · 陈旧应答 %d 次"
+
+msgid "自检"
+msgstr "自检"
+
+msgid "失败自动回滚"
+msgstr "失败自动回滚"
+
+msgid "定时自检间隔（秒）"
+msgstr "定时自检间隔（秒）"
+
+msgid "一键自检"
+msgstr "一键自检"
+
+msgid "结果"
+msgstr "结果"
+
+msgid "检查项"
+msgstr "检查项"
+
+msgid "证据"
+msgstr "证据"
+
+msgid "自检脚本未返回结果（可能未安装 dnschain-selftest）"
+msgstr "自检脚本未返回结果（可能未安装 dnschain-selftest）"
+
+msgid "操作"
+msgstr "操作"
+
+msgid "清空全部缓存"
+msgstr "清空全部缓存"
+
+msgid "发送 SIGHUP 清空 dnsmasq 缓存：进程不重启、客户机无感知。「清空指定域名」做不到——dnsmasq 与 dnsproxy 都没有按域名淘汰单条缓存的接口。"
+msgstr "发送 SIGHUP 清空 dnsmasq 缓存：进程不重启、客户机无感知。「清空指定域名」做不到——dnsmasq 与 dnsproxy 都没有按域名淘汰单条缓存的接口。"
+
+msgid "手动导入名单"
+msgstr "手动导入名单"
+
+msgid "立即从 SSR-Plus 的名单文件重新生成框架的域名文件。"
+msgstr "立即从 SSR-Plus 的名单文件重新生成框架的域名文件。"
+
+msgid "已导入"
+msgstr "已导入"
+
+msgid "立即更新 GFW 名单"
+msgstr "立即更新 GFW 名单"
+
+msgid "调用 SSR-Plus 的 update.lua 下载最新名单，完成后由收敛器自动导入。"
+msgstr "调用 SSR-Plus 的 update.lua 下载最新名单，完成后由收敛器自动导入。"
+
+msgid "一键归一"
+msgstr "一键归一"
+
+msgid "立即重放不变量集：把 SSR-Plus / dnsmasq / dnsproxy 的相关键归一到框架期望值。"
+msgstr "立即重放不变量集：把 SSR-Plus / dnsmasq / dnsproxy 的相关键归一到框架期望值。"
+
+msgid "已归一"
+msgstr "已归一"

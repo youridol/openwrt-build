@@ -255,8 +255,36 @@ update_lan_intercept() {
 	fi
 }
 
+# ============================================================
+# dnschain 让位检查
+# ------------------------------------------------------------
+# 当 DNS 链路框架（dnschain）启用时，**由 dnschain 独占托管 dnsproxy**：
+#   - dnschain 用 /var/etc/dnschain/dnsproxy.args 生成参数
+#   - 该参数集与本节按 UCI 拼出的参数**不同**（无 --cache / 无 --fallback，
+#     多一个域名分流文件），两者不能同时存在
+#   - 两个 procd 实例都绑 :5353 → 后起的那个静默失败
+#
+# 故框架启用时本服务退化为空壳：不做任何事，只打印一行说明。
+# 这是 ADR §13.1 的「dnschain 直接 procd 托管」写法。
+#
+# 判断依据是**配置意图**（dnschain.main.enabled=1），不是进程状态 ——
+# 开机时序下 procd 尚未拉起进程时用 pgrep 会误判（AGENTS §8 记录过）。
+# ============================================================
+dnschain_takes_over() {
+	[ "$(uci -q get dnschain.main.enabled 2>/dev/null)" = "1" ]
+}
+
 start_service() {
 	config_load "$CONF"
+
+	if dnschain_takes_over; then
+		echo "dnsproxy: 由 dnschain 框架托管，本服务不启动实例" \
+			"（dnschain.main.enabled=1）"
+		# 注意：**不**在这里调用 update_lan_intercept off ——
+		# LAN 拦截规则由框架自己的 fw4 片段与 dnsproxy 的 nft 片段共同维护，
+		# 框架启用时保留已有规则，避免误删导致客户机 DNS 不被劫持。
+		return 0
+	fi
 
 	is_enabled "global" "enabled" || {
 		# ALL_DOH: 服务未启用时同步移除拦截规则，避免强制失效链路
@@ -305,6 +333,10 @@ start_service() {
 stop_service() {
 	# ALL_DOH: 服务停止后移除拦截规则（否则客户端 DNS 被导向失效链路导致断网）
 	config_load "$CONF"
+
+	# 框架托管时本服务从未起过实例，也不该动拦截规则
+	dnschain_takes_over && return 0
+
 	update_lan_intercept off
 }
 
@@ -313,6 +345,13 @@ stop_service() {
 # - 运行中的 procd 实例参数由 config 变更 trigger 另行处理
 service_reload() {
 	config_load "$CONF"
+
+	# 框架托管时，转发给 dnschain 做真正的重载
+	if dnschain_takes_over; then
+		[ -x /etc/init.d/dnschain ] && /etc/init.d/dnschain reload
+		return 0
+	fi
+
 	update_lan_intercept auto
 }
 
