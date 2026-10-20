@@ -163,6 +163,37 @@ jobs:
         run: |
           cp -r ../openwrt-build/package/luci-app-trafficctl package/
 
+      - name: Add luci-app-dnschain (本地包，DNS 链路控制页面)
+        working-directory: lede
+        run: |
+          # v0.9.0 首次构建漏了这一步：package/luci-app-dnschain 从未被复制进
+          # lede/package/，也没在 .config 里启用 → 固件里一个页面文件都没有
+          # （实测：squashfs 里 luci-app-dnschain 相关条目数 = 0）。
+          # 症状极其隐蔽：构建全绿、artifact 正常产出，只是打开 LuCI 没有那个页面。
+          if [ ! -d ../openwrt-build/package/luci-app-dnschain ]; then
+            echo "!!! 缺少 ../openwrt-build/package/luci-app-dnschain" >&2
+            exit 1
+          fi
+          cp -r ../openwrt-build/package/luci-app-dnschain package/
+          echo "--- 已复制，目录内容 ---"
+          find package/luci-app-dnschain -type f | sort
+
+          # 断言关键文件都在（缺任一都说明包不完整）
+          for f in Makefile \
+                   luasrc/controller/dnschain.lua \
+                   luasrc/model/cbi/dnschain/general.lua \
+                   luasrc/model/cbi/dnschain/dnschain.lua \
+                   root/usr/share/luci/menu.d/luci-app-dnschain.json \
+                   root/usr/share/rpcd/acl.d/luci-app-dnschain.json \
+                   po/zh-cn/luci-app-dnschain.po ; do
+            if [ -f "package/luci-app-dnschain/$f" ]; then
+              echo "OK   $f"
+            else
+              echo "FAIL 缺少 package/luci-app-dnschain/$f" >&2
+              exit 1
+            fi
+          done
+
       - name: Verify invariants script is POSIX sh (dash) compatible
         working-directory: openwrt-build
         run: |
@@ -321,6 +352,17 @@ jobs:
           echo "CONFIG_PACKAGE_luci-app-trafficctl=y" >> .config
           echo "CONFIG_PACKAGE_luci-i18n-trafficctl-zh-cn=y" >> .config
 
+          # 启用 dnschain 控制页面及其中文语言包（v0.9.0）
+          # 包名推导规则同 trafficctl：LUCI_BASENAME=dnschain
+          #   → 语言包符号为 luci-i18n-dnschain-zh-cn
+          echo "CONFIG_PACKAGE_luci-app-dnschain=y" >> .config
+          echo "CONFIG_PACKAGE_luci-i18n-dnschain-zh-cn=y" >> .config
+
+          # dnschain 运行时依赖：chinadns-ng 由 SSR-Plus 的
+          # INCLUDE_ChinaDNS_NG 带入；这里显式再声明一次，避免 SSR-Plus
+          # 的 INCLUDE 开关将来被关掉时框架静默失去过滤器二进制。
+          echo "CONFIG_PACKAGE_chinadns-ng=y" >> .config
+
           # ALL_DOH: dnsproxy + luci-app-dnsproxy + CA 证书（https-dns-proxy 已彻底移除）
           # 二进制来自 helloworld feed(0.83.0)，init/config 来自 openwrt-build/files
           echo "CONFIG_PACKAGE_dnsproxy=y" >> .config
@@ -460,6 +502,33 @@ jobs:
               || echo "  (没有任何 hostapd/wpad 变体 → x86_64 无 WiFi)"
             echo "  提示：若上面既无 luci-app-trafficctl 也无 luci-i18n-*，则根因是"
             echo "        LUCI_DEPENDS 里含本目标不可满足的包（历史上是 hostapd-utils）。"
+            exit 1
+          fi
+
+          echo "=== dnschain 本体与中文语言包都必须入配置 ==="
+          # v0.9.0 首次构建的教训：只写了 package/luci-app-dnschain 却没在 CI 里
+          # 复制+启用 → 固件里一个页面文件都没有，而构建**全绿**。
+          # 只查「文件在仓库里」不够，必须查「符号进了 .config」。
+          # 符号推导同 trafficctl：LUCI_BASENAME=dnschain
+          #   → luci-i18n-dnschain-zh-cn
+          dfail=0
+          for sym in CONFIG_PACKAGE_luci-app-dnschain \
+                     CONFIG_PACKAGE_luci-i18n-dnschain-zh-cn \
+                     CONFIG_PACKAGE_chinadns-ng; do
+            if grep -q "^${sym}=y$" .config; then
+              echo "OK   ${sym}=y"
+            else
+              echo "FAIL ${sym} 未启用"
+              dfail=1
+            fi
+          done
+          if [ "$dfail" != "0" ]; then
+            echo "--- .config 中与 dnschain 有关的全部符号 ---"
+            grep -E "dnschain" .config || echo "  (一条都没有 → 包被依赖求解整体丢弃)"
+            echo "--- .config 中与 chinadns-ng 有关的全部符号 ---"
+            grep -E "chinadns" .config || echo "  (一条都没有)"
+            echo "  提示：若 luci-app-dnschain 一条都没有，检查 package/ 是否已复制进"
+            echo "        lede/package/（见 'Add luci-app-dnschain' 步骤）。"
             exit 1
           fi
 

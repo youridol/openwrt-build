@@ -25,12 +25,17 @@
 | E4 | 判断进程存在**不能用 `pgrep -x <名字>`** | SSR-Plus 的二进制以完整路径运行，`pgrep -x` 恒为 0 |
 | E5 | 改配置前先备份 `/etc/config/*` 与 `/var/etc/dnschain/*` | 回滚需要（AGENTS §6 第 10 条） |
 | E6 | 结论必须来自**命令输出**，不能来自「配置里写了」 | 旧 ADR 的失败根源正是把设计意图当既成事实 |
+| E7 | **overlay 文件在 ≠ 功能在**。必须分两层查：`files/` 的 overlay 与 `package/` 的 LuCI 页面 | v0.9.0 首次构建：10 个 overlay 文件全部就位，但 LuCI 页面**一个都没有**，而构建全绿 |
+| E8 | 验证固件内容**不能用 `unsquashfs -l <path>`** | 该命令对**不存在的路径也返回 0**（实测），会把缺失误报成存在。用 `-ll` 列全量再 grep |
 
 ---
 
 ## 1. 刷机后首次检查（组件是否就位）
 
-### 1.1 文件就位
+> **本节分两层。** v0.9.0 首次构建只验了第一层（overlay 文件），漏了第二层
+> （LuCI 页面），结果刷完机「文件都在、页面没有」。两层都要查。
+
+### 1.1 第一层：overlay 文件（`files/` 提供）
 
 ```sh
 for f in /etc/config/dnschain \
@@ -49,7 +54,35 @@ done
 |---|---|
 | 8 项全 `OK` | 有 `MISS` → overlay 未合并，或 CI 未把文件打进固件 |
 
-### 1.2 执行位
+### 1.2 第二层：LuCI 页面（`package/luci-app-dnschain` 提供）
+
+**这一层必须单独查。** 它由 opkg 包安装，与 `files/` overlay 是两条独立的路径；
+包没编进去时，overlay 文件依然全在。
+
+```sh
+# 包是否安装
+opkg list-installed | grep -E 'luci-app-dnschain|luci-i18n-dnschain'
+
+# 页面文件是否就位（6 个关键文件）
+for f in /usr/share/luci/menu.d/luci-app-dnschain.json \
+         /usr/share/rpcd/acl.d/luci-app-dnschain.json \
+         /usr/lib/lua/luci/controller/dnschain.lua \
+         /usr/lib/lua/luci/model/cbi/dnschain/general.lua \
+         /usr/lib/lua/luci/model/cbi/dnschain/dnschain.lua \
+         /usr/lib/lua/luci/i18n/dnschain.zh-cn.lmo; do
+  [ -e "$f" ] && echo "OK   $f" || echo "MISS $f"
+done
+```
+
+| 期望 | 失败含义 |
+|---|---|
+| `opkg` 有 `luci-app-dnschain` 与 `luci-i18n-dnschain-zh-cn` | 包未编入 → CI 的 `Add luci-app-dnschain` 步骤缺失，或 `.config` 里符号被依赖求解丢弃（查 CI 日志 `=== dnschain 本体与中文语言包都必须入配置 ===`） |
+| 6 个文件全 `OK` | 有 `MISS` → 包装了但内容不全，检查 `package/luci-app-dnschain/` 的 `root/` 与 `luasrc/` 布局 |
+
+**最后确认页面真的能打开**：浏览器访问 `http://192.168.3.254/cgi-bin/luci/admin/network/dns_chain`。
+返回 404 或空白 → 页面没注册；能打开但显示英文 → i18n 包缺失。
+
+### 1.3 执行位
 
 ```sh
 ls -l /etc/init.d/dnschain /usr/bin/dnschain-reconcile /usr/bin/dnschain-selftest
@@ -59,15 +92,16 @@ ls -l /etc/init.d/dnschain /usr/bin/dnschain-reconcile /usr/bin/dnschain-selftes
 |---|---|
 | 三者均 `-rwxr-xr-x` | 缺 `x` → CI 的 `chmod +x` 清单没覆盖到，服务起不来 |
 
-### 1.3 包是否编入
+### 1.4 运行时依赖包
 
 ```sh
-opkg list-installed | grep -E 'luci-app-dnschain|chinadns-ng|dnsproxy'
+opkg list-installed | grep -E 'luci-app-dnschain|luci-i18n-dnschain|chinadns-ng|dnsproxy|dns2tcp'
 ```
 
 | 期望 | 失败含义 |
 |---|---|
-| `luci-app-dnschain` 存在、`chinadns-ng` 存在、`dnsproxy` 版本 `0.83.0` | 缺 `luci-app-dnschain` → `.config` 未启用该包（检查 `CONFIG_PACKAGE_luci-app-dnschain=y`） |
+| `chinadns-ng` 存在（版本 `2025.06.20-1`）、`dnsproxy` 为 `0.83.0` | 缺 `chinadns-ng` → 过滤器起不来；CI 已显式 `CONFIG_PACKAGE_chinadns-ng=y` 兜底 |
+| `dnsproxy` 是 `0.83.0` 而非 `0.56.2` | 版本错 → CI 的 `Align dnsproxy feed link` 失效 |
 
 ---
 
@@ -523,9 +557,10 @@ ls -d /root/dnschain-backup-* 2>/dev/null
 
 | # | 检查项 | 命令出处 | 结果 | 备注 |
 |---|---|---|---|---|
-| 1.1 | 8 个文件就位 | §1.1 | ☐ PASS ☐ FAIL | |
-| 1.2 | 执行位 | §1.2 | ☐ PASS ☐ FAIL | |
-| 1.3 | 包已编入 | §1.3 | ☐ PASS ☐ FAIL | |
+| 1.1 | overlay 8 个文件就位 | §1.1 | ☐ PASS ☐ FAIL | |
+| 1.2 | **LuCI 页面 6 个文件 + opkg 包** | §1.2 | ☐ PASS ☐ FAIL | **v0.9.0 曾整层缺失** |
+| 1.3 | 执行位 | §1.3 | ☐ PASS ☐ FAIL | |
+| 1.4 | 运行时依赖包版本 | §1.4 | ☐ PASS ☐ FAIL | |
 | 2.1 | 端口监听 | §2.1 | ☐ PASS ☐ FAIL | |
 | 2.2 | `:5335` 属 chinadns-ng | §2.2 | ☐ PASS ☐ FAIL | |
 | 2.3 | SSR 三个键 | §2.3 | ☐ PASS ☐ FAIL | |
@@ -545,6 +580,61 @@ ls -d /root/dnschain-backup-* 2>/dev/null
 | 9 | 降级矩阵 | §9 | ☐ PASS ☐ FAIL | 可选 |
 
 **全部 PASS 后**，才算「框架真的落地」。任一项 FAIL，按 §10 排查并在备注里记下 `logread | grep dnschain` 的相关行。
+
+---
+
+## 12.1 构建产物预检（刷机**前**做，不必等刷完）
+
+刷机前就能确认产物是否完整，避免「刷完才发现页面没有」。
+在**能读固件的机器上**执行（Linux 或 WSL）。
+
+```sh
+# 1. 解出 squashfs（偏移随镜像不同，用这条命令找）
+IMG=openwrt-x86-64-ssrplus-vX.Y.Z-abcdef0-squashfs-combined-efi.img.gz
+gunzip -c "$IMG" > /tmp/fw.img
+OFF=$(python3 - <<'PY'
+data = open('/tmp/fw.img','rb').read(1024*1024*16)
+i = data.find(b'hsqs')
+print(i if i >= 0 else -1)
+PY
+)
+echo "squashfs 偏移: $OFF"
+tail -c +$((OFF + 1)) /tmp/fw.img > /tmp/root.squashfs
+
+# 2. 列出全部 dnschain 相关条目（含权限）
+unsquashfs -ll /tmp/root.squashfs | grep -E 'dnschain|applechina'
+
+# 3. 逐项核对（数量与权限）
+unsquashfs -ll /tmp/root.squashfs | grep -cE 'dnschain'          # 期望 >= 14
+unsquashfs -ll /tmp/root.squashfs | grep 'init.d/dnschain'       # 期望 -rwxr-xr-x
+unsquashfs -ll /tmp/root.squashfs | grep 'rc.d/S95dnschain'      # 期望 symlink 存在
+unsquashfs -ll /tmp/root.squashfs | grep 'luci/menu.d/luci-app-dnschain.json'  # 期望存在
+```
+
+**⚠️ 不要用 `unsquashfs -l <path>` 判断单个文件是否存在。**
+实测该命令对**不存在的路径也返回 0**，会把缺失误报成存在
+（v0.9.0 我就因此把「LuCI 页面全缺」误判成「13 项全 OK」）。
+必须用 `-ll` 列全量再 grep。
+
+| 期望条目 | 说明 |
+|---|---|
+| `etc/config/dnschain` | overlay |
+| `etc/init.d/dnschain` | 权限 `-rwxr-xr-x` |
+| `etc/rc.d/S95dnschain` + `K10dnschain` | symlink，说明已 enable |
+| `etc/uci-defaults/99-zz-dnschain` | 权限 `-rwxr-xr-x` |
+| `etc/capabilities/dnschain-filter.json` | |
+| `etc/ssrplus/applechina.conf` | 9411 字节左右 |
+| `usr/bin/dnschain-reconcile` | 权限 `-rwxr-xr-x` |
+| `usr/bin/dnschain-selftest` | 权限 `-rwxr-xr-x` |
+| `usr/share/dnschain/dnschain.sh` | 权限 `-rwxr-xr-x` |
+| `usr/share/luci/menu.d/luci-app-dnschain.json` | **LuCI 页面（v0.9.0 曾整层缺失）** |
+| `usr/share/rpcd/acl.d/luci-app-dnschain.json` | **同上** |
+| `usr/lib/lua/luci/controller/dnschain.lua` | **同上** |
+| `usr/lib/lua/luci/model/cbi/dnschain/general.lua` | **同上** |
+| `usr/lib/lua/luci/model/cbi/dnschain/dnschain.lua` | **同上** |
+
+任一项缺失 → 不要刷机，先查 CI 日志的
+`=== dnschain 本体与中文语言包都必须入配置 ===` 与 `Add luci-app-dnschain` 两段。
 
 ---
 

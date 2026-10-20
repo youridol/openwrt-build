@@ -63,6 +63,81 @@
 `pct=$(( delta * 100 / old_lines ))` 这类**合法的 POSIX 算术展开**也判成违规，
 导致构建必然失败。已改为「行首或 `;`/`&&`/`||` 之后紧跟 `((` 且不是 `$((`」才判定。
 
+### 修复 — 三次构建失败/缺陷的根因与处置（v0.9.0 出包前）
+
+本版共触发 3 次构建，前两次失败或产物不完整。三次的根因各不相同，
+且**都属于「本地校验看不出来」的类型**，值得逐条记录。
+
+#### (1) `Verify dnschain framework contracts` 找不到 ADR 文档
+
+```
+FAIL 缺少 docs/adr/0003-dns-chain-framework.md
+FAIL 缺少 docs/adr/0004-dns-chain-verification.md
+```
+
+根因：该步骤 `working-directory: lede`，而 `docs/` 在**仓库根**（与 lede 同级）。
+`docs/...` 指到了 `lede/docs/`（lede 源码自带目录），里面没有本仓库的 ADR。
+
+修法：改用 `../openwrt-build/docs/...`，与 CI 里其他引用仓库根文件的地方
+（`../openwrt-build/patches/`、`../openwrt-build/package/`）一致。
+
+**新增 `tools/verify-dnschain-ci-sim.sh`**：本地复现 CI 的工作目录
+（`lede/` + `files/` 已复制）再跑同一段校验。原因：
+
+| 本地跑法 | 结果 | 是否等价 CI |
+|---|---|---|
+| 在仓库根跑 | 全部通过 | **否**（没验证 lede/ 场景） |
+| 在 lede/ 跑但没复制 files/ | 全部 FAIL | 否（CI 会先复制） |
+| lede/ + files/ 已复制 | 与 CI 一致 | **是** |
+
+#### (2) 产物版本号静默错位（`v0.8.6` 而非 `v0.9.0`）
+
+产物名是 `openwrt-x86-64-ssrplus-v0.8.6-f39f3cd`。
+
+根因：CI 用 `grep -m1 '^## \[v'` 取 CHANGELOG 第一个**带 `[v` 的**标题。
+CHANGELOG 顶部写的是 `## [未发布]`，不匹配 `[v`，于是被跳过，
+取到了下面的 `## [v0.8.6]`。**整个过程零报错**。
+
+修法两处：
+1. CHANGELOG 顶部标题改为 `## [v0.9.0] - 2026-10-20`
+2. `Resolve version from CHANGELOG` 加断言：第一条 `## [` 标题必须就是版本标题，
+   否则 `exit 1` 并打印两条标题
+
+反向验证：改回 `[未发布]` → `EXIT=1`；改回 `v0.9.0` → `EXIT=0`。
+
+#### (3) LuCI 页面整层缺失（最隐蔽的一处）
+
+固件产物 245 MB、30 个步骤全绿、`Assert firmware artifact exists` 通过，
+但解包后发现 **`luci-app-dnschain` 相关条目数 = 0** —— 页面一个文件都没编进去。
+
+根因：CI 只写了 `Add luci-app-trafficctl` 的复制步骤，
+**从未复制 `package/luci-app-dnschain`**，也没在 `.config` 里启用它。
+
+修法三处：
+1. 新增 `Add luci-app-dnschain` 步骤（复制 + 7 个关键文件断言）
+2. `.config` 增加 `luci-app-dnschain=y`、`luci-i18n-dnschain-zh-cn=y`、
+   `chinadns-ng=y`
+3. `Verify SQM / i18n` 步骤加 `=== dnschain 本体与中文语言包都必须入配置 ===`
+   断言块（符号被依赖求解丢弃时构建失败，而不是静默出包）
+
+**验证方法本身也错了两次**，同样记录：
+
+| 错误做法 | 后果 |
+|---|---|
+| 用 `unsquashfs -l <path>` 判断单文件是否存在 | 该命令对**不存在的路径也返回 0**，把「13 项全缺」误报成「13 项全 OK」 |
+| 用 `unsquashfs -d <dir> <file> <多个路径>` | 该版本（4.5）不按预期提取，解出 0 个文件 |
+
+正确做法：`unsquashfs -ll` 列**全量**清单再 grep，同时能看到权限位。
+
+#### 由此新增的两条验证纪律（写入 ADR-0004 §0 的 E7/E8）
+
+- **E7：overlay 文件在 ≠ 功能在。** 必须分两层查——`files/` 的 overlay
+  与 `package/` 的 LuCI 页面。两条路径独立，包没编进去时 overlay 依然全在。
+- **E8：不能用 `unsquashfs -l <path>` 判断存在性。** 用 `-ll` 列全量再 grep。
+
+ADR-0004 相应新增 §1.2（第二层：LuCI 页面）、§12.1（刷机前的产物预检），
+并把 §12 记录表从 20 项扩到 21 项。
+
 ### 测试中发现并修掉的缺陷（骨架阶段）
 
 | # | 项目 | 方式 | 结果 |
