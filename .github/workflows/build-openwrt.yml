@@ -763,11 +763,15 @@ jobs:
           fi
 
           # ── 14. 验证 ADR 文档存在 ──────────────────────────────────
+          # 注意: 本步骤的 working-directory 是 lede，而 docs/ 在**仓库根**
+          # （与 lede 同级）。故必须用 ../openwrt-build/ 前缀 ——
+          # 直接用 docs/... 会指到 lede/docs/，那是 lede 源码自带的目录，
+          # 里面没有我们的 ADR（v0.9.0 首次构建因此失败）。
           for doc in docs/adr/0003-dns-chain-framework.md docs/adr/0004-dns-chain-verification.md; do
-            if [ -f "$doc" ]; then
+            if [ -f "../openwrt-build/$doc" ]; then
               echo "OK   文档存在 $doc"
             else
-              echo "FAIL 缺少 $doc"
+              echo "FAIL 缺少 $doc（在 ../openwrt-build/ 下未找到）"
               rc=1
             fi
           done
