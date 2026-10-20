@@ -96,6 +96,24 @@ jobs:
               exit 1
               ;;
           esac
+
+          # ── 防止版本号静默错位（v0.9.0 首次构建踩过）─────────────
+          # 上面的 grep 用 '^## \[v' 取第一条**带 [v 的**标题。
+          # 若 CHANGELOG 顶部写成 `## [未发布]`，它不匹配 `[v`，于是被跳过，
+          # 结果取到了下面那个**旧版本**，产物名变成旧版本号 —— 构建全程无报错，
+          # 只有产物的文件名能看出来（v0.9.0 首次构建产物名是 v0.8.6-f39f3cd）。
+          #
+          # 判据：第一条 `## [` 标题必须就是 `## [v...`。
+          FIRST_H2="$(grep -m1 '^## \[' CHANGELOG.md || true)"
+          if [ "$FIRST_H2" != "$VER_LINE" ]; then
+            echo "!!! CHANGELOG 第一条 '## [' 标题不是版本标题，版本号会静默错位" >&2
+            echo "    第一条: [$FIRST_H2]" >&2
+            echo "    取到的: [$VER_LINE]" >&2
+            echo "    修法: 把顶部的「未发布」等占位标题改成 '## [vX.Y.Z] - YYYY-MM-DD'" >&2
+            exit 1
+          fi
+          echo "OK   版本标题位于 CHANGELOG 首条 '## [' 位置"
+
           VERSION_NOV="${VERSION#v}"
           # 构建号：短 SHA，便于同一版本多次构建时区分
           SHORT_SHA="$(printf '%s' "${GITHUB_SHA}" | cut -c1-7)"
