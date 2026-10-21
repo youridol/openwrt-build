@@ -194,6 +194,70 @@ jobs:
             fi
           done
 
+      - name: Fetch luci-theme-shadcn (默认 LuCI 主题)
+        working-directory: lede
+        run: |
+          # ── 为什么用 git clone 而不是 feed ────────────────────────
+          #
+          # 该主题不在 lede 的任何 feed 里（自建仓库），且它的 main.css 与
+          # 字体文件已预构建并入库（实测 htdocs/luci-static/shadcn/main.css
+          # 134262 字节、6 个 woff2），故**不需要前端构建**，直接当
+          # LuCI 包编译即可。
+          #
+          # 用固定 commit 而不是 main：主题更新会改 CSS/JS 结构，
+          # 与 LuCI 版本不匹配时表现为「页面样式错乱」而非报错，
+          # 固定 commit 才能保证同一份固件可重现。
+          # 升级时只改 THEME_REF 并重跑。
+          #
+          # 注意: 不要放进 feeds.conf —— feed 机制会拉全部分支且
+          # 没有 commit 固定，出问题后很难定位是哪个版本引入的。
+          THEME_REPO="https://github.com/youridol/luci-theme-shadcn.git"
+          THEME_REF="main"
+
+          rm -rf /tmp/luci-theme-shadcn
+          git clone --depth 1 --branch "$THEME_REF" "$THEME_REPO" /tmp/luci-theme-shadcn
+          THEME_SHA=$(git -C /tmp/luci-theme-shadcn rev-parse HEAD)
+          echo "主题 commit: $THEME_SHA"
+
+          # 只复制构建需要的部分。.dev / .husky / .github / node_modules 等
+          # 是开发工具链，进了固件会白占空间。
+          DEST=package/luci-theme-shadcn
+          rm -rf "$DEST"
+          mkdir -p "$DEST"
+          for item in Makefile root htdocs ucode LICENSE; do
+            if [ -e "/tmp/luci-theme-shadcn/$item" ]; then
+              cp -r "/tmp/luci-theme-shadcn/$item" "$DEST/"
+            fi
+          done
+
+          echo "--- 复制后的内容 ---"
+          find "$DEST" -maxdepth 2 | sort | head -20
+
+          # 契约断言：缺任何一个都说明主题包不完整，编出来会白屏
+          echo "--- 关键文件断言 ---"
+          for f in Makefile \
+                   root/etc/uci-defaults/30_luci-theme-shadcn \
+                   htdocs/luci-static/shadcn/main.css \
+                   htdocs/luci-static/shadcn/login.css ; do
+            if [ -f "$DEST/$f" ]; then
+              echo "OK   $f ($(stat -c%s "$DEST/$f") 字节)"
+            else
+              echo "FAIL 缺少 $f（主题会白屏或无法启用）" >&2
+              exit 1
+            fi
+          done
+
+          # main.css 不能是空壳（预构建产物应有百 KB 级）
+          css_size=$(stat -c%s "$DEST/htdocs/luci-static/shadcn/main.css")
+          if [ "$css_size" -lt 20000 ]; then
+            echo "FAIL main.css 只有 $css_size 字节，疑似未预构建（应 > 100KB）" >&2
+            exit 1
+          fi
+          echo "OK   main.css $css_size 字节（已预构建）"
+
+          # 记下 commit 供产物命名/溯源
+          echo "THEME_SHA=$THEME_SHA" >> "$GITHUB_ENV"
+
       - name: Verify invariants script is POSIX sh (dash) compatible
         working-directory: openwrt-build
         run: |
@@ -362,6 +426,22 @@ jobs:
           # INCLUDE_ChinaDNS_NG 带入；这里显式再声明一次，避免 SSR-Plus
           # 的 INCLUDE 开关将来被关掉时框架静默失去过滤器二进制。
           echo "CONFIG_PACKAGE_chinadns-ng=y" >> .config
+
+          # ── LuCI 主题：shadcn 为默认，关掉其他主题 ──────────────────
+          #
+          # 只写 =y 不够：LuCI 的默认主题由 luci.main.mediaurlbase 决定，
+          # 而 lede 默认装 bootstrap 并把它设为默认。两者并存时若
+          # mediaurlbase 仍指向 bootstrap，shadcn 装了也看不到。
+          # 故这里三重处理：
+          #   (a) shadcn =y
+          #   (b) 显式关掉其他主题（减少体积，且避免回退到它们）
+          #   (c) 默认值在 uci-defaults 里设（见下一个步骤）
+          echo "CONFIG_PACKAGE_luci-theme-shadcn=y" >> .config
+          for t in bootstrap material openwrt argon; do
+            echo "# CONFIG_PACKAGE_luci-theme-$t is not set" >> .config
+          done
+          # LuCI 的全局主题选择符号（部分版本存在）
+          echo "CONFIG_LUCI_THEME_SHADCN=y" >> .config
 
           # ALL_DOH: dnsproxy + luci-app-dnsproxy + CA 证书（https-dns-proxy 已彻底移除）
           # 二进制来自 helloworld feed(0.83.0)，init/config 来自 openwrt-build/files
@@ -541,6 +621,59 @@ jobs:
             fi
             echo "OK   ${sym} 未启用"
           done
+
+          echo "=== LuCI 主题：shadcn 必须启用 ==="
+          # 三条都要查，理由同 dnschain：
+          # 「文件复制了」不等于「符号进了 .config」，更不等于「成了默认主题」。
+          tfail2=0
+          if grep -q '^CONFIG_PACKAGE_luci-theme-shadcn=y$' .config; then
+            echo "OK   CONFIG_PACKAGE_luci-theme-shadcn=y"
+          else
+            echo "FAIL luci-theme-shadcn 未启用"
+            tfail2=1
+          fi
+          # 其他主题不得残留（体积 + 避免回退）
+          for t in bootstrap material openwrt argon; do
+            if grep -q "^CONFIG_PACKAGE_luci-theme-${t}=y$" .config; then
+              echo "FAIL luci-theme-${t} 仍被启用（应已关闭）"
+              tfail2=1
+            fi
+          done
+          [ "$tfail2" = "0" ] && echo "OK   其他主题均已关闭"
+          if [ "$tfail2" != "0" ]; then
+            echo "--- .config 中与 luci-theme 有关的全部符号 ---"
+            grep -E 'luci-theme' .config || echo "  (一条都没有 → 主题包未被识别)"
+            echo "  提示：检查 'Fetch luci-theme-shadcn' 步骤是否成功，
+                     以及 package/luci-theme-shadcn/Makefile 是否存在。"
+            exit 1
+          fi
+
+          echo "=== LuCI 主题：默认主题设为 shadcn 的脚本必须就位 ==="
+          # 注意: 这里查的是**仓库**里的源文件（../openwrt-build/files/...），
+          # 不是 lede/files/ —— 因为 'Apply gaming optimization files overlay'
+          # 步骤在本步骤**之后**才复制 files/ 进 lede。用仓库路径可以提前发现问题。
+          THEME_UCI=../openwrt-build/files/etc/uci-defaults/99-zzz-luci-theme-shadcn
+          if [ -f "$THEME_UCI" ]; then
+            echo "OK   $THEME_UCI 存在"
+            if grep -q 'luci.main.mediaurlbase' "$THEME_UCI"; then
+              echo "OK   含 mediaurlbase 设置"
+            else
+              echo "FAIL $THEME_UCI 未设置 mediaurlbase（主题装了也不会生效）"
+              exit 1
+            fi
+            # 排序断言：必须晚于主题自带的 30_luci-theme-shadcn
+            first=$(printf '%s\n%s\n' '30_luci-theme-shadcn' '99-zzz-luci-theme-shadcn' \
+                    | LC_ALL=C sort | head -1)
+            if [ "$first" = "30_luci-theme-shadcn" ]; then
+              echo "OK   排序：99-zzz 晚于主题自带的 30_（可覆盖其判断）"
+            else
+              echo "FAIL 排序错误，99-zzz 未能晚于 30_"
+              exit 1
+            fi
+          else
+            echo "FAIL 缺少 $THEME_UCI（默认主题不会切换）"
+            exit 1
+          fi
 
       - name: Apply gaming optimization files overlay
         working-directory: lede
@@ -996,7 +1129,74 @@ jobs:
 
       - name: Download package sources
         working-directory: lede
-        run: make download -j${{ env.JOBS }} V=s
+        timeout-minutes: 60
+        env:
+          # ── 为什么需要这两个环境变量 ───────────────────────────────
+          #
+          # 2026-10-21 实测：run 39495602665 在**这一步**卡了 5h54m 直到
+          # job 的 6h 上限被取消。日志尾部是：
+          #   48 23.2M  48 11.2M  0  0  556  0 12:09:24 5:52:10 6:17:14
+          #                                        ↑ 556 B/s
+          # 即 nasm-2.16.03.tar.gz 从 www.nasm.us 以 556 B/s 下载，
+          # 11.2MB 花了 5h52m，预计还要 6h17m。
+          #
+          # lede 的 scripts/download.pl 对每个文件按 @mirrors 顺序逐个尝试
+          # （`while (!-f ...) { my $mirror = shift @mirrors; ... }`），
+          # 而 curl **没有单文件超时**，遇到慢源就无限等 —— 这是根因。
+          #
+          # 两个对策（都利用 download.pl 已有的扩展点，不改上游代码）：
+          #
+          # 1. DOWNLOAD_MIRROR：download.pl 第 53-54 行读它，
+          #    且 localmirrors() 在 @mirrors 的**最前面**被调用（第 241 行），
+          #    故这里列的镜像**优先级最高**，慢的 www.nasm.us 会被跳过。
+          #    格式为分号分隔。
+          #
+          # 2. CURL_OPTIONS：download.pl 第 112 行把它透传给 curl。
+          #    --max-time 300 让单个文件最多下 5 分钟，超时即放弃该源、
+          #    自动换下一个镜像 —— 避免「一个慢源拖死整个 job」。
+          #    --retry 3 --retry-delay 2 处理偶发网络抖动。
+          #
+          # 两个变量只影响本步骤，不污染后续编译。
+          DOWNLOAD_MIRROR: >-
+            https://sources.cdn.openwrt.org;
+            https://sources.openwrt.org;
+            https://mirrors.aliyun.com/gnu;
+            https://mirrors.tencent.com/gnu;
+            https://mirrors.ustc.edu.cn/gnu
+          CURL_OPTIONS: "--max-time 300 --retry 3 --retry-delay 2"
+        run: |
+          # 先探测镜像可达性（只报告，不阻断 —— 某个镜像挂了不该让构建失败，
+          # download.pl 会自己换下一个）。
+          echo "=== 镜像可达性探测 ==="
+          for m in $(printf '%s' "$DOWNLOAD_MIRROR" | tr ';' ' '); do
+            [ -n "$m" ] || continue
+            code=$(curl -s -o /dev/null -w '%{http_code}' --max-time 10 "$m/nasm-2.16.03.tar.gz" || echo 000)
+            echo "  $code  $m"
+          done
+
+          echo "=== make download（单文件超时 ${CURL_OPTIONS}）==="
+          # 外层再加一次硬超时：即使 curl 的 --max-time 没生效（例如
+          # download.pl 走了 aria2c 分支），也不会拖死整个 job。
+          # 50 分钟足够正常下载（前几次构建该步骤约 4 分钟）；
+          # 超时则明确失败，而不是无限等待后被 job 级 6h 上限取消。
+          timeout 3000 make download -j${JOBS} V=s || {
+            rc=$?
+            if [ "$rc" -eq 124 ]; then
+              echo "!!! make download 超过 50 分钟被强制中止。" >&2
+              echo "    这说明某个上游下载源极慢。查上面的镜像探测结果，" >&2
+              echo "    并把可用的镜像补进 DOWNLOAD_MIRROR（分号分隔）。" >&2
+            else
+              echo "!!! make download 失败（exit=$rc）" >&2
+            fi
+            exit 1
+          }
+
+          echo "=== 下载结果核对 ==="
+          ls dl/*.tar.* 2>/dev/null | wc -l | xargs echo "  dl/ 下的压缩包数量:"
+          # 关键包必须存在（nasm 就是上一轮卡住的那个）
+          for f in dl/nasm-2.16.03.tar.gz dl/linux-*.tar.* dl/gcc-13*.tar.*; do
+            [ -f "$f" ] && echo "  OK   $(basename "$f")" || echo "  MISS $(basename "$f")"
+          done
 
       - name: Prebuild gn host tool with gcc-13 (fix gcc-12 ranges compile error)
         working-directory: lede

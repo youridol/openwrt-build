@@ -61,6 +61,10 @@
 **/usr/bin/dnschain-selftest           text eol=lf
 **/etc/capabilities/dnschain-filter.json text eol=lf
 
+# LuCI 主题 shadcn（设为默认主题）
+# 无扩展名脚本，必须强制 LF，否则路由器上解析失败 → 默认主题设置不生效
+**/etc/uci-defaults/99-zzz-luci-theme-shadcn text eol=lf
+
 # package/ 下 vendored 包的全部文件（含无扩展名的 Makefile / LICENSE /
 # root/etc/config/* / root/etc/hotplug.d/* / root/etc/init.d/*）
 package/**                            text eol=lf

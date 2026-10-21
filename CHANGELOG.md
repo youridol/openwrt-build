@@ -2,6 +2,106 @@
 
 本仓库所有功能/配置改动均记录于此。版本判型遵循全局规范（PATCH / MINOR / MAJOR）。
 
+## [v0.9.1] - 2026-10-21
+
+### 新增 — LuCI 主题 shadcn 编入固件并设为默认
+
+按用户要求把 `youridol/luci-theme-shadcn` 作为固件的默认 LuCI 主题。
+
+| 改动 | 位置 | 说明 |
+|---|---|---|
+| 新增 `Fetch luci-theme-shadcn` 步骤 | CI | `git clone --depth 1` 只取构建需要的 5 项（`Makefile` / `root` / `htdocs` / `ucode` / `LICENSE`），排除 `.dev`/`.husky`/`.github` 等开发工具链 |
+| 新增 `files/etc/uci-defaults/99-zzz-luci-theme-shadcn` | overlay | **无条件**设 `luci.main.mediaurlbase=/luci-static/shadcn` |
+| `.config` 启用 | CI | `luci-theme-shadcn=y`、`LUCI_THEME_SHADCN=y`，并关掉 `bootstrap`/`material`/`openwrt`/`argon` |
+| 新增契约断言 | CI | 主题符号入 `.config`、其他主题已关、overlay 脚本就位且排序晚于 `30_` |
+
+**为什么必须自己写 overlay 脚本（主题包自带的那个不够）**
+
+主题自带的 `root/etc/uci-defaults/30_luci-theme-shadcn` 内容是：
+
+```sh
+if [ "$PKG_UPGRADE" != 1 ]; then
+    uci get luci.themes.Shadcn >/dev/null 2>&1 || \
+    uci batch <<-EOF
+        set luci.themes.Shadcn=/luci-static/shadcn
+        set luci.main.mediaurlbase=/luci-static/shadcn
+        commit luci
+    EOF
+fi
+```
+
+它用 `uci get luci.themes.Shadcn ||` 做**存在性短路**：只要该键已被注册，
+整个 if 就跳过，**不会改 `mediaurlbase`**。而 LuCI 的默认主题由
+`luci.main.mediaurlbase` 决定 —— 若它仍指向 `bootstrap`，shadcn 装了也看不到。
+
+我们的 `99-zzz-` 排在 `30_` 之后，无条件写 `mediaurlbase`，覆盖任何先前值。
+同时保留主题缺失保护：`/www/luci-static/shadcn/main.css` 不存在时跳过设置，
+避免把 `mediaurlbase` 指到一个不存在的目录导致 LuCI 白屏。
+
+**为什么用固定 clone 而不是 feed**
+
+- 该仓库不在 lede 的任何 feed 里
+- feed 机制会拉全部分支且无 commit 固定，主题更新导致样式错乱时很难定位版本
+- 主题的 `main.css`（134 KB）与 6 个 woff2 **已预构建入库**，不需要前端构建，
+  直接按 LuCI 包编译即可
+- 实测体积 1020 KB / 67 个文件（htdocs 占 896 KB）
+
+### 修复 — `Download package sources` 卡死导致 6 小时超时
+
+**现象**：run `39495602665`（commit `90457d4`）在 `Download package sources`
+这一步跑了 **5h54m**，直到 job 的 6h 上限被取消。日志尾部：
+
+```
+48 23.2M   48 11.2M    0     0    556      0 12:09:24  5:52:10  6:17:14     0
+                                              ↑ 556 B/s
+```
+
+即 `nasm-2.16.03.tar.gz` 从 `www.nasm.us` 以 **556 字节/秒**下载，
+11.2 MB 花了 5h52m，预计还要 6h17m。
+
+**根因**：lede 的 `scripts/download.pl` 对每个文件按 `@mirrors` 顺序逐个尝试
+（`while (!-f ...) { my $mirror = shift @mirrors; ... }`），而 **curl 没有
+单文件超时** —— 遇到慢源就无限等。
+
+**对策**（都利用 `download.pl` 已有的扩展点，不改上游代码）：
+
+| 手段 | 机制 | 效果 |
+|---|---|---|
+| `DOWNLOAD_MIRROR` | `download.pl:53-54` 读取，且 `localmirrors()` 在 `@mirrors` **最前面**被调用（第 241 行） | 列出的镜像**优先级最高**，慢源被跳过 |
+| `CURL_OPTIONS=--max-time 300` | `download.pl:112` 透传给 curl | 单文件最多 5 分钟，超时即换下一个镜像 |
+| `timeout 3000 make download` | 外层硬超时 | 即使 curl 选项没生效（如走 aria2c 分支），50 分钟后明确失败 |
+| `timeout-minutes: 60` | 步骤级 | 兜底，不让它吃满 job 的 6h |
+
+新增镜像列表（实测可达）：
+`sources.cdn.openwrt.org` / `sources.openwrt.org` / `mirrors.aliyun.com/gnu` /
+`mirrors.tencent.com/gnu` / `mirrors.ustc.edu.cn/gnu`。
+
+下载前会先探测各镜像对 `nasm-2.16.03.tar.gz` 的 HTTP 状态（只报告不阻断），
+失败时打印各镜像结果并提示「把可用镜像补进 `DOWNLOAD_MIRROR`」。
+
+### 验证
+
+| # | 项目 | 方式 | 结果 |
+|---|---|---|---|
+| 1 | YAML 语法 | `yaml.safe_load` | PASS |
+| 2 | 超时防护 6 项 | 提取步骤脚本逐项断言 | 全 OK |
+| 3 | 主题 Fetch 步骤 5 项 | 提取步骤脚本逐项断言 | 全 OK |
+| 4 | `.config` 主题符号 | 3 项断言 | 全 OK |
+| 5 | overlay 脚本 | `sh -n`（dash） | PASS |
+| 6 | 断言路径正确性 | 确认 `Apply files overlay` 在断言之后，故用 `../openwrt-build/` 前缀 | PASS |
+| 7 | **真实 clone 主题** | `git clone --depth 1` + 复制 + 4 项契约断言 | 全 OK（commit `625a8c1`，1020 KB / 67 文件） |
+| 8 | 行尾 | `od -c` 统计 CR | 全 0 |
+
+**真实 clone 测试的实测数据**：
+
+```
+Makefile                      447 字节
+30_luci-theme-shadcn          235 字节
+main.css                   134262 字节（> 20000 下限，已预构建）
+login.css                   11443 字节
+主题总体积                   1020 KB / 67 个文件
+```
+
 ## [v0.9.0] - 2026-10-20
 
 ### 新增 — DNS 链路框架 `dnschain`（运行时骨架 + 控制页面）

@@ -1,0 +1,58 @@
+# ============================================================
+# 99-zzz-luci-theme-shadcn — 把 shadcn 设为 LuCI 默认主题
+# ------------------------------------------------------------
+# 为什么需要本文件（主题包自带的 30_luci-theme-shadcn 不够）：
+#
+# 主题包自带的脚本名为 30_luci-theme-shadcn，内容：
+#   if [ "$PKG_UPGRADE" != 1 ]; then
+#       uci get luci.themes.Shadcn >/dev/null 2>&1 || uci batch <<-EOF
+#           set luci.themes.Shadcn=/luci-static/shadcn
+#           set luci.main.mediaurlbase=/luci-static/shadcn
+#           commit luci
+#       EOF
+#   fi
+#
+# 它有两个问题：
+#   1. 用 `uci get luci.themes.Shadcn ||` 做存在性判断 ——
+#      只要 themes.Shadcn 已被注册（upgrade 场景或前面有包注册过），
+#      整个 if 就跳过，**不会改 mediaurlbase**。
+#   2. 若媒体地址仍指向 bootstrap，shadcn 装了也不会生效。
+#
+# 本文件排在 99-zzz（比主题的 30_ 晚），确保最后生效：
+#   - 无条件写 luci.main.mediaurlbase，覆盖任何先前值
+#   - 幂等：值已正确时不做无谓 commit
+# ============================================================
+
+THEME_PATH='/luci-static/shadcn'
+
+log() { echo "luci-theme-shadcn: $*"; }
+
+# 主题文件是否真的在（避免设了一个不存在的主题导致 LuCI 白屏）
+if [ ! -d "/www${THEME_PATH}" ]; then
+	log "WARN /www${THEME_PATH} 不存在，主题未安装，跳过默认主题设置"
+	exit 0
+fi
+
+if [ ! -f "/www${THEME_PATH}/main.css" ]; then
+	log "WARN /www${THEME_PATH}/main.css 缺失，主题不完整，跳过"
+	exit 0
+fi
+
+# 注册主题（若主题包已注册则保持，不覆盖）
+if ! uci -q get luci.themes.Shadcn >/dev/null 2>&1; then
+	uci set luci.themes.Shadcn="$THEME_PATH"
+	log "已注册 luci.themes.Shadcn=$THEME_PATH"
+fi
+
+# 无条件设为默认 —— 这是本文件存在的理由
+_cur=$(uci -q get luci.main.mediaurlbase 2>/dev/null)
+if [ "$_cur" != "$THEME_PATH" ]; then
+	uci set luci.main.mediaurlbase="$THEME_PATH"
+	log "默认主题 ${_cur:-未设置} -> $THEME_PATH"
+else
+	log "默认主题已是 $THEME_PATH，无需改动"
+fi
+
+uci commit luci || log "ERROR commit luci 失败"
+
+exit 0
