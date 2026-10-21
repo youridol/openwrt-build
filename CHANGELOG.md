@@ -2,6 +2,73 @@
 
 本仓库所有功能/配置改动均记录于此。版本判型遵循全局规范（PATCH / MINOR / MAJOR）。
 
+## [v0.12.2] - 2026-10-22
+
+### 修复 — 页面标题下多出一条灰色竖条
+
+用户截图框出一条多余横条：位置在页面描述与 Tab 栏之间，
+形状是约 **6×36px 的灰色竖条**。
+
+#### 根因
+
+CBI 为每个 Map 自动生成一个 `<ul class="cbi-tabmenu">` 容器。
+本页的 section 都用 `TypedSection` / `NamedSection`，**没有声明 CBI
+原生 tab**，所以它的 6 个 `<li>` 全是 `display:none`：
+
+```html
+<ul class="cbi-tabmenu">
+  <li style="display:none" class="cbi-tab-disabled" data-tab="overview"><a href="#"></a></li>
+  ... 共 6 个，全部 display:none
+</ul>
+```
+
+但 `<ul>` 本身仍带主题背景色（shadcn 下是 `var(--muted)`，实测
+`oklch(0.269 0 0)`）。子项全隐藏后容器塌成一条竖条，
+宽 6px、高 36px，正好卡在描述与自建 tab 栏之间。
+
+实测定位：
+
+```
+UL.cbi-tabmenu  rect: t=74 l=655 w=6 h=36
+                bg: oklch(0.269 0 0)
+                childCount: 6，全部 display:none
+                prevSibling: DIV.cbi-map-descr
+```
+
+#### 修复
+
+**CSS**（声明式，现代浏览器直接生效）：
+
+```css
+.cbi-tabmenu:not(:has(> li:not([style*="display:none"]):not([style*="display: none"]))) {
+	display: none !important;
+}
+```
+
+只隐藏「没有任何可见子项」的 tabmenu，避免误伤真正使用 CBI 原生 tab
+的页面（那些 `<li>` 不是 `display:none`）。
+
+**JS**（兜底，老 WebKit 不支持 `:has()`）：`dropEmptyTabmenu()` 在初始化时
+遍历 `.cbi-tabmenu`，用 `getComputedStyle` 数可见子项，为 0 就移除节点。
+
+**为什么用 CSS+JS 而不是去掉 CBI 的生成逻辑**：tabmenu 由 CBI 在渲染
+阶段按 `.cbi-section` 结构补出来，不在 `general.lua` 的控制范围内；
+改 CBI 内部实现会影响所有页面。
+
+#### 验证
+
+```
+tabmenuExists: true          （节点仍在 DOM，但已隐藏）
+tabmenuDisplay: "none"
+elementsBetweenDescrAndTabs: []   （描述与 tab 栏之间已无任何可见元素）
+tabsVisible: 46px
+```
+
+截图确认：描述文字下方直接是 Tab 栏，灰色竖条消失。
+
+页面其余未变：HTTP 200、74173 字节、0 Lua 错误、12 section、
+selftest **16/16 PASS**。
+
 ## [v0.12.1] - 2026-10-22
 
 ### 变更 — DNS 链路页从「网络」移到「服务」，紧跟 ShadowSocksR Plus+

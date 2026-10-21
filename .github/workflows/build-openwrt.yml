@@ -233,6 +233,38 @@ jobs:
             fi
           done
 
+          # 断言「空 tabmenu 必须被收掉」（v0.12.2）
+          #
+          # CBI 为每个 Map 生成 <ul class="cbi-tabmenu">。本页 section 都用
+          # TypedSection/NamedSection、没有声明原生 tab，所以它的 <li> 全是
+          # display:none —— 但 <ul> 仍带主题背景色，会渲染成一条 6×36px 的
+          # 灰色竖条卡在描述与自建 tab 栏之间（v0.12.2 修的就是这个）。
+          #
+          # CSS 的 :has() 规则与 JS 的 dropEmptyTabmenu() 必须都在，
+          # 缺 CSS 会在现代浏览器出现灰条，缺 JS 会在老 WebKit 出现灰条。
+          if grep -q 'cbi-tabmenu:not(:has(' "$CSS"; then
+            echo "OK   CSS 含空 tabmenu 收拢规则"
+          else
+            echo "FAIL CSS 缺少 .cbi-tabmenu:not(:has(...)) 规则（灰条会回来）" >&2
+            exit 1
+          fi
+
+          if grep -q 'dropEmptyTabmenu' "$JS"; then
+            echo "OK   JS 含 dropEmptyTabmenu 兜底"
+          else
+            echo "FAIL JS 缺少 dropEmptyTabmenu()（老 WebKit 会出现灰条）" >&2
+            exit 1
+          fi
+
+          # 断言 tab 栏上方不留元数据容器（v0.12.1）
+          # 承载 data-dc-meta 的 section 若未收起，会在 tab 栏上方留 11px 空白。
+          if grep -q 'data-dc-meta' "$CSS"; then
+            echo "OK   CSS 含 data-dc-meta 容器收拢规则"
+          else
+            echo "FAIL CSS 缺少 [data-dc-meta] 收拢规则" >&2
+            exit 1
+          fi
+
       - name: Fetch luci-theme-shadcn (默认 LuCI 主题)
         working-directory: lede
         run: |

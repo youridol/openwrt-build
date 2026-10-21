@@ -81,6 +81,32 @@ html[data-darkmode="true"] {
 	display: none !important;
 }
 
+/*
+ * 收掉 CBI 自动生成的空 tab 菜单。
+ *
+ * 本页的 section 都用 TypedSection / NamedSection，CBI 会为每个 map
+ * 生成一个 <ul class="cbi-tabmenu">。我们的 section 没有声明 CBI 原生
+ * tab，所以它的 6 个 <li> 全是 display:none —— 但 <ul> 本身仍带主题的
+ * 背景色（shadcn 下是 var(--muted)），实测渲染成一条 6×36px 的灰色竖条，
+ * 出现在描述文字与自建 tab 栏之间（v0.12.2 修）。
+ *
+ * 为什么用 CSS 而不是去掉 CBI 的生成逻辑：
+ *   tabmenu 由 cbi.js 在客户端按 .cbi-section 结构补出来，不在
+ *   general.lua 的控制范围内。改 CBI 内部实现会影响所有页面。
+ *
+ * 只隐藏「没有任何可见子项」的 tabmenu，避免误伤真的用 CBI 原生 tab
+ * 的页面（那些 <li> 不是 display:none）。
+ */
+.cbi-tabmenu:not(:has(> li:not([style*="display:none"]):not([style*="display: none"]))) {
+	display: none !important;
+}
+
+/* 旧浏览器无 :has() 时兜底：本页自建了 .dc-tabs，CBI 的 tabmenu 一律无用 */
+.dc-tabs ~ .cbi-tabmenu,
+.cbi-map > .cbi-tabmenu:empty {
+	display: none !important;
+}
+
 .dc-tabs {
 	display: flex;
 	flex-wrap: wrap;

@@ -136,9 +136,37 @@
 		try { localStorage.setItem(STORAGE_KEY, id); } catch (e) { /* 忽略 */ }
 	}
 
+	/**
+	 * 移除 CBI 自动生成的空 tab 菜单。
+	 *
+	 * 本页的 section 都是 TypedSection / NamedSection，CBI 会给每个 map
+	 * 生成一个 <ul class="cbi-tabmenu">。我们没用 CBI 原生 tab，所以它的
+	 * <li> 全是 display:none —— 但 <ul> 本身仍带主题背景色，实测渲染成
+	 * 一条 6×36px 的灰色竖条，卡在描述与自建 tab 栏之间（v0.12.2 修）。
+	 *
+	 * CSS 里用 :has() 做了声明式处理，但老 WebKit 不支持 :has()，
+	 * 这里用 JS 兜底：没有可见 <li> 的 tabmenu 直接移除。
+	 */
+	function dropEmptyTabmenu() {
+		var menus = document.querySelectorAll('.cbi-tabmenu');
+		for (var i = 0; i < menus.length; i++) {
+			var ul = menus[i];
+			var visible = 0;
+			for (var j = 0; j < ul.children.length; j++) {
+				var li = ul.children[j];
+				if (getComputedStyle(li).display !== 'none') visible++;
+			}
+			if (visible === 0) {
+				ul.parentNode && ul.parentNode.removeChild(ul);
+			}
+		}
+	}
+
 	function init() {
 		meta = readMeta();
 		if (!meta) return;
+
+		dropEmptyTabmenu();
 
 		/* 收起承载元数据的空 section：CBI 会给它套 .cbi-section 与
 		 * .cbi-value 两层，实测占 11px，在 tab 栏上方留一段空白。
