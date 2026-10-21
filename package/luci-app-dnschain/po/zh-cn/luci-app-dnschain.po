@@ -162,12 +162,6 @@ msgstr "保留（国内双栈）"
 msgid "国外 AAAA / HTTPS"
 msgstr "国外 AAAA / HTTPS"
 
-msgid "抑制（返回空答复 rcode=0 ancount=0，不是超时）"
-msgstr "抑制（返回空答复 rcode=0 ancount=0，不是超时）"
-
-msgid "国外 AAAA 是「1ms 空答复」，客户端会立刻回落查 A。只有收不到任何包才是超时（会卡住客户端 5 秒）。"
-msgstr "国外 AAAA 是「1ms 空答复」，客户端会立刻回落查 A。只有收不到任何包才是超时（会卡住客户端 5 秒）。"
-
 msgid "端口档案与 SSR-Plus 兼容"
 msgstr "端口档案与 SSR-Plus 兼容"
 
@@ -329,3 +323,35 @@ msgstr "立即重放不变量集：把 SSR-Plus / dnsmasq / dnsproxy 的相关�
 
 msgid "已归一"
 msgstr "已归一"
+msgid "当前端口"
+msgstr "当前端口"
+
+msgid "国内 dnsproxy :%s（阿里 DoT/DoH，直连）· 国外 dnsproxy :%s（Google DoH，经代理）"
+msgstr "国内 dnsproxy :%s（阿里 DoT/DoH，直连）· 国外 dnsproxy :%s（Google DoH，经代理）"
+
+msgid "当前 IPv6 流量代理"
+msgstr "当前 IPv6 流量代理"
+
+msgid "要求启用 IPv6 流量代理"
+msgstr "要求启用 IPv6 流量代理"
+
+msgid "国外节点只有 IPv4。开启后收敛器会强制 <code>ipv6_support=1</code>，SSR-Plus 会装上 IPv6 代理链（<code>ss_spec6_*</code> + 策略路由），国外 IPv6 也走代理，从而可以保留国外 AAAA。<br/><b>不要关闭</b>：关闭后国外域名拿到真实 AAAA 却直连，会被 RST。"
+msgstr "国外节点只有 IPv4。开启后收敛器会强制 <code>ipv6_support=1</code>，SSR-Plus 会装上 IPv6 代理链（<code>ss_spec6_*</code> + 策略路由），国外 IPv6 也走代理，从而可以保留国外 AAAA。<br/><b>不要关闭</b>：关闭后国外域名拿到真实 AAAA 却直连，会被 RST。"
+
+msgid "dnsproxy 的 DoH 上游走标准 TLS（带 SNI），可以正常校验证书。关闭后跳过校验，仅用于上游证书异常时的排障。"
+msgstr "dnsproxy 的 DoH 上游走标准 TLS（带 SNI），可以正常校验证书。关闭后跳过校验，仅用于上游证书异常时的排障。"
+
+msgid "国外上游的连接走 SSR-Plus 的 OUTPUT 链。要求 access_control.router_proxy=1 且 dports 含 443。<br/><b>不要关</b>：国外 DoH 直连会被墙，国外域名将全部无结果。"
+msgstr "国外上游的连接走 SSR-Plus 的 OUTPUT 链。要求 access_control.router_proxy=1 且 dports 含 443。<br/><b>不要关</b>：国外 DoH 直连会被墙，国外域名将全部无结果。"
+
+msgid "v0.10.0 起国外 AAAA <b>保留</b>：SSR-Plus 的 IPv6 流量代理（<code>ipv6_support=1</code>）会把国外 IPv6 也送进代理，不再存在「IPv6 直连被 RST」的问题，抑制 AAAA 反而让国外站点失去双栈。"
+msgstr "v0.10.0 起国外 AAAA <b>保留</b>：SSR-Plus 的 IPv6 流量代理（<code>ipv6_support=1</code>）会把国外 IPv6 也送进代理，不再存在「IPv6 直连被 RST」的问题，抑制 AAAA 反而让国外站点失去双栈。"
+
+msgid "保留（返回真实 AAAA，IPv6 经代理出站）"
+msgstr "保留（返回真实 AAAA，IPv6 经代理出站）"
+
+msgid "v0.10.0 起国外 AAAA 不再抑制。SSR-Plus 的 IPv6 流量代理（ipv6_support=1）会把国外 IPv6 也送进代理，实测 curl -6 google → 302、youtube → 200。抑制 AAAA 只会让国外站点失去双栈能力。"
+msgstr "v0.10.0 起国外 AAAA 不再抑制。SSR-Plus 的 IPv6 流量代理（ipv6_support=1）会把国外 IPv6 也送进代理，实测 curl -6 google → 302、youtube → 200。抑制 AAAA 只会让国外站点失去双栈能力。"
+
+msgid "端口与实例"
+msgstr "端口与实例"

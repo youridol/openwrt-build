@@ -4,6 +4,13 @@
 --
 -- 定位：只做配置读写、校验、下发、自检与回滚，**不实现解析逻辑**。
 -- 页面与链路解耦是「改 UI 不坏链路」的前提。
+--
+-- v0.10.0 变更（移除 chinadns-ng，改双 dnsproxy 实例）：
+--   - filter_port() → foreign_port()：不再有「过滤器端口」，改为国外实例端口
+--   - is_framework_filter() → is_dnsproxy()：不再检测 chinadns-ng
+--   - list_stats 的 upstreams-domains.txt → foreign-split.conf
+--   - 删除 idna 统计（v0.10.0 不再生成 idna-bypass.conf，xn-- 域名并入主分流）
+--   - 修 stat -c %y：BusyBox 的 stat 不支持 -c，改用 date -r
 
 local fs = require "nixio.fs"
 local sys = require "luci.sys"
@@ -51,8 +58,12 @@ function M.port_listening(port, proto)
 	return M.port_owner(port, proto) ~= ""
 end
 
---- 该 PID 是否属于框架的 chinadns-ng
-function M.is_framework_filter(pid)
+--- 该 PID 是否是框架的 dnsproxy
+--
+-- v0.10.0：从 is_framework_filter（检测 chinadns-ng）改为检测 dnsproxy。
+-- 框架现在托管**两个** dnsproxy 实例（国内 :5353、国外 :5336），
+-- 两者都是 /usr/bin/dnsproxy，故只需匹配二进制名。
+function M.is_dnsproxy(pid)
 	if not pid or pid == "" then
 		return false
 	end
@@ -66,7 +77,7 @@ function M.is_framework_filter(pid)
 	end
 	local cmd = f:read("*a") or ""
 	f:close()
-	return cmd:find("chinadns%-ng") ~= nil
+	return cmd:find("dnsproxy") ~= nil
 end
 
 --- 读取 ss_spec_output 的 TCP 端口集
@@ -131,9 +142,10 @@ function M.list_stats()
 	end
 	stats.gfw_lines = count("/etc/ssrplus/gfw_list.conf")
 	stats.base_lines = count("/etc/ssrplus/gfw_base.conf")
-	stats.domains = count("/var/etc/dnschain/upstreams-domains.txt")
-	stats.idna = count("/var/etc/dnschain/idna-bypass.conf")
-	local mt = sys.exec("stat -c %y /etc/ssrplus/gfw_list.conf 2>/dev/null") or ""
+	-- v0.10.0：分流规则由 dnsmasq 承担，文件名为 foreign-split.conf
+	stats.domains = count("/var/etc/dnschain/foreign-split.conf")
+	-- 修改时间：BusyBox 的 stat 不支持 -c（实测报错），改用 date -r
+	local mt = sys.exec("date -r /etc/ssrplus/gfw_list.conf '+%Y-%m-%d %H:%M' 2>/dev/null") or ""
 	stats.updated = (mt:gsub("%s+$", ""))
 	return stats
 end
@@ -214,10 +226,21 @@ function M.ssr_mode()
 	return (sys.exec("uci -q get shadowsocksr.@global[0].pdnsd_enable 2>/dev/null") or ""):gsub("%s+", "")
 end
 
---- 当前 profile 对应的过滤器端口
-function M.filter_port()
-	local profile = (sys.exec("uci -q get dnschain.main.profile 2>/dev/null") or ""):gsub("%s+", "")
-	return (profile == "coexist") and "5337" or "5335"
+--- 当前 SSR-Plus 的 IPv6 流量代理开关
+function M.ssr_ipv6()
+	return (sys.exec("uci -q get shadowsocksr.@global[0].ipv6_support 2>/dev/null") or ""):gsub("%s+", "")
+end
+
+--- 国外 dnsproxy 实例端口（v0.10.0 取代 filter_port）
+function M.foreign_port()
+	local p = (sys.exec("uci -q get dnschain.main.foreign_port 2>/dev/null") or ""):gsub("%s+", "")
+	return (p ~= "") and p or "5336"
+end
+
+--- 国内 dnsproxy 实例端口
+function M.entry_port()
+	local p = (sys.exec("uci -q get dnschain.main.entry_port 2>/dev/null") or ""):gsub("%s+", "")
+	return (p ~= "") and p or "5353"
 end
 
 return M

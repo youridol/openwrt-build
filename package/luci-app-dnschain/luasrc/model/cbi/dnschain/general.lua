@@ -31,19 +31,23 @@ function o.cfgvalue()
 
 	-- 没有结论行时按组件状态自行归纳
 	if concl == "" then
-		local filter_port = ds.filter_port()
-		local owner = ds.port_owner(filter_port, "udp")
-		if not ds.port_listening("5353", "udp") then
-			concl = translate("dnsproxy 未监听 —— 客户机全部无法解析")
+		local entry = ds.entry_port()
+		local fport = ds.foreign_port()
+		local fowner = ds.port_owner(fport, "udp")
+		if not ds.port_listening(entry, "udp") then
+			concl = translate("国内 dnsproxy 未监听 —— 客户机全部无法解析")
 			cls = cls .. " alert-message error"
-		elseif owner == "" then
-			concl = translate("过滤器未监听 —— gfw 域名将 SERVFAIL，国内不受影响")
+		elseif fowner == "" then
+			concl = translate("国外 dnsproxy 未监听 —— gfw 域名将 SERVFAIL，国内不受影响")
 			cls = cls .. " alert-message warning"
-		elseif not ds.is_framework_filter(owner) then
-			concl = translate("过滤器端口被其他进程占用 —— gfw 域名会走错解析器")
+		elseif not ds.is_dnsproxy(fowner) then
+			concl = translate("国外端口被其他进程占用 —— gfw 域名会走错解析器")
 			cls = cls .. " alert-message warning"
 		elseif not ds.port_listening("1234", "tcp") then
 			concl = translate("代理未运行 —— 国外域名将失败（国内不受影响）")
+			cls = cls .. " alert-message warning"
+		elseif ds.ssr_ipv6() ~= "1" then
+			concl = translate("IPv6 流量代理未开 —— 国外 IPv6 会直连被 RST")
 			cls = cls .. " alert-message warning"
 		else
 			concl = translate("链路正常")
@@ -58,8 +62,8 @@ end
 o = s:option(DummyValue, "_topology", translate("链路状态"))
 o.rawhtml = true
 function o.cfgvalue()
-	local entry = "5353"
-	local filter_port = ds.filter_port()
+	local entry = ds.entry_port()
+	local fport = ds.foreign_port()
 	local lan = (luci.sys.exec("uci -q get network.lan.ipaddr") or ""):gsub("%s+", "")
 
 	local function row(name, port, ok, detail)
@@ -75,33 +79,33 @@ function o.cfgvalue()
 
 	local rows = {}
 
-	-- fw4 劫持
-	local intercept = (luci.sys.exec("nft list chain inet fw4 dns_intercept_lan 2>/dev/null") or "")
-	local has_intercept = intercept:find("dport 53") ~= nil
-	rows[#rows + 1] = row(translate("fw4 DNS 劫持"), "53", has_intercept,
-		has_intercept and translate("已拦截 LAN 的 53") or translate("规则缺失"))
-
-	-- dnsmasq
+	-- 客户机 DNS 路径：dnsmasq 直接监听 LAN 地址的 53，
+	-- 客户机无需经 nft 劫持即可问到（v0.10.0 实测确认）。
 	local dnsmasq_ok = ds.port_listening("53", "udp")
 	rows[#rows + 1] = row("dnsmasq", "53", dnsmasq_ok,
-		dnsmasq_ok and translate("唯一缓存层 + DHCP") or translate("未监听"))
+		dnsmasq_ok and translate("唯一缓存层 + 唯一分流层 + DHCP") or translate("未监听"))
 
-	-- dnsproxy
+	-- 国内 dnsproxy 实例
 	local dp_ok = ds.port_listening(entry, "udp")
-	rows[#rows + 1] = row("dnsproxy", entry, dp_ok,
-		dp_ok and translate("唯一路由入口") or translate("未监听"))
+	rows[#rows + 1] = row(translate("dnsproxy（国内）"), entry, dp_ok,
+		dp_ok and translate("阿里 DoT/DoH，直连") or translate("未监听"))
 
-	-- 过滤器
-	local f_pid = ds.port_owner(filter_port, "udp")
-	local f_ok = ds.is_framework_filter(f_pid)
-	rows[#rows + 1] = row(translate("策略过滤器"), filter_port, f_ok,
-		f_ok and translate("chinadns-ng，AAAA 抑制") or
+	-- 国外 dnsproxy 实例
+	local f_pid = ds.port_owner(fport, "udp")
+	local f_ok = ds.is_dnsproxy(f_pid)
+	rows[#rows + 1] = row(translate("dnsproxy（国外）"), fport, f_ok,
+		f_ok and translate("Google DoH，经代理出站") or
 		(f_pid ~= "" and (translate("被其他进程占用 (PID ") .. f_pid .. ")") or translate("未监听")))
 
 	-- 代理
 	local proxy_ok = ds.port_listening("1234", "tcp")
 	rows[#rows + 1] = row(translate("SSR-Plus 代理"), "1234", proxy_ok,
-		proxy_ok and translate("透明代理") or translate("未运行 —— 国外域名将失败"))
+		proxy_ok and translate("透明代理（IPv4 + IPv6）") or translate("未运行 —— 国外域名将失败"))
+
+	-- IPv6 流量代理
+	local v6_ok = (ds.ssr_ipv6() == "1")
+	rows[#rows + 1] = row(translate("IPv6 流量代理"), "ipv6_support", v6_ok,
+		v6_ok and translate("已启用，国外 IPv6 也走代理") or translate("未启用 —— 国外 IPv6 会直连被 RST"))
 
 	-- 缓存
 	local cstat = ds.cache_stats()
@@ -204,15 +208,16 @@ function o.validate(self, value, section)
 end
 
 o = s:option(Flag, "cert_verify", translate("校验上游证书"),
-	translate("chinadns-ng 的 --cert-verify 默认关闭（只加密、不验证证书）。" ..
-		"开启后要求上游证书含匹配的 IP SAN。"))
+	translate("dnsproxy 的 DoH 上游走标准 TLS（带 SNI），可以正常校验证书。" ..
+		"关闭后跳过校验，仅用于上游证书异常时的排障。"))
 o.rmempty = true
 o.default = "1"
 o:depends({ [".name"] = "foreign" })
 
 o = s:option(Flag, "via_proxy", translate("经代理出站"),
 	translate("国外上游的连接走 SSR-Plus 的 OUTPUT 链。" ..
-		"要求 access_control.router_proxy=1 且 dports 含 853。"))
+		"要求 access_control.router_proxy=1 且 dports 含 443。" ..
+		"<br/><b>不要关</b>：国外 DoH 直连会被墙，国外域名将全部无结果。"))
 o.rmempty = true
 o.default = "1"
 o:depends({ [".name"] = "foreign" })
@@ -222,8 +227,9 @@ o:depends({ [".name"] = "foreign" })
 ------------------------------------------------------------------------
 
 s = m:section(TypedSection, "aaaa", translate("双栈策略（只读）"),
-	translate("这两项表达的是不可配置的物理约束：国外节点通常只有 IPv4。" ..
-		"若让国外域名拿到真实 AAAA，双栈客户端会走 IPv6 直连并被 RST。"))
+	translate("v0.10.0 起国外 AAAA <b>保留</b>：SSR-Plus 的 IPv6 流量代理" ..
+		"（<code>ipv6_support=1</code>）会把国外 IPv6 也送进代理，" ..
+		"不再存在「IPv6 直连被 RST」的问题，抑制 AAAA 反而让国外站点失去双栈。"))
 s.anonymous = true
 s.addremove = false
 
@@ -234,45 +240,54 @@ end
 
 o = s:option(DummyValue, "foreign", translate("国外 AAAA / HTTPS"))
 function o.cfgvalue()
-	return translate("抑制（返回空答复 rcode=0 ancount=0，不是超时）")
+	return translate("保留（返回真实 AAAA，IPv6 经代理出站）")
 end
 
 o = s:option(DummyValue, "_why", translate("说明"))
 function o.cfgvalue()
-	return translate("国外 AAAA 是「1ms 空答复」，客户端会立刻回落查 A。" ..
-		"只有收不到任何包才是超时（会卡住客户端 5 秒）。")
+	return translate("v0.10.0 起国外 AAAA 不再抑制。SSR-Plus 的 IPv6 流量代理" ..
+		"（ipv6_support=1）会把国外 IPv6 也送进代理，实测 curl -6 google → 302、" ..
+		"youtube → 200。抑制 AAAA 只会让国外站点失去双栈能力。")
 end
 
 ------------------------------------------------------------------------
--- 端口档案
+-- 端口与实例
 ------------------------------------------------------------------------
 
-s = m:section(TypedSection, "main", translate("端口档案与 SSR-Plus 兼容"))
+s = m:section(TypedSection, "main", translate("端口与实例"))
 s.anonymous = true
 s.addremove = false
 
-o = s:option(ListValue, "profile", translate("端口档案"),
-	translate("primary：过滤器占 :5335，SSR-Plus 必须处于模式 0 或 7。" ..
-		"coexist：过滤器迁 :5337，适用于用户坚持选 SSR 模式 1/4/5/6 的场景。"))
-o:value("primary", translate("primary（推荐）"))
-o:value("coexist", translate("coexist（兼容）"))
-o.rmempty = false
-o.default = "primary"
+o = s:option(DummyValue, "_ports", translate("当前端口"))
+function o.cfgvalue()
+	return string.format(
+		translate("国内 dnsproxy :%s（阿里 DoT/DoH，直连）· 国外 dnsproxy :%s（Google DoH，经代理）"),
+		ds.entry_port(), ds.foreign_port())
+end
 
 o = s:option(DummyValue, "_ssr_mode", translate("当前 SSR-Plus DNS 模式"))
 function o.cfgvalue()
 	local mode = ds.ssr_mode()
 	local names = {
-		["0"] = translate("使用本机端口 5335 的 DNS 服务（不启后端，:5335 归框架）"),
-		["1"] = translate("使用 DNS2TCP 查询（会抢占 :5335）"),
+		["0"] = translate("不启 DNS 后端（解析全部交给本框架）"),
+		["1"] = translate("使用 DNS2TCP 查询（会另起解析器，与框架冲突）"),
 		["2"] = translate("DNS2SOCKS（本固件未安装该后端）"),
 		["3"] = translate("RUST（本固件未安装该后端）"),
-		["4"] = translate("使用 MOSDNS 查询（会抢占 :5335）"),
-		["5"] = translate("使用 DNSPROXY 查询（会再起一个 dnsproxy 占 :5335）"),
-		["6"] = translate("使用 ChinaDNS-NG 查询（会抢占 :5335，且全局过滤 AAAA）"),
-		["7"] = translate("优先使用模块内置 DNS（不绑 :5335）"),
+		["4"] = translate("使用 MOSDNS 查询（会另起解析器，与框架冲突）"),
+		["5"] = translate("使用 DNSPROXY 查询（会再起一个 dnsproxy，与框架冲突）"),
+		["6"] = translate("使用 ChinaDNS-NG 查询（会另起解析器，与框架冲突）"),
+		["7"] = translate("优先使用模块内置 DNS（不绑端口）"),
 	}
 	return string.format("pdnsd_enable = %s —— %s", mode ~= "" and mode or "?", names[mode] or translate("未知"))
+end
+
+o = s:option(DummyValue, "_ssr_ipv6", translate("当前 IPv6 流量代理"))
+function o.cfgvalue()
+	local v6 = ds.ssr_ipv6()
+	if v6 == "1" then
+		return translate("ipv6_support = 1 —— 已启用，国外 IPv6 也走代理（国外 AAAA 保留）")
+	end
+	return translate("ipv6_support = %s —— 未启用，国外 IPv6 会直连被 RST"):format(v6 ~= "" and v6 or "?")
 end
 
 s = m:section(TypedSection, "ssr", translate("SSR-Plus 兼容"))
@@ -280,7 +295,7 @@ s.anonymous = true
 s.addremove = false
 
 o = s:option(ListValue, "mode", translate("目标模式"))
-o:value("0", translate("0 — 使用本机端口 5335（推荐）"))
+o:value("0", translate("0 — 不启 DNS 后端（推荐）"))
 o:value("7", translate("7 — 模块内置 DNS"))
 o.rmempty = false
 o.default = "0"
@@ -288,6 +303,14 @@ o.default = "0"
 o = s:option(Flag, "enforce", translate("强制写回"),
 	translate("收敛器在开机、SSR 配置变更、定时三处重放不变量集。" ..
 		"关闭后只告警、不修改 SSR-Plus 的键。"))
+o.rmempty = false
+o.default = "1"
+
+o = s:option(Flag, "require_ipv6", translate("要求启用 IPv6 流量代理"),
+	translate("国外节点只有 IPv4。开启后收敛器会强制 <code>ipv6_support=1</code>，" ..
+		"SSR-Plus 会装上 IPv6 代理链（<code>ss_spec6_*</code> + 策略路由），" ..
+		"国外 IPv6 也走代理，从而可以保留国外 AAAA。" ..
+		"<br/><b>不要关闭</b>：关闭后国外域名拿到真实 AAAA 却直连，会被 RST。"))
 o.rmempty = false
 o.default = "1"
 
@@ -303,8 +326,8 @@ o = s:option(DummyValue, "_stats", translate("名单规模"))
 function o.cfgvalue()
 	local st = ds.list_stats()
 	return string.format(
-		translate("GFW 源 %d 行 · 基础 %d 行 · 已导入 %d 条 · IDNA 跳过 %d 条<br/>最近更新：%s"),
-		st.gfw_lines, st.base_lines, st.domains, st.idna,
+		translate("GFW 源 %d 行 · 基础 %d 行 · 已导入 %d 条<br/>最近更新：%s"),
+		st.gfw_lines, st.base_lines, st.domains,
 		st.updated ~= "" and st.updated or translate("未知"))
 end
 
