@@ -1,7 +1,7 @@
 {
-	"admin/network/dns_chain": {
+	"admin/services/dns_chain": {
 		"title": "DNS 链路",
-		"order": 45,
+		"order": 20,
 		"action": {
 			"type": "cbi",
 			"path": "dnschain/general"

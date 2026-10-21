@@ -2,6 +2,95 @@
 
 本仓库所有功能/配置改动均记录于此。版本判型遵循全局规范（PATCH / MINOR / MAJOR）。
 
+## [v0.12.1] - 2026-10-22
+
+### 变更 — DNS 链路页从「网络」移到「服务」，紧跟 ShadowSocksR Plus+
+
+原位置：网络 → DNS 链路。
+新位置：**服务 → DNS 链路**，紧接在「ShadowSocksR Plus+」下一行。
+
+理由：本页管的 dnsproxy 实例与 SSR-Plus 的分流是同一套链路，
+放在「服务」下与 SSR-Plus 相邻，比埋在「网络」里更符合使用路径。
+
+#### 排序依据（实测侧边栏顺序）
+
+| 菜单项 | order | 定义位置 |
+|---|---|---|
+| ShadowSocksR Plus+ | **10** | `/usr/lib/lua/luci/controller/shadowsocksr.lua` |
+| **DNS 链路** | **20** | 本页（新位置） |
+| 动态 DNS | 59 | `menu.d/luci-app-ddns.json` |
+| DNS Proxy | 60 | `menu.d/luci-app-dnsproxy.json` |
+| 带宽监控 | 80 | `menu.d/luci-app-nlbwmon.json` |
+| 网络唤醒 | 90 | `menu.d/luci-app-wol.json` |
+
+⚠️ SSR-Plus 的 order **不在 menu.d JSON 里**，而是它 Lua controller
+`entry()` 的最后一个参数（第 645 行）。要排在它下一行，本页 order
+必须满足 `10 < order < 59`，取 **20** 留出余量。
+
+#### 修掉的三个问题
+
+**问题 A：设 `page.leaf = true` 会让侧边栏项消失**
+
+v0.12.0 加过 `page.leaf = true`（本意是「每次进入都重新渲染」），
+结果侧边栏里这一项**直接不见**。
+
+实测原因是 leaf 节点在生成的菜单树 JSON 里带 `"wildcard": true`：
+
+```json
+"dns_chain": { "satisfied": true, …, "order": 20,
+               "title": "DNS 链路", "wildcard": true }
+```
+
+LuCI 前端把 wildcard 节点当「占位/通配」不渲染成菜单链接。
+去掉后正常，且 CBI 页面本来就不会被缓存（dispatcher 每次请求都重新
+执行 controller 与 model）。
+
+**问题 B：LuCI 菜单索引缓存键不含「文件内容」的语义变化**
+
+`/usr/share/ucode/luci/dispatcher.uc:333` 的 `hash_filelist()` 是：
+
+```ucode
+hashval = hash(sprintf("%x|%x|%x", st.ino, st.mtime, st.size), hashval);
+```
+
+只吃 **inode / mtime / size**。用 `pscp -scp` 覆盖文件时，若 size 不变
+且 mtime 落在同一秒，哈希不变 → 旧缓存继续生效。
+
+改完菜单相关文件后必须：
+
+```sh
+rm -f /tmp/luci-indexcache.*.json
+```
+
+**问题 C：shadcn 主题的侧边栏有独立的前端缓存**
+
+即使服务端菜单树已正确，侧边栏仍显示旧项。实测缓存位置：
+
+| 位置 | 键 | 大小 |
+|---|---|---|
+| `sessionStorage` | `shadcn.sidebar.cache` | 8119 B |
+| `localStorage` | `shadcn.sidebar` | 5 B |
+
+主题从 `/luci-static/resources/menu-shadcn.js` 读代码，菜单数据缓存在
+`sessionStorage`。**清 `/tmp/luci-indexcache` 不会影响它** —— 浏览器端
+要清 sessionStorage，或关掉标签页重开。
+
+#### 验证
+
+菜单树 JSON（`window.ShadcnMenu.tree`）实测：
+
+```
+services 子项按 order 排序：
+  upnp(0)  vlmcsd(0)  shadowsocksr(10)  dns_chain(20)
+  ddns(59)  dnsproxy(60)  nlbw(80)  wol(90)
+
+network 下已无 dns_chain
+```
+
+浏览器侧边栏截图确认：DNS 链路紧跟在 ShadowSocksR Plus+ 下一行。
+
+页面本身无变化：6 个 tab、52 个配置项、selftest 16/16 PASS。
+
 ## [v0.12.0] - 2026-10-22
 
 ### 变更 — DNS 链路页重构为 Tab 式配置总控台（shadcn 视觉语言）

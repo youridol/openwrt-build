@@ -482,8 +482,14 @@ config ssr 'compat'
 
 ### 8.3 页面结构
 
+> **⚠️ 路径已变更（v0.12.1）**：本 ADR 写作时页面在「网络 → DNS 链路」
+> （`admin/network/dns_chain`）。v0.12.1 起移到**「服务 → DNS 链路」**
+> （`admin/services/dns_chain`），紧接在 ShadowSocksR Plus+ 下一行。
+> 下文的结构描述（分组与字段）仍然有效，只有菜单归属变了。
+> v0.12.0 起页面进一步重组为 6 个 Tab：概览 / 解析 / 分流 / 代理 / DHCP / 诊断。
+
 ```text
-网络 → DNS 链路 (admin/network/dns_chain)
+网络 → DNS 链路 (admin/network/dns_chain)     ← v0.12.1 起为 admin/services/dns_chain
 ├─ 概览
 │   ├─ 一句话结论行（例如「国内正常 / gfw 域名 SERVFAIL（过滤器未监听）」）
 │   ├─ 实时链路图（节点状态由实测驱动，不硬编码拓扑）
