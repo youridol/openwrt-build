@@ -265,6 +265,67 @@ jobs:
             exit 1
           fi
 
+          # 断言布局不溢出（v0.12.3）
+          #
+          # 三处实测过的溢出源，缺任一都会在特定宽度下把内容顶出卡片：
+          #  ① 链路图 SVG 不能写死 max-width —— 容器比它宽时会左贴边、
+          #     右侧留空，视觉上像偏右溢出。必须 width:100% 交给 viewBox。
+          #  ② 表格必须套 .dc-table-wrap 滚动容器 —— 窄屏下 5 列放不进卡片，
+          #     实测溢出 31px。
+          #  ③ 链路图要有 min-width 兜底 —— 容器窄于可读宽度时改横向滚动，
+          #     否则节点文字被压到不可读。
+          if grep -qE '^\.dc-chain svg *\{[^}]*max-width' "$CSS"; then
+            echo "FAIL .dc-chain svg 又写死了 max-width（会左贴边、右侧留空）" >&2
+            exit 1
+          else
+            echo "OK   链路图未写死 max-width"
+          fi
+
+          if grep -q 'dc-table-wrap' "$CSS"; then
+            echo "OK   CSS 含表格滚动容器"
+          else
+            echo "FAIL CSS 缺少 .dc-table-wrap（窄屏表格会溢出）" >&2
+            exit 1
+          fi
+
+          if grep -q 'dc-chain svg' "$CSS" && grep -q 'min-width' "$CSS"; then
+            echo "OK   链路图有 min-width 兜底"
+          else
+            echo "FAIL 链路图缺少 min-width（窄屏文字会被压扁）" >&2
+            exit 1
+          fi
+
+          # 视图层的 3 个表格都必须套滚动容器
+          GEN=package/luci-app-dnschain/luasrc/model/cbi/dnschain/general.lua
+          opened=$(grep -c 'dc-table-wrap"><table class="dc-table"' "$GEN" || true)
+          closed=$(grep -c '</tbody></table></div>' "$GEN" || true)
+          if [ "$opened" = "3" ] && [ "$closed" = "3" ]; then
+            echo "OK   3 个表格均已套滚动容器（开/闭各 $opened）"
+          else
+            echo "FAIL 表格滚动容器数量不对：开 $opened / 闭 $closed（应各 3）" >&2
+            exit 1
+          fi
+
+          # 链路图 viewBox 必须能容纳最右节点
+          # 最右节点 x = X4 + NW + GAP，右边缘 = 该值 + NW；W 必须更大。
+          # 静态校验：W 与 X4/NW/GAP 的字面值要对得上（改坐标必须同步改 W）。
+          VB=$(grep -oE 'local W, H = [0-9]+, [0-9]+' "$GEN" | grep -oE '[0-9]+' | head -1)
+          X4V=$(grep -oE 'local X1, X2, X3, X4 = [0-9]+, [0-9]+, [0-9]+, [0-9]+' "$GEN" | grep -oE '[0-9]+' | tail -1)
+          NWV=$(grep -oE 'local NW, NH = [0-9]+, [0-9]+' "$GEN" | grep -oE '[0-9]+' | head -1)
+          GAPV=$(grep -oE 'local GAP = [0-9]+' "$GEN" | grep -oE '[0-9]+$')
+          if [ -n "$VB" ] && [ -n "$X4V" ] && [ -n "$NWV" ] && [ -n "$GAPV" ]; then
+            NEED=$((X4V + NWV + GAPV + NWV))
+            if [ "$VB" -gt "$NEED" ]; then
+              echo "OK   链路图 viewBox $VB > 最右节点右边缘 $NEED（留 $((VB - NEED))px）"
+            else
+              echo "FAIL 链路图 viewBox $VB 容不下最右节点（右边缘 $NEED）" >&2
+              exit 1
+            fi
+          else
+            echo "FAIL 无法解析链路图几何常量（W/X4/NW/GAP）" >&2
+            exit 1
+          fi
+
       - name: Fetch luci-theme-shadcn (默认 LuCI 主题)
         working-directory: lede
         run: |

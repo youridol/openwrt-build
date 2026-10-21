@@ -235,9 +235,26 @@ function o.cfgvalue()
 		return alive and "var(--dc-ok)" or "var(--dc-bad)"
 	end
 
-	local W, H = 1040, 356
+	-- ── 画布与节点几何 ────────────────────────────────────────────
+	--
+	-- 坐标系是固定的 viewBox（SVG 会自动缩放适应容器），所以这里的
+	-- 数字只需保证「所有节点完整落在 viewBox 内」，不必跟随容器宽度。
+	--
+	-- ⚠️ 最右一列的右边缘必须留出边距（v0.12.3 修）：
+	--
+	--   最右节点 x = X4 + NW + GAP = 700 + 128 + 88 = 916
+	--   右边缘     = 916 + NW = 916 + 128 = 1044
+	--   viewBox 宽 = W = 1060，留 16px 边距
+	--
+	-- v0.12.2 及之前是 X4 + NW + 96 = 924，右边缘 1052 > W(1040) ——
+	-- 「国外上游」节点被 viewBox 裁掉 12px，在窄视口下实测超出卡片
+	-- 内容区 8px（卡片 padding 16px，SVG 被 max-width 撑满时按比例放大）。
+	-- 改坐标后必须同步 W，二者是绑定的。
+	local W, H = 1060, 356
 	local NW, NH = 128, 54
 	local X1, X2, X3, X4 = 12, 236, 424, 700
+	local GAP = 88              -- 第 4 列到最右节点的水平间距
+	local X5 = X4 + NW + GAP    -- 最右节点（国外上游）
 	local YT, YB = 52, 216
 
 	local p = {}
@@ -300,7 +317,7 @@ function o.cfgvalue()
 	p[#p + 1] = line(X3 + NW, YT + NH / 2, X4, YT + NH / 2, c(sn.dnsproxy_cn))
 	p[#p + 1] = line(X3 + NW, YB + NH / 2, X4, YB + NH / 2,
 		c(sn.dnsproxy_fg and sn.proxy_1234))
-	p[#p + 1] = line(X4 + NW, YB + NH / 2, X4 + NW + 96, YB + NH / 2,
+	p[#p + 1] = line(X4 + NW, YB + NH / 2, X5, YB + NH / 2,
 		c(sn.proxy_1234 and sn.dnsproxy_fg))
 
 	-- 节点
@@ -316,7 +333,7 @@ function o.cfgvalue()
 		sn.dnsproxy_cn, translate("223.5.5.5"))
 	p[#p + 1] = node(X4, YB, "SSR-Plus", ":1234",
 		sn.proxy_1234, sn.proxy_1234 and translate("透明代理") or translate("未运行"))
-	p[#p + 1] = node(X4 + NW + 96, YB, translate("国外上游"), translate("经代理"),
+	p[#p + 1] = node(X5, YB, translate("国外上游"), translate("经代理"),
 		sn.proxy_1234 and sn.dnsproxy_fg, translate("dns.google"))
 
 	-- 分流标注（放在折线旁，不压线）
@@ -431,12 +448,12 @@ function o.cfgvalue()
 			cstat.dns_local_answered or 0,
 			cstat.dns_queries_forwarded or 0))
 
-	return '<table class="dc-table"><thead><tr>' ..
+	return '<div class="dc-table-wrap"><table class="dc-table"><thead><tr>' ..
 		'<th>' .. translate("组件") .. '</th>' ..
 		'<th>' .. translate("端口") .. '</th>' ..
 		'<th>' .. translate("状态") .. '</th>' ..
 		'<th>' .. translate("说明") .. '</th>' ..
-		'</tr></thead><tbody>' .. table.concat(rows) .. '</tbody></table>'
+		'</tr></thead><tbody>' .. table.concat(rows) .. '</tbody></table></div>'
 end
 
 ------------------------------------------------------------------------
@@ -722,13 +739,13 @@ function o.cfgvalue()
 			translate("源 china6_ssr.txt，供 SSR-Plus 的 IPv6 分流使用")),
 	}
 
-	return '<table class="dc-table"><thead><tr>' ..
+	return '<div class="dc-table-wrap"><table class="dc-table"><thead><tr>' ..
 		'<th>' .. translate("集合 / 数据库") .. '</th>' ..
 		'<th class="dc-table__num">' .. translate("实测") .. '</th>' ..
 		'<th class="dc-table__num">' .. translate("源行数") .. '</th>' ..
 		'<th>' .. translate("状态") .. '</th>' ..
 		'<th>' .. translate("说明") .. '</th>' ..
-		'</tr></thead><tbody>' .. table.concat(rows) .. '</tbody></table>'
+		'</tr></thead><tbody>' .. table.concat(rows) .. '</tbody></table></div>'
 end
 
 o = s:option(Flag, "auto_import", translate("自动导入"),
@@ -936,10 +953,10 @@ function o.cfgvalue()
 	return '<div style="margin-bottom:10px">' .. summary ..
 		(result.conclusion ~= "" and (' &nbsp; <span class="dc-badge dc-badge--info">' ..
 			result.conclusion .. '</span>') or "") .. '</div>' ..
-		'<table class="dc-table"><thead><tr>' ..
+		'<div class="dc-table-wrap"><table class="dc-table"><thead><tr>' ..
 		'<th class="dc-table__num">#</th><th>' .. translate("结果") .. '</th>' ..
 		'<th>' .. translate("检查项") .. '</th><th>' .. translate("证据") .. '</th>' ..
-		'</tr></thead><tbody>' .. table.concat(rows) .. '</tbody></table>'
+		'</tr></thead><tbody>' .. table.concat(rows) .. '</tbody></table></div>'
 end
 
 o = s:option(Flag, "auto_rollback", translate("失败自动回滚"),

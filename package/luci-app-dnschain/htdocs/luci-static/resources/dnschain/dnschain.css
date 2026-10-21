@@ -254,6 +254,13 @@ html[data-darkmode="true"] {
 	display: flex;
 	flex-direction: column;
 	gap: 8px;
+	/*
+	 * 指标条是「标签 — 条 — 数值」三列结构，条太长反而难比较长度，
+	 * 所以限宽 620px。
+	 *
+	 * 保持左对齐、不居中：同卡片里的链路图、统计卡、组件状态表都是
+	 * 左对齐填满宽度，指标条若居中会与它们的中线错开，看起来更乱。
+	 */
 	max-width: 620px;
 }
 
@@ -334,10 +341,36 @@ html[data-darkmode="true"] {
 
 /* ── 表格 ────────────────────────────────────────────────────────── */
 
+/*
+ * 窄屏（< 720px）下 5 列表格放不进卡片，实测溢出 31px。
+ * 用滚动容器包住表格：外层负责横向滚动，表格自身保持 min-width
+ * 不被压扁（压扁后「组件/状态/说明」会折成多行，更难读）。
+ *
+ * 为什么要包一层而不是直接给 table 加 overflow：
+ *   <table> 的 overflow 行为在 table-layout 下不可靠（多数浏览器
+ *   直接忽略）。滚动必须由块级祖先承担。
+ *
+ * .dc-table-wrap 由视图层输出（general.lua 里所有表格都套上它）。
+ */
+.dc-table-wrap {
+	width: 100%;
+	max-width: 100%;
+	overflow-x: auto;
+	-webkit-overflow-scrolling: touch;
+}
+
 .dc-table {
 	width: 100%;
+	min-width: 480px;
 	border-collapse: collapse;
 	font-size: 12px;
+}
+
+/* 窄屏下不强制 min-width，让表格按内容自然收窄并允许滚动 */
+@media (max-width: 720px) {
+	.dc-table {
+		min-width: 420px;
+	}
 }
 
 .dc-table th {
@@ -367,8 +400,22 @@ html[data-darkmode="true"] {
 
 /* ── 链路图容器 ──────────────────────────────────────────────────── */
 
+/*
+ * 链路图用固定 viewBox 的内联 SVG，靠 width:100% + height:auto 自适应。
+ *
+ * 为什么不再写 max-width（v0.12.3 改）：
+ *   原先 `.dc-chain svg { max-width: 1040px }`，而容器（section 内容区）
+ *   实测 1070px —— SVG 被限死在 1040，左贴容器左缘、右边空 30px。
+ *   视觉上整张图「偏左」，最右节点又紧贴 SVG 右缘，看起来像偏右溢出。
+ *   现在交给 viewBox 缩放：SVG 宽度跟随容器，几何比例不变。
+ *
+ * 为什么保留 overflow-x: auto：
+ *   容器窄于 viewBox 的最小可读宽度时（手机），宁可横向滚动，
+ *   也不要压扁 —— 压扁会让节点里的 11px 文字变得不可读。
+ */
 .dc-chain {
 	overflow-x: auto;
+	-webkit-overflow-scrolling: touch;
 	padding: 4px 0;
 }
 
@@ -376,8 +423,15 @@ html[data-darkmode="true"] {
 	display: block;
 	width: 100%;
 	height: auto;
-	max-width: 1040px;
+	min-width: 720px;   /* 低于此宽度改横向滚动，避免文字不可读 */
 	font-family: inherit;
+}
+
+/* 宽屏下不需要横向滚动，居中显示 */
+@media (min-width: 1180px) {
+	.dc-chain svg {
+		min-width: 0;
+	}
 }
 
 /* ── 窄屏适配 ────────────────────────────────────────────────────── */
