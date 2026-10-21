@@ -2,6 +2,177 @@
 
 本仓库所有功能/配置改动均记录于此。版本判型遵循全局规范（PATCH / MINOR / MAJOR）。
 
+## [v0.10.0] - 2026-10-21
+
+### 重构 — 移除 chinadns-ng，改双 dnsproxy 实例 + dnsmasq 分流
+
+**起因**：v0.9.1 刷机后客户机全部无法解析。逐项排查发现两个真实缺陷，
+且第一个修好后暴露出第二个更深的问题。
+
+#### 缺陷 1：`paste` 命令缺失导致框架完全不启动（已修）
+
+```
+/etc/rc.common: line 273: paste: not found
+ERROR: dnschain.upstream.foreign 为空，无法生成过滤器参数
+ERROR: 生成运行时配置失败，中止启动
+```
+
+`dc_gen_filter_args` 用 `paste -sd, -` 拼国外上游列表，而 BusyBox **默认不编译
+`paste`**（也没装 coreutils-paste）。`paste` 失败 → `trust` 为空 → 被误判成
+「配置里没填上游」→ `dnsproxy :5353` 与 `chinadns-ng :5335` **都不启动**，
+客户机解析全断。而 `uci get dnschain.foreign.server` 实际返回正常值。
+
+改用 `awk 'NR>1{printf ","} {printf "%s", $0}'`（awk 在 BusyBox 必有）。
+实测 5 种输入（单条/两条/三条/空/含空格）与 `paste -sd, -` **完全等价**。
+
+#### 缺陷 2：chinadns-ng 的 DoT 上游在本环境永远不可用（架构性）
+
+修好缺陷 1 后两个进程都起来了，但国外域名仍全部无结果。实测证据链：
+
+| 测试 | 结果 |
+|---|---|
+| `tls://8.8.8.8:853` 经 `:1234` | ❌ `peer sent close notify`（只回 204 字节） |
+| `tls://1.1.1.1:853` 经 `:1234` | ❌ 同上 |
+| `tls://9.9.9.9:853` 经 `:1234` | ❌ 同上 |
+| `8.8.8.8:443` 经 `:1234` | ✅ TLSv1.3 成功 |
+| `1.1.1.1:80` 经 `:1234` | ✅ 301 |
+| `223.5.5.5:853` **直连**（在 china 集） | ✅ TLSv1.3 |
+
+**同一 IP，443/80 通、853 不通** → 落地节点到 853 的链路被阻断。
+
+而 `chinadns-ng` 的 `-t` **只支持 `udp:// tcp:// tls://`，不支持 DoH**
+（实测 `invalid proto: 'https://'`，二进制里 `doh` 字样数 = 0）。
+
+**这形成死锁**：国外解析要么用 DoT（853 不通），要么放弃加密。
+用国内 DNS 查国外则拿到污染答案（实测 `google → 104.244.42.197`、
+`AAAA → 2001::1`）。
+
+#### 新架构
+
+```
+dnsmasq:53（唯一缓存 + 唯一分流层）
+  ├─ 默认              → 127.0.0.1#5353  dnsproxy 实例 1（阿里 DoT/DoH，直连）
+  ├─ server=/国外域名/ → 127.0.0.1#5336  dnsproxy 实例 2（Google DoH，经 :1234）
+  └─ nftset=/国外域名/4#inet#ss_spec#blacklist
+       解析结果自动写入代理 IP 集（替代 chinadns-ng 的 -A）
+```
+
+| 组件 | 变化 |
+|---|---|
+| `chinadns-ng` | **移除**（不再启动、不再配置） |
+| `dnsproxy` | 从 1 个实例变 **2 个**（`:5353` 国内 / `:5336` 国外） |
+| 国外上游 | `tls://8.8.8.8` → `https://dns.google/dns-query`（DoH 走 443） |
+| AAAA 抑制 | **取消**（`foreign 'suppress'` → `'keep'`） |
+| `filter_https_rr` | `1` → `0`（不再抑制 SVCB/HTTPS） |
+| SSR-Plus `ipv6_support` | 强制 `1`（IPv6 流量也走代理） |
+| SSR-Plus `filter_aaaa` | 强制 `0`（保留国外双栈） |
+
+#### 为什么取消 AAAA 抑制
+
+SSR-Plus 的「IPv6 流量代理」（`ipv6_support=1`）实测效果：
+
+| 测试 | 结果 |
+|---|---|
+| `curl -6 www.google.com` | ✅ 302 |
+| `curl -6 www.youtube.com` | ✅ 200 |
+| `curl -6 www.baidu.com` | ✅ 200（国内直连） |
+| IPv6 代理链 | ✅ 10 条（`ss_spec6_*`） |
+| 策略路由 | ✅ `fwmark 0x53535250 → table 999` |
+| `dnsmasq.filter_aaaa` | ✅ 自动设为 **0** |
+
+既然国外 IPv6 也走代理，就不存在「IPv6 直连被 RST」的问题，
+抑制 AAAA 反而让国外站点失去双栈能力。
+
+#### 关键教训：不能用 dnsproxy 的 `[/域名/]` 分流
+
+最初实现是单实例 + `upstreams-domains.txt`（17767 条
+`[/域名/]https://dns.google`）。**实测完全失败**：
+
+```
+DEBUG upstream is reserved idx=3    addr=https://dns.google:443/dns-query domains_num=1
+DEBUG upstream is reserved idx=4    addr=https://dns.google:443/dns-query domains_num=1
+...（一直到 idx=17769）
+```
+
+`dnsproxy` 为**每个域名各注册一条 reserved 上游**，17767 个条目耗尽资源，
+查询直接 `connection timed out; no servers could be reached`。
+而国内域名（走默认上游）正常。
+
+改成「两个实例 + dnsmasq 的 `server=/域名/` 分流」后立即正常。
+
+#### 关键教训：不能过滤 `xn--`
+
+v0.9.x 生成上游文件时过滤 `xn--`（因为 dnsproxy 的 `[/域名/]` 形式不认
+punycode，会整体拒绝启动）。v0.10.0 改用 dnsmasq 的 `server=/域名/` 形式，
+**dnsmasq 原生支持 punycode，不能过滤**。
+
+实测依据：`gfw_list.conf` 有 58 条 `xn--` 域名，过滤后它们只剩
+`server=/域名/127.0.0.1#5335`（该端口已无监听），全部解析失败
+（`apple.xn--czr694b`、`nike.xn--hxt814e` 等）。改为不过滤后恢复。
+
+#### selftest 判据的四处修正
+
+16 项自检里有 4 项的判据本身有误，一并修正：
+
+| 项 | 旧判据 | 新判据 | 为什么 |
+|---|---|---|---|
+| 1 | 检查 `nft chain inet fw4 dns_intercept_lan` | 检查 LAN 地址上 `:53` 能否解析 | 该链**从来不存在**，而 dnsmasq 直接监听 LAN:53，客户机无需 nft 劫持 |
+| 2 | 扫描整个 SSR conf-dir 的端口 | 只查框架自己的 `dnschain-split.conf` | SSR-Plus 的 17804 条 `#5335` 是它自己的文件（框架不重写），会永久误报 |
+| 7 | 读 `shadowsocksr.filter_aaaa` | 读 `dhcp.@dnsmasq[0].filter_aaaa` | 前者是用户偏好，后者才是实际生效值；实测前者=1 而 AAAA 完全正常 |
+| 15 | `grep -v '#5353'` | 只统计非 `127.0.0.1` 的 IP | 旧写法把 `#5336`（国外实例）误判成明文旁路，虚报 35627 条 |
+
+另修 `dns_class` 的 AAAA 判定 bug：原用 `grep -vc ':'` 排除服务器行，
+但 **IPv6 地址本身含冒号**，导致 AAAA 答案全被过滤 → 永久误报 EMPTY。
+
+### 实测结果（路由器 192.168.3.254）
+
+自检 **16/16 全 PASS，`CONCLUSION: 链路正常`**：
+
+| 类别 | 结果 |
+|---|---|
+| 国内 A | `baidu → 183.2.172.177`、`qq → 121.14.77.221` ✅ |
+| 国内 AAAA | `taobao → 240e:950:400:1:3::6e` ✅ 保留 |
+| **国外 A** | `google → 142.251.155.119` ✅ **真实**（原为 `104.244.42.197`） |
+| **国外 AAAA** | `google → 2001:4860:4826:7700::` ✅ **真实**（原为 `2001::1`） |
+
+端到端访问：
+
+| 目标 | IPv4 | IPv6 |
+|---|---|---|
+| google.com | 302 ✅ | 302 ✅ |
+| youtube.com | 200 ✅ | 200 ✅ |
+| github.com | 301 ✅ | 000（该站无 IPv6，正常） |
+| baidu.com | 200 ✅ | 200 ✅ |
+
+nftset 生效：`blacklist` 集内出现 `142.251.12.94`、`142.251.20.94` 等真实 IP。
+
+### CI 断言同步
+
+| 断言 | 旧 | 新 |
+|---|---|---|
+| 4 | 必须有 `-N tag:gfw` | **不得有** `dc_gen_filter_args` |
+| 4b | — | 必须有 `dc_gen_foreign_args` |
+| 4c | — | **不得有** `[/&/]` 形式（会耗尽 dnsproxy 资源） |
+| 6 | 必须过滤 `xn--` | **不得过滤** `xn--` |
+| 9 | `profile 'primary'` / `foreign 'suppress'` | `foreign_port '5336'` / `foreign 'keep'` / `require_ipv6 '1'` |
+| 9b | — | 国外上游必须是 DoH，且不得有 `tls://8.8.8.8` |
+| `.config` | 要求 `chinadns-ng=y` | 不再要求（框架不依赖该组件） |
+
+`tools/verify-dnschain-ci-sim.sh` 模拟校验 **36 项全 OK**。
+
+### 验证
+
+| # | 项目 | 方式 | 结果 |
+|---|---|---|---|
+| 1 | 5 个脚本 dash 语法 | `sh -n` | 全 PASS |
+| 2 | `paste`/`awk` 等价性 | 5 种输入对比 | 完全等价 |
+| 3 | 双实例启动 | 路由器实测 | `:5353` + `:5336` 均在监听 |
+| 4 | 自检 16 项 | 路由器实测 | **16/16 PASS** |
+| 5 | 端到端 IPv4/IPv6 | `curl -4` / `curl -6` | 全通 |
+| 6 | CI 模拟 | `verify-dnschain-ci-sim.sh` | 36 项 OK |
+| 7 | YAML 语法 | `yaml.safe_load` | PASS |
+| 8 | 行尾 | `od -c` | 全 LF |
+
 ## [v0.9.1] - 2026-10-21
 
 ### 修复 — 不能关掉 `luci-theme-bootstrap`（v0.9.1 首次构建失败）

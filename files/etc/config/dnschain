@@ -4,32 +4,50 @@
 # 本文件由 openwrt-build 仓库 files/ overlay 提供。
 # 设计依据：docs/adr/0003-dns-chain-framework.md
 #
-# 链路：
-#   LAN 客户机 → fw4 拦截 53 → dnsmasq:53（唯一缓存层 + DHCP）
-#     ├─ 默认 → dnsproxy:5353（唯一路由入口）
-#     │    ├─ 国内 → 国内加密池（tls://223.5.5.5 等，直连）
-#     │    └─ gfw  → chinadns-ng:5335（框架自持策略过滤器）
-#     │              ├─ AAAA/HTTPS 抑制（-N tag:gfw --filter-qtype 64,65）
-#     │              └─ 国外 DoT（tls://8.8.8.8 等，经 :1234 代理）
-#     └─ 旁路 → SSR-Plus 生成的 server=/域名/#5335（同策略，不删不重写）
+# 链路（v0.10.0 起：无 chinadns-ng）：
+#   LAN 客户机 → fw4 拦截 53 → dnsmasq:53（唯一缓存层 + DHCP + 唯一策略层）
+#     ├─ 国内域名 → dnsproxy:5353 → 国内加密池（DoT/DoH，直连）
+#     ├─ 国外域名 → dnsproxy:5353 → 国外 DoH（https://dns.google，经 :1234）
+#     └─ nftset=/域名/4#inet#ss_spec#blacklist
+#          由 dnsmasq 把国外域名的解析结果直接写入代理 IP 集
+#
+# 为什么去掉 chinadns-ng（v0.10.0 的关键决策，实测依据）：
+#   1. chinadns-ng 的 -t 只支持 udp:// tcp:// tls://，**不支持 DoH**
+#      （实测 `invalid proto: 'https://'`，二进制里 doh 字样数 = 0）
+#   2. 而落地节点到 8.8.8.8:853 / 1.1.1.1:853 全部不通
+#      （实测 `peer sent close notify`，conntrack 显示只回 204 字节）
+#      到 443 却完全正常（curl google 302 / youtube 200）
+#   3. 故 chinadns-ng 的国外上游在本环境下**永远不可用**，
+#      只能退化成「用国内 DNS 查国外」→ 拿到污染答案
+#      （实测 google → 104.244.42.197 / AAAA → 2001::1）
+#   4. dnsproxy 原生支持 DoH 且支持按域名分流，实测经代理拿到真实答案
+#      （google A → 142.251.153.119，AAAA → 2001:4860:4826:7700::）
+#
+# 为什么不再需要 AAAA 抑制：
+#   SSR-Plus 的「IPv6 流量代理」（ipv6_support=1）启用后：
+#     - get_filter_aaaa() 直接返回 0（不再抑制 AAAA）
+#     - set_ipv6_dns_filter 把 dnsmasq 的 filter_aaaa 设为 0
+#     - 装上完整 IPv6 代理链（ss_spec6_*，10 条链 + fwmark 策略路由）
+#   实测：curl -6 google → 302、youtube → 200、baidu → 200（国内直连）
+#   既然国外 IPv6 也走代理，就没有「IPv6 直连被 RST」的问题，
+#   抑制 AAAA 反而会让国外站点失去双栈能力。
 #
 # 硬约束：
-#   - :5335 归本框架的 chinadns-ng 所有；SSR-Plus 必须处于模式 0 或 7
-#   - 缓存只在 dnsmasq 一层；dnsproxy 与 chinadns-ng 均不缓存
-#   - 国内 AAAA 保留、国外 AAAA 抑制（ADR-0001 拒绝集语义）
+#   - 缓存只在 dnsmasq 一层；dnsproxy 不缓存
+#   - 国外域名必须走 DoH（不能用国内上游，会拿到污染答案）
+#   - ipv6_support 必须为 1（否则国外 AAAA 无意义）
 #   - 任何一处故障都不回落明文上游（ADR §12 降级矩阵）
 # ============================================================
 
 config dnschain 'main'
-	# 总开关：关闭时整条框架不启（chinadns-ng 不监听 :5335）
+	# 总开关：关闭时整条框架不启（dnsproxy 不监听）
 	option enabled '1'
 	# 拦截总开关（滑块）：开启时强制拦截静态 + DHCP 客户机的 53
 	option intercept '1'
-	# 端口档案：primary = 过滤器 :5335（SSR 模式 0/7）
-	#           coexist = 过滤器 :5337（SSR 模式 1/4/5/6）
-	option profile 'primary'
+	# 国内域名入口（dnsproxy 实例 1）
 	option entry_port '5353'
-	option filter_port '5335'
+	# 国外域名入口（dnsproxy 实例 2，只配 DoH 上游）
+	option foreign_port '5336'
 	# 拒绝 LAN 出向 853（让自带 DoT 的客户端快速失败并回落明文）
 	option intercept_dot '1'
 	# 尽力而为地阻断已知公共 DoH（443 无法可靠区分，仅标注）
@@ -42,22 +60,26 @@ config upstream 'cn'
 	list server 'https://dns.alidns.com/dns-query'
 
 config upstream 'foreign'
-	# 国外加密池：必须是 IP 形式（dnsproxy 不支持 socks5，只能靠 IP 层送进 :1234；
-	# 域名形式会因 SNI 与 REDIRECT 后的目标 IP 不一致而握手失败）
-	list server 'tls://8.8.8.8'
-	list server 'tls://1.1.1.1'
+	# 国外加密池：**必须用 DoH**（443），不能用 DoT（853 被落地节点阻断）。
+	# 必须用域名形式（不是 IP）：dnsproxy 的 DoH 上游需要 SNI 与 Host，
+	# 而经代理的 443 完全正常（实测 TLSv1.3 握手成功）。
+	# dnsproxy 会把这里列出的上游应用到 gfw 名单内的域名。
+	list server 'https://dns.google/dns-query'
+	list server 'https://cloudflare-dns.com/dns-query'
+	# 走代理出站（dnsproxy 自身出向由 ss_spec_output 接管，853/443 都在 dports 内）
 	option via_proxy '1'
-	# 证书校验：chinadns-ng 默认关闭，这里显式开启
+	# DoH 证书校验：开启（有 SNI，可正常校验）
 	option cert_verify '1'
 
 config aaaa 'policy'
-	# 以下两个字段是**只读**的：它们表达不可配置的物理约束（节点只有 IPv4），
-	# 写成可选项只会制造「配成 keep 然后国外被 RST」的故障。
-	# 页面把它们显示为只读并附原因。
+	# 以下两个字段是**只读**的：它们表达物理约束（节点 IPv4-only）。
+	# 但 v0.10.0 起 SSR-Plus 的 IPv6 流量代理会把国外 IPv6 也送进代理，
+	# 故国外 AAAA **不再抑制**——保留双栈，客户端可优先走 IPv6 并经代理。
 	option domestic 'keep'
-	option foreign 'suppress'
-	# 同时抑制 qtype 65（HTTPS/SVCB 携带 ipv6hint）
-	option filter_https_rr '1'
+	option foreign 'keep'
+	# HTTPS/SVCB 记录不再抑制（原来抑制是为了防止 ipv6hint 绕过 AAAA 抑制，
+	# 现在不抑制 AAAA，这条也就没有意义了）
+	option filter_https_rr '0'
 
 config lists 'lists'
 	# 单向只读源：SSR-Plus 自带的 GFW 列表与基础列表
@@ -86,7 +108,10 @@ config selftest 'selftest'
 	option interval '300'
 
 config ssr 'compat'
-	# 期望的 SSR-Plus DNS 后端模式：0 = 不启后端（:5335 归框架）
+	# 期望的 SSR-Plus DNS 后端模式：0 = 不启后端（框架不需要 :5335 了，
+	# 但仍要求 0，避免 SSR-Plus 自己起 mosdns/dns2tcp 抢 DNS）
 	option mode '0'
 	# 收敛器强制写回（关闭时只告警，不修改 SSR 的键）
 	option enforce '1'
+	# 期望的 IPv6 流量代理开关：1 = 启用（国外 IPv6 也走代理，保留双栈）
+	option require_ipv6 '1'

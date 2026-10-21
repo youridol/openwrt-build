@@ -49,20 +49,11 @@ dc_get_list() {
 }
 
 # ------------------------------------------------------------
-# 端口档案
-# 返回过滤器应监听的端口。primary=5335，coexist=5337。
-# ------------------------------------------------------------
-dc_filter_port() {
-	local profile
-	profile=$(dc_get main profile primary)
-	case "$profile" in
-		coexist) echo "5337" ;;
-		*)       echo "5335" ;;
-	esac
-}
-
 # 该档案对应的 SSR-Plus pdnsd_enable 值
-# 0 = 不启后端（:5335 归框架）；coexist 下允许 1/4/5/6，但框架不强制改
+# 0 = 不启后端（v0.10.0 起框架也不再需要 :5335，但仍要求 0，
+#     避免 SSR-Plus 自己起 mosdns/dns2tcp 制造第二个解析器）
+# coexist 下允许 1/4/5/6，但框架不强制改
+# ------------------------------------------------------------
 dc_ssr_mode_for_profile() {
 	local profile
 	profile=$(dc_get main profile primary)
@@ -99,19 +90,6 @@ dc_port_listening() {
 	local pid
 	pid=$(dc_port_owner "$1" "${2:-udp}")
 	[ -n "$pid" ]
-}
-
-# 该 PID 的命令行是否属于框架的 chinadns-ng
-dc_is_framework_filter() {
-	local pid cmd
-	pid="$1"
-	[ -n "$pid" ] || return 1
-	[ -r "/proc/${pid}/cmdline" ] || return 1
-	cmd=$(tr '\0' ' ' < "/proc/${pid}/cmdline" 2>/dev/null)
-	case "$cmd" in
-		*chinadns-ng*) return 0 ;;
-		*)             return 1 ;;
-	esac
 }
 
 # ------------------------------------------------------------
@@ -163,58 +141,79 @@ dc_extract_domains() {
 }
 
 # ------------------------------------------------------------
-# 生成 dnsproxy 的域名上游文件
+# 生成「国外域名 → 国外 dnsproxy 实例」的 dnsmasq 分流规则
 #
-# 两条硬约束（ADR §10.1）：
-#   1. 必须过滤 xn-- 与非法标签 —— dnsproxy 会**整体拒绝启动**，
-#      不是跳过坏条目（实测：idna: invalid label "wcvs22d1m"）。
-#   2. 每行形如 [/域名/]127.0.0.1:<filter_port>
+# v0.10.0 架构：**两个 dnsproxy 实例 + dnsmasq 按域名分流**
 #
-# 输出文件：/var/etc/dnschain/upstreams-domains.txt
-# 同时把被过滤掉的 IDNA 域名写到 idna-skipped.txt 供页面显示。
+#   实例 1（:5353，国内）：阿里 DoT/DoH，直连
+#   实例 2（:5336，国外）：只有 Google DoH，经 :1234 代理
+#
+#   dnsmasq:53
+#     ├─ 默认 → 127.0.0.1#5353（国内）
+#     └─ server=/国外域名/127.0.0.1#5336（国外）
+#
+# ⚠️ 为什么不用 dnsproxy 的 [/域名/] 分流（这是关键教训）：
+#   最初实现是让 dnsproxy 单实例加载 upstreams-domains.txt（17767 条
+#   [/域名/]https://dns.google），实测**完全失败**：
+#     - dnsproxy 为每个域名各注册一条 reserved 上游
+#       （verbose 日志：upstream is reserved idx=3 ... idx=17769）
+#     - 17767 个上游条目耗尽资源，查询 google 时直接
+#       `connection timed out; no servers could be reached`
+#     - 而国内域名（走默认上游）正常
+#   改成两个实例 + dnsmasq 分流后，实测：
+#     google A    → 142.251.155.119
+#     google AAAA → 2001:4860:482d:7700::
+#     baidu  A    → 183.2.172.177
+#
+# 输出文件：/var/etc/dnschain/foreign-split.conf（dnsmasq 片段）
+# 同时把 IDNA 域名写到 idna-bypass.conf（dnsmasq 的 punycode 旁路）。
 # ------------------------------------------------------------
 dc_gen_upstream_file() {
-	local port outdir all filtered skipped count kept
-	port=$(dc_filter_port)
+	local outdir count fport
+
 	outdir="$DNSCHAIN_RUN_DIR"
+	fport=$(dc_get main foreign_port 5336)
 
 	mkdir -p "$outdir" || return 1
 
-	all=$(mktemp "${outdir}/.domains.XXXXXX") || return 1
-	dc_extract_domains > "$all"
+	# 国外上游必须至少一条
+	if [ -z "$(dc_get_list foreign server | head -1)" ]; then
+		dnschain_log "ERROR: dnschain.upstream.foreign 为空，无法生成国外分流规则"
+		return 1
+	fi
 
-	# 合法域名：字母数字开头结尾，中间允许 . _ -，至少一个点，顶级域 >= 2 字母
-	# 显式排除 xn--（IDNA punycode，dnsproxy 的 idna 解析器不认）
-	filtered=$(mktemp "${outdir}/.valid.XXXXXX") || { rm -f "$all"; return 1; }
-	grep -vE 'xn--' "$all" \
+	# 国外域名 → 国外 dnsproxy 实例（dnsmasq 的 server= 规则）
+	#
+	# ⚠️ **不过滤 xn--**（v0.10.0 修正）。
+	# v0.9.x 过滤 IDNA 是因为 dnsproxy 的 `[/域名/]` 形式不认 punycode
+	# （会整体拒绝启动：idna: invalid label "wcvs22d1m"）。
+	# 但 v0.10.0 改用 dnsmasq 的 `server=/域名/` 形式 —— dnsmasq 原生支持
+	# punycode，无需过滤。
+	#
+	# 不过滤的实测依据：gfw_list.conf 里有 58 条 xn-- 域名，过滤后它们
+	# 只剩 gfw_list 的 `server=/域名/127.0.0.1#5335`（该端口已无监听），
+	# 实测这 58 条全部解析失败（apple.xn--czr694b、nike.xn--hxt814e 等）。
+	# 改成不过滤后它们也指向 :5336，恢复正常。
+	#
+	# 仍需过滤**非法标签**（不是合法域名的垃圾行）。
+	dc_extract_domains \
 		| grep -E '^[a-zA-Z0-9]([a-zA-Z0-9._-]*[a-zA-Z0-9])?\.[a-zA-Z]{2,}$' \
-		> "$filtered"
+		| sed "s|.*|server=/&/127.0.0.1#${fport}|" > "${outdir}/foreign-split.conf"
 
-	skipped=$(mktemp "${outdir}/.idna.XXXXXX") || { rm -f "$all" "$filtered"; return 1; }
-	grep -E 'xn--' "$all" > "$skipped"
+	count=$(wc -l < "${outdir}/foreign-split.conf" 2>/dev/null || echo 0)
 
-	sed "s|.*|[/&/]127.0.0.1:${port}|" "$filtered" > "${outdir}/upstreams-domains.txt"
-	sed "s|.*|server=/&/127.0.0.1#${port}|" "$skipped" > "${outdir}/idna-bypass.conf"
-
-	count=$(wc -l < "$filtered" 2>/dev/null || echo 0)
-	kept=$(wc -l < "$skipped" 2>/dev/null || echo 0)
-
-	rm -f "$all" "$filtered" "$skipped"
-
-	dnschain_log "upstreams-domains.txt: ${count} 条；IDNA 跳过 ${kept} 条（写入 idna-bypass.conf）"
+	dnschain_log "foreign-split.conf: ${count} 条 → 127.0.0.1#${fport}"
 	echo "$count"
 }
 
 # ------------------------------------------------------------
-# dnsproxy 启动参数（写入 dnsproxy.args，一行一个参数）
+# 国内 dnsproxy 实例参数（:5353）
 # ADR §10.1：刻意不配 --cache*、--fallback、--ipv6-disabled
 # ------------------------------------------------------------
 dc_gen_dnsproxy_args() {
-	local out entry port up domfile
+	local out entry
 	out="$DNSCHAIN_RUN_DIR/dnsproxy.args"
 	entry=$(dc_get main entry_port 5353)
-	port=$(dc_filter_port)
-	domfile="$DNSCHAIN_RUN_DIR/upstreams-domains.txt"
 
 	mkdir -p "$DNSCHAIN_RUN_DIR" || return 1
 
@@ -231,91 +230,70 @@ dc_gen_dnsproxy_args() {
 			[ -n "$up" ] && { echo "--upstream"; echo "$up"; }
 		done
 
-		# 国外域名 → 策略过滤器（文件形式）
-		[ -s "$domfile" ] && { echo "--upstream"; echo "$domfile"; }
-
-		# bootstrap 仅用于解析加密上游的主机名（明文是它唯一且应有的用途）
+		# bootstrap 仅用于解析加密上游的主机名
 		echo "--bootstrap"
 		echo "223.5.5.5"
 		echo "--bootstrap"
 		echo "223.6.6.6"
 
 		echo "--timeout"
-		echo "5s"
+		echo "8s"
+
+		# 单实例只服务国内域名，parallel 取最快即可
 		echo "--upstream-mode"
 		echo "parallel"
 
-		# hosts
 		echo "--hosts-file-enabled=true"
 		echo "--hosts-files"
 		echo "/etc/hosts"
 	} > "$out"
 
-	# 注意：这里**不写** --cache / --cache-optimistic / --cache-size /
-	# --cache-min-ttl / --cache-max-ttl / --fallback / --ipv6-disabled。
-	# 理由见 ADR §10.1、§10.2、§10.5。
+	# 注意：这里**不写** --cache / --fallback / --ipv6-disabled。
 	echo "$out"
 }
 
 # ------------------------------------------------------------
-# chinadns-ng 启动参数
-# ADR §10.3
+# 国外 dnsproxy 实例参数（:5336）
+#
+# 只配国外 DoH 上游。**必须用 DoH（443）**，不能用 DoT（853）：
+#   实测落地节点到 8.8.8.8:853 / 1.1.1.1:853 全部
+#   `peer sent close notify`（只回 204 字节），而 443 完全正常。
 # ------------------------------------------------------------
-dc_gen_filter_args() {
-	local out port trust
-	out="$DNSCHAIN_RUN_DIR/filter.args"
-	port=$(dc_filter_port)
+dc_gen_foreign_args() {
+	local out fport
+	out="$DNSCHAIN_RUN_DIR/dnsproxy-foreign.args"
+	fport=$(dc_get main foreign_port 5336)
 
 	mkdir -p "$DNSCHAIN_RUN_DIR" || return 1
 
-	# 国外上游列表必须非空，否则 chinadns-ng 会拿到一个空的 -t 参数、
-	# 起不来或行为未定义。宁可在这里失败，也不生成非法参数（禁止静默失败）。
-	trust=$(dc_get_list foreign server | grep -v '^$' | paste -sd, -)
-	if [ -z "$trust" ]; then
-		dnschain_log "ERROR: dnschain.upstream.foreign 为空，无法生成过滤器参数"
-		dnschain_log "ERROR: 请在页面「解析策略 → 国外上游」至少填一条（默认 tls://8.8.8.8）"
-		return 1
-	fi
-
 	{
-		echo "-b"
+		echo "--listen"
 		echo "127.0.0.1"
-		echo "-l"
-		echo "$port"
-		# 只接收 gfw 域名：-d gfw 把未匹配的也归为 tag:gfw，
-		# 故不需要 -g（多一份名单只会制造第二个真相源）
-		echo "-d"
-		echo "gfw"
+		echo "--port"
+		echo "$fport"
 
-		# 国外 DoT（IP 形式，经 :1234 代理出站）
-		echo "-t"
-		echo "$trust"
+		# 国外加密池（DoH）
+		dc_get_list foreign server | while read -r up; do
+			[ -n "$up" ] && { echo "--upstream"; echo "$up"; }
+		done
 
-		# 只对 gfw 组抑制 AAAA（不要写成裸 -N）
-		echo "-N"
-		echo "tag:gfw"
-		# 同时抑制 qtype 64/65（SVCB/HTTPS 携带 ipv6hint）
-		echo "--filter-qtype"
-		echo "64,65"
+		echo "--bootstrap"
+		echo "223.5.5.5"
+		echo "--bootstrap"
+		echo "223.6.6.6"
 
-		# 尽力而为地把 gfw 域名的解析结果写进 blacklist（会被 ssr-rules flush）
-		echo "-A"
-		echo "inet@ss_spec@blacklist"
+		echo "--timeout"
+		echo "8s"
 
-		# 证书校验（默认是 no，必须显式开）
-		if [ "$(dc_get upstream foreign cert_verify 1)" = "1" ]; then
-			echo "--cert-verify"
-			echo "--ca-certs"
-			echo "/etc/ssl/certs/ca-certificates.crt"
-		fi
+		# 国外只服务 gfw 域名，parallel 让多个 DoH 取最快
+		echo "--upstream-mode"
+		echo "parallel"
 
-		echo "-o"
-		echo "5"
+		echo "--hosts-file-enabled=true"
+		echo "--hosts-files"
+		echo "/etc/hosts"
 	} > "$out"
 
-	# 注意：这里**不写** --cache / --cache-stale / --cache-refresh
-	# （缓存只在 dnsmasq 一层，ADR §10.5）
-	# 也**不写** -c/--china-dns（默认值是明文 114.114.114.114，ADR §10.3）
 	echo "$out"
 }
 

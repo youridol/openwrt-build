@@ -59,23 +59,45 @@ reconcile_invariants() {
 	if [ "$enforce" = "1" ]; then
 		ssr_mode=$(dc_ssr_mode_for_profile)
 
-		# pdnsd_enable：primary 档案下必须是 0（SSR 不启 DNS 后端，:5335 归框架）
-		# coexist 档案下不强制（用户自己选了 1/4/5/6）
+		# pdnsd_enable：必须是 0（SSR 不启 DNS 后端）。
+		# v0.10.0 起框架自己也不再用 :5335，但仍要求 0 —— 避免 SSR-Plus
+		# 自己起 mosdns/dns2tcp 抢占 :53 之外的 DNS 端口，制造第二个解析器。
 		if [ -n "$ssr_mode" ]; then
 			reconcile_key "shadowsocksr.@global[0].pdnsd_enable" "$ssr_mode" \
-				"SSR 不提供 DNS，:5335 归框架过滤器" || rc=1
+				"SSR 不提供 DNS，解析全部交给框架" || rc=1
 		fi
 
 		# enable_switch 必须为 0：否则 ssr-switch 周期性 restart 造成 DNS 空窗
 		reconcile_key "shadowsocksr.@global[0].enable_switch" "0" \
 			"避免 ssr-switch 周期性 restart" || rc=1
 
-		# filter_aaaa 防御性保留为 1：primary 下 MosDNS 不在链路上、无实际影响，
-		# 但用户临时切回模式 4 时不至于立刻出现「有 IPv6 但打不开站点」（ADR §9.4）
-		reconcile_key "shadowsocksr.@global[0].filter_aaaa" "1" \
-			"防御性保留，见 ADR §9.4" || rc=1
+		# ipv6_support 必须为 1（v0.10.0 新增硬约束）
+		#
+		# 为什么：国外节点只有 IPv4，若不开 IPv6 流量代理，国外域名拿到
+		# 真实 AAAA 后客户端会优先走 IPv6 直连 → 被 RST。
+		# 开启后 SSR-Plus 会：
+		#   1. 装上 ss_spec6_* 代理链（10 条）+ fwmark 策略路由
+		#   2. get_filter_aaaa() 返回 0（不再抑制 AAAA）
+		#   3. 把 dnsmasq 的 filter_aaaa 设为 0
+		# 实测：curl -6 google → 302、youtube → 200、baidu → 200（国内直连）
+		if [ "$(dc_get ssr require_ipv6 1)" = "1" ]; then
+			reconcile_key "shadowsocksr.@global[0].ipv6_support" "1" \
+				"国外 IPv6 也要走代理，否则客户端优先 IPv6 直连被 RST" || rc=1
+		fi
 
-		# router_proxy 必须为 1：否则路由器自身的 DoT 不进代理 → 国外域名全超时
+		# filter_aaaa 必须为 0（v0.10.0 反转了 v0.9.x 的期望值）
+		#
+		# v0.9.x 曾是 1（抑制国外 AAAA），因为当时国外 IPv6 直连。
+		# v0.10.0 起 ipv6_support=1，国外 IPv6 走代理，不再需要抑制 ——
+		# 抑制反而让国外站点失去双栈能力。
+		# 注意：ipv6_support=1 时 SSR-Plus 自己会把 dnsmasq.filter_aaaa 设为 0，
+		# 但 shadowsocksr 的 filter_aaaa 键仍需显式设 0，否则用户关掉
+		# ipv6_support 时会回落到抑制状态。
+		reconcile_key "shadowsocksr.@global[0].filter_aaaa" "0" \
+			"国外 IPv6 经代理，无需抑制 AAAA" || rc=1
+
+		# router_proxy 必须为 1：否则路由器自身的 DoH 出向不进代理
+		# → dnsproxy 查国外 DoH 会直连被墙 → 国外域名全超时
 		reconcile_key "access_control.@global[0].router_proxy" "1" \
 			"路由器自身出向走代理" || rc=1
 	fi

@@ -82,10 +82,20 @@ dns_class() {
 	fi
 
 	# 有 Address 行（排除服务器自身那行）
-	an=$(echo "$out" | grep -c 'Address' 2>/dev/null || echo 0)
-	# 第一行 Address 是 "Address: 127.0.0.1:53" 这种服务器地址
-	# 真正的答案行形如 "Address: 1.2.3.4"
-	an=$(echo "$out" | grep '^Address:' | grep -vc ':' 2>/dev/null || echo 0)
+	#
+	# ⚠️ 不能用 `grep '^Address:' | grep -vc ':'` 判断答案行 ——
+	# IPv6 地址本身含冒号（如 2001:4860:4826:7700::），会被全部过滤掉，
+	# 导致 AAAA 查询被误判成 EMPTY。实测：taobao AAAA 明明返回 2 条，
+	# 旧判据报 EMPTY，selftest 第 9/11 项永久误报。
+	#
+	# 正确做法：统计「Address: 后面跟的不是 ip:port 形式」的行。
+	# 服务器行形如 `Address: 127.0.0.1:53` 或 `Address: [::1]:53`；
+	# 答案行形如 `Address: 1.2.3.4` 或 `Address: 2001:4860::1`。
+	# 判据：去掉 `Address: ` 前缀后，不匹配 `^[0-9.]+:[0-9]+$` 也不匹配
+	#       `^\[.*\]:[0-9]+$` 的即为答案行。
+	an=$(echo "$out" \
+		| sed -n 's/^Address: *//p' \
+		| grep -vcE '^([0-9]{1,3}\.){3}[0-9]{1,3}:[0-9]+$|^\[.*\]:[0-9]+$' 2>/dev/null || echo 0)
 
 	if [ "$an" -gt 0 ] 2>/dev/null; then
 		echo "OK"
@@ -130,53 +140,63 @@ lan_addr() {
 # 逐项检查
 # ------------------------------------------------------------
 check_all() {
-	local entry filter_port lan cn_up foreign_up owner pid
+	local entry lan cn_up foreign_up owner pid
 	local cls addr tables chains fw4_ok
-	local dnsmasq_cache dp_args fl_args
+	local dnsmasq_cache dp_args
 
 	entry=$(dc_get main entry_port 5353)
-	filter_port=$(dc_filter_port)
 	lan=$(lan_addr)
 
-	# 1. fw4 劫持在位
-	chains=$(nft list chain inet fw4 dns_intercept_lan 2>/dev/null)
-	if echo "$chains" | grep -q 'udp dport 53' && echo "$chains" | grep -q 'tcp dport 53'; then
-		emit 1 PASS "fw4 劫持在位" "dns_intercept_lan 含 udp/tcp dport 53"
-	else
-		emit 1 FAIL "fw4 劫持在位" "dns_intercept_lan 缺失或不完整"
-	fi
-
-	# 2. dnsmasq 分流目标唯一（端口集合 ⊆ 允许集）
+	# 1. 客户机 DNS 路径可达（LAN 地址上 :53 能应答）
 	#
-	# 允许集按档案不同：
-	#   primary：{entry, 5335} —— SSR 的旁路指向 :5335，即框架过滤器，
-	#            两条路径收敛到同一个解析器（ADR §9.1）
-	#   coexist：{entry, 5337, 5335} —— 框架过滤器在 :5337，而 SSR 的旁路
-	#            仍指向 :5335（那是 SSR 自己的后端，框架不重写它的文件）。
-	#            此时两条路径**不收敛**，这是 coexist 的已知代价（ADR §7.3）。
-	local ports_found bad_ports profile allow_extra
-	profile=$(dc_get main profile primary)
-	if [ "$profile" = "coexist" ]; then
-		allow_extra="5335"
+	# v0.10.0 修正了判据。早先检查 `nft chain inet fw4 dns_intercept_lan`，
+	# 但实测该链**从来不存在**，而客户机 DNS 完全正常 —— 因为 dnsmasq
+	# 直接监听在 LAN 地址的 :53 上（netstat 可见 192.168.3.254:53），
+	# 客户机无需经过 nft 劫持就能问到。
+	#
+	# 真正该验的是「LAN 地址上的 :53 能否解析」：
+	# 这既覆盖「dnsmasq 在监听」，也覆盖「上游链路通」。
+	local lan_cls
+	lan_cls=$(dns_class "www.baidu.com" "$lan")
+	if [ "$lan_cls" = "OK" ] || [ "$lan_cls" = "EMPTY" ]; then
+		emit 1 PASS "客户机 DNS 路径可达" "${lan}:53 应答 ${lan_cls}"
 	else
-		allow_extra=""
+		emit 1 FAIL "客户机 DNS 路径可达" "${lan}:53 应答 ${lan_cls}"
 	fi
 
-	ports_found=$(grep -hoE 'server=/[^/]+/127\.0\.0\.1#[0-9]+' \
-		"$DNSCHAIN_SSR_CONF_DIR"/*.conf 2>/dev/null \
-		| sed 's/.*#//' | sort -u | tr '\n' ' ')
-	bad_ports=""
-	for p in $ports_found; do
-		case "$p" in
-			"$entry"|"$filter_port") ;;
-			"$allow_extra") [ -n "$allow_extra" ] || bad_ports="${bad_ports}${p} " ;;
-			*) bad_ports="${bad_ports}${p} " ;;
-		esac
-	done
-	if [ -z "$bad_ports" ]; then
-		emit 2 PASS "dnsmasq 分流目标唯一" "profile=${profile}，端口集合 {${ports_found}} 合规"
+	# 2. dnsmasq 分流：框架自己的片段必须只指向 foreign_port
+	#
+	# v0.10.0 修正了判据范围。
+	# 早先扫描整个 SSR conf-dir，会把 SSR-Plus 生成的
+	# `server=/域名/127.0.0.1#5335`（17804 条）算成「未预期端口」→ 永久误报。
+	#
+	# 但那是**SSR-Plus 自己的文件**，框架按 AGENTS §4.0 不删不重写。
+	# 实测它并不造成故障：dnsmasq 对同一域名的多条 server= 会全部作为候选，
+	# 而 :5335 无监听时 dnsmasq 会自动重试其它候选（实测 10/10 成功）。
+	#
+	# 该验的是「框架生成的片段本身正确」——即 dnschain-split.conf 里
+	# 所有 server= 都指向 foreign_port，且没有残留指向 :5335 的旧规则。
+	local split_file bad_ports ports_found fport
+	fport=$(dc_get main foreign_port 5336)
+	split_file="$DNSCHAIN_DNSMASQ_CONF_DIR/dnschain-split.conf"
+
+	if [ ! -r "$split_file" ]; then
+		emit 2 FAIL "框架分流规则正确" "缺少 ${split_file}"
 	else
-		emit 2 FAIL "dnsmasq 分流目标唯一" "出现未预期端口: ${bad_ports}"
+		ports_found=$(grep -hoE '^server=/[^/]+/127\.0\.0\.1#[0-9]+' "$split_file" 2>/dev/null \
+			| sed 's/.*#//' | sort -u | tr '\n' ' ')
+		bad_ports=""
+		for p in $ports_found; do
+			case "$p" in
+				"$fport") ;;
+				*) bad_ports="${bad_ports}${p} " ;;
+			esac
+		done
+		if [ -z "$bad_ports" ]; then
+			emit 2 PASS "框架分流规则正确" "dnschain-split.conf 全部指向 :${fport}"
+		else
+			emit 2 FAIL "框架分流规则正确" "出现未预期端口: ${bad_ports}（应为 ${fport}）"
+		fi
 	fi
 
 	# 3. dnsmasq 唯一默认上游恰好一条
@@ -211,39 +231,48 @@ check_all() {
 			emit 5 FAIL "dnsproxy 参数一致" "出现 --cache，违反「缓存只在 dnsmasq 一层」"
 		elif echo "$dp_args" | grep -q '^--fallback'; then
 			emit 5 FAIL "dnsproxy 参数一致" "出现 --fallback，会回落明文/污染上游"
+		elif echo "$dp_args" | grep -q '^--ipv6-disabled'; then
+			emit 5 FAIL "dnsproxy 参数一致" "出现 --ipv6-disabled，会连国内 AAAA 一起砍"
 		else
-			emit 5 PASS "dnsproxy 参数一致" "无 --cache、无 --fallback"
+			emit 5 PASS "dnsproxy 参数一致" "无 --cache、无 --fallback、无 --ipv6-disabled"
 		fi
 	else
 		emit 5 SKIP "dnsproxy 参数一致" "取不到 dnsproxy 的 pid"
 	fi
 
-	# 6. 过滤器在监听
-	owner=$(dc_port_owner "$filter_port" udp)
-	if [ -n "$owner" ] && dc_is_framework_filter "$owner"; then
-		emit 6 PASS "过滤器在监听" ":${filter_port} 由框架 chinadns-ng (pid=${owner}) 持有"
-	elif [ -n "$owner" ]; then
-		emit 6 FAIL "过滤器在监听" ":${filter_port} 被 PID ${owner} 占用，但不是框架的过滤器"
+	# 6. chinadns-ng 必须**不在**运行（v0.10.0 起由 dnsproxy 承担国外解析）
+	#
+	# 这一项从「过滤器必须在监听」反转成「过滤器必须不存在」。
+	# 原因：chinadns-ng 的 -t 不支持 DoH，而落地节点到 853 全部不通，
+	# 它只会把国外域名降级成「用国内 DNS 查」→ 污染答案。
+	local fl_pid
+	fl_pid=$(dc_port_owner 5335 udp)
+	if [ -z "$fl_pid" ]; then
+		emit 6 PASS "无 chinadns-ng 残留" ":5335 无监听（v0.10.0 已移除该组件）"
 	else
-		emit 6 FAIL "过滤器在监听" ":${filter_port} 无监听"
+		emit 6 FAIL "无 chinadns-ng 残留" ":5335 被 PID ${fl_pid} 占用，会污染国外解析"
 	fi
 
-	# 7. 端口所有权无冲突（SSR 模式与档案匹配）
-	local ssr_mode profile
+	# 7. 端口所有权无冲突（SSR 模式必须为 0/7）
+	#
+	# 注意：这里**不检查 shadowsocksr.filter_aaaa**。
+	# 该项是「用户偏好」，而实际生效的是 dhcp.@dnsmasq[0].filter_aaaa ——
+	# SSR-Plus 的 set_ipv6_dns_filter 在 ipv6_support=1 时会把它设 0。
+	# 实测：shadowsocksr.filter_aaaa=1 但 dnsmasq.filter_aaaa=0，
+	#       AAAA 解析完全正常（taobao 2 条、google 8 条）。
+	# 早先版本把 shadowsocksr.filter_aaaa 当判据，产生误报。
+	local ssr_mode ipv6_on dnsmasq_aaaa
 	ssr_mode=$(uci -q get shadowsocksr.@global[0].pdnsd_enable 2>/dev/null)
-	profile=$(dc_get main profile primary)
-	if [ "$profile" = "primary" ]; then
-		if [ "$ssr_mode" = "0" ] || [ "$ssr_mode" = "7" ]; then
-			emit 7 PASS "端口所有权无冲突" "profile=primary, pdnsd_enable=${ssr_mode}"
-		else
-			emit 7 FAIL "端口所有权无冲突" "profile=primary 但 pdnsd_enable=${ssr_mode}（应为 0 或 7）"
-		fi
+	ipv6_on=$(uci -q get shadowsocksr.@global[0].ipv6_support 2>/dev/null)
+	dnsmasq_aaaa=$(uci -q get dhcp.@dnsmasq[0].filter_aaaa 2>/dev/null)
+	if [ "$ssr_mode" != "0" ] && [ "$ssr_mode" != "7" ]; then
+		emit 7 FAIL "端口所有权无冲突" "pdnsd_enable=${ssr_mode}（应为 0 或 7）"
+	elif [ "$ipv6_on" != "1" ]; then
+		emit 7 FAIL "端口所有权无冲突" "ipv6_support=${ipv6_on}（应为 1，否则国外 AAAA 无意义）"
+	elif [ "$dnsmasq_aaaa" != "0" ]; then
+		emit 7 FAIL "端口所有权无冲突" "dnsmasq.filter_aaaa=${dnsmasq_aaaa}（应为 0，否则 AAAA 被砍）"
 	else
-		if [ "$filter_port" = "5337" ]; then
-			emit 7 PASS "端口所有权无冲突" "profile=coexist, 过滤器在 :5337"
-		else
-			emit 7 FAIL "端口所有权无冲突" "profile=coexist 但过滤器端口是 :${filter_port}"
-		fi
+		emit 7 PASS "端口所有权无冲突" "pdnsd_enable=${ssr_mode}、ipv6_support=1、dnsmasq.filter_aaaa=0"
 	fi
 
 	# 8. 国内 A 正确（客户机路径）
@@ -268,27 +297,33 @@ check_all() {
 	if [ -n "$addr" ] && ! is_polluted "$addr"; then
 		emit 10 PASS "国外 A 正确" "www.google.com -> ${addr}"
 	elif [ -z "$addr" ]; then
-		emit 10 FAIL "国外 A 正确" "www.google.com 无结果（过滤器或代理可能未运行）"
+		emit 10 FAIL "国外 A 正确" "www.google.com 无结果（dnsproxy 或代理可能未运行）"
 	else
-		emit 10 FAIL "国外 A 正确" "www.google.com -> ${addr}（污染值）"
+		emit 10 FAIL "国外 A 正确" "www.google.com -> ${addr}（污染值，检查国外上游是否为 DoH）"
 	fi
 
-	# 11. 国外 AAAA 抑制 —— 预期 EMPTY，不是 TIMEOUT
+	# 11. 国外 AAAA **保留**（v0.10.0 起不再抑制）
+	#
+	# 语义反转：v0.9.x 期望 EMPTY（抑制），v0.10.0 期望 OK（保留）。
+	# 因为 SSR-Plus 的 IPv6 流量代理会把国外 IPv6 也送进 :1234，
+	# 没有「IPv6 直连被 RST」的问题，抑制反而损失双栈能力。
 	cls=$(dns_class "www.google.com" "$lan" aaaa)
 	case "$cls" in
-		EMPTY) emit 11 PASS "国外 AAAA 抑制" "rcode=0 ancount=0（预期形态）" ;;
-		TIMEOUT) emit 11 FAIL "国外 AAAA 抑制" "TIMEOUT —— 会卡住客户端 5 秒，属故障" ;;
-		OK) emit 11 FAIL "国外 AAAA 抑制" "返回了真实 AAAA，国外 IPv6 会直连被 RST" ;;
-		*) emit 11 FAIL "国外 AAAA 抑制" "结果 ${cls}" ;;
+		OK) emit 11 PASS "国外 AAAA 保留" "返回真实 AAAA（IPv6 经代理出站）" ;;
+		EMPTY) emit 11 FAIL "国外 AAAA 保留" "被抑制了（应为 OK）——检查 ipv6_support 与 chinadns-ng 是否残留" ;;
+		TIMEOUT) emit 11 FAIL "国外 AAAA 保留" "TIMEOUT —— 会卡住客户端" ;;
+		*) emit 11 FAIL "国外 AAAA 保留" "结果 ${cls}" ;;
 	esac
 
-	# 12. 国外 DoT 出站
+	# 12. 国外 DoH 出站（v0.10.0：不再是 DoT）
 	local est
-	est=$(netstat -antp 2>/dev/null | grep -E '8\.8\.8\.8:853|1\.1\.1\.1:853' | grep -c ESTABLISHED 2>/dev/null || echo 0)
+	est=$(netstat -antp 2>/dev/null \
+		| grep -E ':443' \
+		| grep -cE 'dns\.google|cloudflare-dns|142\.25[0-9]\.|104\.16\.|1\.1\.1\.1|8\.8\.8\.8' 2>/dev/null || echo 0)
 	if [ "$est" -gt 0 ] 2>/dev/null; then
-		emit 12 PASS "国外 DoT 出站" "${est} 条到 8.8.8.8:853 / 1.1.1.1:853 的 ESTABLISHED"
+		emit 12 PASS "国外 DoH 出站" "${est} 条到 DoH 上游的 ESTABLISHED"
 	else
-		emit 12 SKIP "国外 DoT 出站" "当前无活跃连接（空闲时正常，可忽略）"
+		emit 12 SKIP "国外 DoH 出站" "当前无活跃连接（空闲时正常，可忽略）"
 	fi
 
 	# 13. 代理与分流在位
@@ -309,29 +344,34 @@ check_all() {
 		emit 14 FAIL "fw4 规则可加载" "fw4 check 失败"
 	fi
 
-	# 15. 无明文旁路（applechina.conf 的 173 条必须已改）
+	# 15. 无明文旁路
+	#
+	# 判据：conf-dir 内不得有指向**明文公共 DNS**的 server=。
+	# 允许的是 127.0.0.1#<端口>（本地加密链路）。
+	#
+	# 注意：不能简单 grep 出所有 IP 形式再排除 #5353 —— 那样会把
+	# 127.0.0.1#5336（国外实例）也误判成明文旁路（实测虚报 35627 条）。
+	# 正确做法：只统计「非 127.0.0.1 的 IP」。
 	local plain
-	plain=$(grep -rnE 'server=/[^/]+/([0-9]{1,3}\.){3}[0-9]{1,3}' \
+	plain=$(grep -rhE 'server=/[^/]+/([0-9]{1,3}\.){3}[0-9]{1,3}(#[0-9]+)?$' \
 		"$DNSCHAIN_DNSMASQ_CONF_DIR" 2>/dev/null \
-		| grep -v '#5353' | grep -v '#5335' | grep -v '#5337' | wc -l)
+		| grep -vE 'server=/[^/]+/127\.0\.0\.1' | wc -l)
 	if [ "$plain" -eq 0 ] 2>/dev/null; then
-		emit 15 PASS "无明文旁路" "conf-dir 内无指向明文 IP 的 server="
+		emit 15 PASS "无明文旁路" "conf-dir 内无非 127.0.0.1 的 server="
 	else
-		emit 15 FAIL "无明文旁路" "${plain} 条明文旁路（applechina.conf 需改为 #5353）"
+		emit 15 FAIL "无明文旁路" "${plain} 条指向外部明文 IP 的 server="
 	fi
 
 	# 16. 缓存层唯一
 	dnsmasq_cache=$(grep -oE '^cache-size=[0-9]+' /var/etc/dnsmasq.conf.* 2>/dev/null | head -1 | cut -d= -f2)
 	dp_args=$(dc_args_to_cmdline "$DNSCHAIN_RUN_DIR/dnsproxy.args" 2>/dev/null)
-	fl_args=$(dc_args_to_cmdline "$DNSCHAIN_RUN_DIR/filter.args" 2>/dev/null)
 
 	local cache_bad
 	cache_bad=""
 	case "$dp_args" in *--cache*) cache_bad="${cache_bad}dnsproxy "; esac
-	case "$fl_args" in *--cache*) cache_bad="${cache_bad}chinadns-ng "; esac
 
 	if [ -z "$cache_bad" ] && [ -n "$dnsmasq_cache" ] && [ "$dnsmasq_cache" -gt 0 ] 2>/dev/null; then
-		emit 16 PASS "缓存层唯一" "dnsmasq cache-size=${dnsmasq_cache}，其余两层无 --cache"
+		emit 16 PASS "缓存层唯一" "dnsmasq cache-size=${dnsmasq_cache}，dnsproxy 无 --cache"
 	else
 		emit 16 FAIL "缓存层唯一" "越界缓存: ${cache_bad:-无}；dnsmasq cache-size=${dnsmasq_cache:-未设置}"
 	fi
@@ -355,7 +395,8 @@ main() {
 		local concl
 		concl=""
 		[ "$(dns_class www.baidu.com "$(lan_addr)")" = "OK" ] || concl="${concl}国内解析异常 "
-		[ "$(dc_port_owner "$(dc_filter_port)" udp)" ] || concl="${concl}gfw 域名将 SERVFAIL（过滤器未监听） "
+		[ -z "$(dc_port_owner "$(dc_get main entry_port 5353)" udp)" ] \
+			&& concl="${concl}dnsproxy 未监听（客户机全部无法解析） "
 		[ -n "$concl" ] && echo "CONCLUSION: ${concl}"
 		return 1
 	fi

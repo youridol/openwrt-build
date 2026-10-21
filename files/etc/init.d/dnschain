@@ -5,16 +5,23 @@
 # 本文件由 openwrt-build 仓库 files/ overlay 提供（非上游源码）。
 # 设计依据：docs/adr/0003-dns-chain-framework.md
 #
-# 职责：
-#   1. 生成 /var/etc/dnschain/*（dnsproxy.args、filter.args、upstreams-domains.txt）
-#   2. procd 托管两个进程：
-#        dnsproxy   :5353  唯一路由型解析器（不缓存）
-#        chinadns-ng :5335 策略过滤器（不缓存）
-#   3. 写 fw4 片段：拒绝 LAN 出向 853（T2）
-#   4. 启动前做端口所有权与上游端口校验，失败即拒绝启动并说明原因
+# 职责（v0.10.0 起：无 chinadns-ng）：
+#   1. 生成 /var/etc/dnschain/*（dnsproxy.args、dnsproxy-foreign.args、foreign-split.conf）
+#   2. 生成 dnsmasq 的 nftset 规则（把国外域名解析结果写入代理 IP 集）
+#   3. procd 托管 dnsproxy :5353（唯一路由型解析器，不缓存）
+#   4. 写 fw4 片段：拒绝 LAN 出向 853（T2）
+#   5. 启动前做上游端口校验，失败即拒绝启动并说明原因
+#
+# 与 v0.9.x 的关键差异：
+#   - **不再启动 chinadns-ng**。它的 -t 不支持 DoH，而落地节点到 853 全部
+#     不通（实测 peer sent close notify），到 443 正常。故国外解析改由
+#     dnsproxy 用 DoH 承担（实测拿到真实答案）。
+#   - **不再抑制 AAAA**。SSR-Plus 的 IPv6 流量代理（ipv6_support=1）会把
+#     国外 IPv6 也送进代理，保留双栈即可，无需抑制。
+#   - dnsmasq 通过 nftset= 把国外域名的解析结果写入 ss_spec#blacklist，
+#     替代 chinadns-ng 的 -A 参数。
 #
 # 硬约束：
-#   - :5335 归本框架；SSR-Plus 必须处于模式 0 或 7（由收敛器强制）
 #   - 缓存只在 dnsmasq 一层（ADR §10.5）
 #   - /etc/nftables.d/*.nft 只能写裸 chain，禁止 table 声明（AGENTS 红线 7）
 # ============================================================
@@ -26,10 +33,12 @@ USE_PROCD=1
 . /usr/share/dnschain/dnschain.sh
 
 PROG_DP="/usr/bin/dnsproxy"
-PROG_FILTER="/usr/bin/chinadns-ng"
 
 # fw4 片段（fw4 自动 include /etc/nftables.d/*.nft）
 DOT_NFT_FILE="/etc/nftables.d/15-dnschain-reject-dot.nft"
+
+# dnsmasq 的 dnschain 片段（通过 conf-dir 加载）
+DNSMASQ_DC_CONF="${DNSCHAIN_DNSMASQ_CONF_DIR}/dnschain-split.conf"
 
 # ------------------------------------------------------------
 # 生成全部运行时配置
@@ -37,14 +46,14 @@ DOT_NFT_FILE="/etc/nftables.d/15-dnschain-reject-dot.nft"
 generate_all() {
 	mkdir -p "$DNSCHAIN_RUN_DIR" "$DNSCHAIN_STATE_DIR" || return 1
 
-	dnschain_log "生成 dnsproxy 域名上游文件..."
+	dnschain_log "生成国外域名分流规则..."
 	dc_gen_upstream_file >/dev/null || return 1
 
-	dnschain_log "生成 dnsproxy 参数..."
+	dnschain_log "生成国内 dnsproxy 参数..."
 	dc_gen_dnsproxy_args >/dev/null || return 1
 
-	dnschain_log "生成过滤器参数..."
-	dc_gen_filter_args >/dev/null || return 1
+	dnschain_log "生成国外 dnsproxy 参数..."
+	dc_gen_foreign_args >/dev/null || return 1
 
 	# 记录本次名单指纹，供收敛器判断是否需要重导
 	dc_lists_fingerprint > "$DNSCHAIN_STATE_DIR/lists.fingerprint"
@@ -53,26 +62,76 @@ generate_all() {
 }
 
 # ------------------------------------------------------------
+# 生成 dnsmasq 的分流 + nftset 规则
+#
+# 两部分：
+#   1. server=/国外域名/127.0.0.1#<foreign_port>   ← 国外域名交给实例 2
+#   2. nftset=/国外域名/4#inet#ss_spec#blacklist  ← 解析结果写入代理 IP 集
+#
+# 第 2 部分替代了 chinadns-ng 的 `-A inet@ss_spec@blacklist`。
+# 实测依据：dnsmasq 编译含 nftset（`dnsmasq --version` 输出里有 nftset），
+#          且 whitelist_domain 集在查 bilibili.com 后从 79 → 81。
+#
+# 为什么不用 SSR-Plus 生成的 gfw_list.conf：
+#   那些行目标是 127.0.0.1#5335（chinadns-ng），本版本已不再使用。
+#   这里单独生成一份片段，不改 SSR-Plus 的任何文件（AGENTS §4.0）。
+# ------------------------------------------------------------
+update_dnsmasq_split() {
+	local enabled fport tmp_split tmp_nft cnt_split cnt_nft
+
+	enabled=$(dc_get main enabled 1)
+	fport=$(dc_get main foreign_port 5336)
+	mkdir -p "$DNSCHAIN_DNSMASQ_CONF_DIR" || return 1
+
+	if [ "$enabled" != "1" ]; then
+		cat > "$DNSMASQ_DC_CONF" <<-EOF
+			# dnschain: 分流与 nftset 已关闭（由 init.d/dnschain 管理）
+		EOF
+		return 0
+	fi
+
+	tmp_split=$(mktemp) || return 1
+	tmp_nft=$(mktemp) || { rm -f "$tmp_split"; return 1; }
+
+	# ⚠️ 不过滤 xn--（同 dc_gen_upstream_file 的理由）：
+	# dnsmasq 原生支持 punycode，过滤掉会让 IDNA 域名失去分流与入集。
+	dc_extract_domains \
+		| grep -E '^[a-zA-Z0-9]([a-zA-Z0-9._-]*[a-zA-Z0-9])?\.[a-zA-Z]{2,}$' \
+		> /tmp/.dc-domains.$$
+
+	# 1. 分流：国外域名 → 国外实例
+	sed "s|.*|server=/&/127.0.0.1#${fport}|" /tmp/.dc-domains.$$ > "$tmp_split"
+	# 2. nftset：国外域名解析结果 → 代理 IP 集
+	sed 's|.*|nftset=/&/4#inet#ss_spec#blacklist|' /tmp/.dc-domains.$$ > "$tmp_nft"
+
+	cnt_split=$(wc -l < "$tmp_split" 2>/dev/null || echo 0)
+	cnt_nft=$(wc -l < "$tmp_nft" 2>/dev/null || echo 0)
+
+	{
+		echo "# dnschain: 国外域名分流 + 解析结果入代理 IP 集（由 init.d/dnschain 管理，勿手工编辑）"
+		echo "# 替代 chinadns-ng 的 -d gfw / -A inet@ss_spec@blacklist"
+		echo "# 1) server= 把国外域名交给 dnsproxy 实例 2（:${fport}，只配 DoH）"
+		cat "$tmp_split"
+		echo "# 2) nftset= 把国外域名的解析结果写入 ss_spec#blacklist"
+		cat "$tmp_nft"
+	} > "$DNSMASQ_DC_CONF"
+
+	rm -f "$tmp_split" "$tmp_nft" /tmp/.dc-domains.$$
+	dnschain_log "dnsmasq 分流 ${cnt_split} 条 → :${fport}；nftset ${cnt_nft} 条"
+}
+
+# ------------------------------------------------------------
 # 启动前校验
 # 失败返回非 0，调用方须拒绝启动（禁止静默失败，AGENTS 红线 3）
 # ------------------------------------------------------------
 preflight() {
-	local port owner cn_up foreign_up bad rc
+	local cn_up foreign_up bad rc
 
-	port=$(dc_filter_port)
-
-	# 1. 端口所有权：:5335 若被非框架进程占用（典型是 SSR-Plus 的
-	#    mosdns/dns2tcp/chinadns-ng），必须拒绝启动并指出是谁。
-	owner=$(dc_port_owner "$port" udp)
-	if [ -n "$owner" ] && ! dc_is_framework_filter "$owner"; then
-		dnschain_log "ERROR: 端口 ${port} 已被 PID ${owner} 占用，且不是框架的过滤器"
-		dnschain_log "ERROR: 请在 SSR-Plus 页面把「DNS 解析方式」改为「使用本机端口 5335 的 DNS 服务」"
-		dnschain_log "ERROR: （即 pdnsd_enable=0），或把本框架档案改为 coexist（过滤器用 :5337）"
-		return 1
-	fi
-
-	# 2. 上游端口必须落在 ss_spec_output 的 TCP 端口集内，
+	# 1. 上游端口必须落在 ss_spec_output 的 TCP 端口集内，
 	#    否则路由器自身出向不进代理、静默直连后被墙（ADR §10.8）
+	#
+	#    v0.10.0：国外上游改成 DoH(443)，在端口集内；
+	#    国内 DoT(853) 也在端口集内但实际直连（在 china 集里，被 return）。
 	cn_up=$(dc_get_list cn server | tr '\n' ' ')
 	foreign_up=$(dc_get_list foreign server | tr '\n' ' ')
 
@@ -87,14 +146,35 @@ preflight() {
 		return 1
 	fi
 
-	# 3. 二进制必须存在
+	# 2. 二进制必须存在
 	[ -x "$PROG_DP" ] || { dnschain_log "ERROR: 缺少 ${PROG_DP}"; return 1; }
-	[ -x "$PROG_FILTER" ] || { dnschain_log "ERROR: 缺少 ${PROG_FILTER}"; return 1; }
 
-	# 4. 域名上游文件非空（空文件意味着所有 gfw 域名都会走国内上游 → 污染）
-	if [ ! -s "$DNSCHAIN_RUN_DIR/upstreams-domains.txt" ]; then
-		dnschain_log "ERROR: upstreams-domains.txt 为空，gfw 域名会全部走国内上游（污染）"
+	# 3. 两个端口不能相同（否则两个实例抢同一端口，后起的静默失败）
+	local fport
+	fport=$(dc_get main foreign_port 5336)
+	if [ "$fport" = "$(dc_get main entry_port 5353)" ]; then
+		dnschain_log "ERROR: entry_port 与 foreign_port 相同（都是 ${fport}），两个实例会抢端口"
+		return 1
+	fi
+
+	# 4. 国外分流规则非空（空文件意味着所有 gfw 域名都会走国内上游 → 污染）
+	if [ ! -s "$DNSCHAIN_RUN_DIR/foreign-split.conf" ]; then
+		dnschain_log "ERROR: foreign-split.conf 为空，国外域名会全部走国内上游（污染）"
 		dnschain_log "ERROR: 请确认 ${DNSCHAIN_SSR_CONF_DIR}/gfw_list.conf 或 /etc/ssrplus/gfw_list.conf 存在"
+		return 1
+	fi
+
+	# 4. 国外上游必须是 DoH（443）。DoT(853) 在本环境不可用，
+	#    配成 DoT 会让国外域名拿不到答案（实测 peer sent close notify）。
+	#    这是硬校验：宁可拒绝启动，也不让用户面对「能解析但全是污染值」。
+	_dot_bad=$(dc_get_list foreign server | grep -E '^tls://' || true)
+	if [ -n "$_dot_bad" ]; then
+		dnschain_log "ERROR: 国外上游不能是 DoT（tls://）：落地节点到 853 不通。"
+		dnschain_log "ERROR: 实测 8.8.8.8:853 / 1.1.1.1:853 全部 peer sent close notify，"
+		dnschain_log "ERROR: 而 443 正常。请改用 DoH：https://dns.google/dns-query"
+		echo "$_dot_bad" | while read -r line; do
+			[ -n "$line" ] && dnschain_log "ERROR:   不合规: $line"
+		done
 		return 1
 	fi
 
@@ -106,7 +186,7 @@ preflight() {
 #
 # 为什么必须写：ss_spec_mangle prerouting 的优先级是 mangle(-150)，
 # 而 fw4 的 dns_intercept_lan 是 dstnat+1(-99)，tproxy 先执行。
-# 客户机自带 DoT 时会先进 :1234，拿到真实 AAAA 并绕过我们的抑制策略。
+# 客户机自带 DoT 时会先进 :1234，绕过我们的策略。
 #
 # 写法约束（AGENTS 红线 7）：只能写裸 chain，禁止 table 声明。
 #
@@ -156,7 +236,7 @@ update_dot_reject() {
 }
 
 # ------------------------------------------------------------
-# 启动 dnsproxy（procd 实例）
+# 启动国内 dnsproxy 实例（:5353）
 # ------------------------------------------------------------
 start_dnsproxy() {
 	local args
@@ -177,24 +257,42 @@ start_dnsproxy() {
 }
 
 # ------------------------------------------------------------
-# 启动过滤器（procd 实例）
+# 启动国外 dnsproxy 实例（:5336，只配 DoH）
+#
+# 为什么单独一个实例（关键设计决策）：
+#   最初尝试用单实例 + [/域名/]https://dns.google 分流（17767 条），
+#   实测**完全失败**：dnsproxy 为每个域名各注册一条 reserved 上游
+#   （verbose 日志 idx=3..17769），资源耗尽后查询直接
+#   `connection timed out; no servers could be reached`。
+#   拆成两个实例 + dnsmasq 的 server=/域名/ 分流后实测正常。
 # ------------------------------------------------------------
-start_filter() {
+start_foreign_dnsproxy() {
 	local args
 
-	args=$(dc_args_to_cmdline "$DNSCHAIN_RUN_DIR/filter.args")
-	[ -n "$args" ] || { dnschain_log "ERROR: filter.args 为空"; return 1; }
+	args=$(dc_args_to_cmdline "$DNSCHAIN_RUN_DIR/dnsproxy-foreign.args")
+	[ -n "$args" ] || { dnschain_log "ERROR: dnsproxy-foreign.args 为空"; return 1; }
 
-	procd_open_instance "filter"
-	procd_set_param command "$PROG_FILTER" $args
+	procd_open_instance "dnsproxy-foreign"
+	procd_set_param command "$PROG_DP" $args
 	procd_set_param respawn 3600 5 5
 	procd_set_param stdout 1
 	procd_set_param stderr 1
-	# -A 写 nftset 需要 CAP_NET_ADMIN
-	procd_set_param capabilities "/etc/capabilities/dnschain-filter.json"
+	procd_add_jail_mount "/etc/hosts"
 	procd_add_jail_mount "/etc/ssl/certs/ca-certificates.crt"
 	procd_add_jail_mount "$DNSCHAIN_RUN_DIR"
 	procd_close_instance
+}
+
+# ------------------------------------------------------------
+# 重启 dnsmasq 使 nftset 片段生效
+#
+# 注意：必须用 restart 而非 reload。实测 reload（SIGHUP）不重读 conf-dir，
+# 新生成的 nftset 规则不会被加载（AGENTS §4.4）。
+# ------------------------------------------------------------
+reload_dnsmasq() {
+	if [ -x /etc/init.d/dnsmasq ]; then
+		/etc/init.d/dnsmasq restart >/dev/null 2>&1
+	fi
 }
 
 start_service() {
@@ -203,6 +301,8 @@ start_service() {
 	if [ "$(dc_get main enabled 1)" != "1" ]; then
 		dnschain_log "框架未启用（dnschain.main.enabled=0），不启动任何进程"
 		update_dot_reject
+		update_dnsmasq_split
+		reload_dnsmasq
 		return 0
 	fi
 
@@ -214,12 +314,16 @@ start_service() {
 		return 1
 	fi
 
+	# 先生成 dnsmasq 的分流片段并加载，再启动两个 dnsproxy 实例
+	update_dnsmasq_split
+	reload_dnsmasq
+
 	start_dnsproxy
-	start_filter
+	start_foreign_dnsproxy
 
 	update_dot_reject
 
-	dnschain_log "已启动：dnsproxy :$(dc_get main entry_port 5353)、过滤器 :$(dc_filter_port)"
+	dnschain_log "已启动：国内 :$(dc_get main entry_port 5353)、国外 :$(dc_get main foreign_port 5336)（无 chinadns-ng）"
 
 	# 名单指纹留给收敛器比较
 	dc_lists_fingerprint > "$DNSCHAIN_STATE_DIR/lists.fingerprint" 2>/dev/null
@@ -227,25 +331,32 @@ start_service() {
 }
 
 stop_service() {
-	# procd 会负责杀进程；这里只清理 fw4 片段
+	# procd 会负责杀进程；这里只清理 fw4 片段与 dnsmasq 片段
 	# 注意：不删文件，清空为注释占位（理由同 update_dot_reject）
 	mkdir -p /etc/nftables.d 2>/dev/null
 	cat > "$DOT_NFT_FILE" <<-EOF
 		# dnschain: 服务已停止（由 init.d/dnschain 管理）
 	EOF
+	mkdir -p "$DNSCHAIN_DNSMASQ_CONF_DIR" 2>/dev/null
+	cat > "$DNSMASQ_DC_CONF" <<-EOF
+		# dnschain: 服务已停止（由 init.d/dnschain 管理）
+	EOF
 	if [ -x /etc/init.d/firewall ]; then
 		/etc/init.d/firewall reload >/dev/null 2>&1
 	fi
+	reload_dnsmasq
 	dnschain_log "已停止"
 }
 
 reload_service() {
-	# 配置变更后重新生成并重启两个实例
+	# 配置变更后重新生成并重启实例
 	config_load "$DNSCHAIN_CONF"
 	generate_all || return 1
 	if [ "$(dc_get main enabled 1)" = "1" ]; then
 		preflight || return 1
 	fi
+	update_dnsmasq_split
+	reload_dnsmasq
 	update_dot_reject
 	# 让 procd 重启实例
 	stop

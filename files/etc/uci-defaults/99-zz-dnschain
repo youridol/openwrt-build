@@ -46,7 +46,37 @@ _cur_pdnsd=$(uci -q get shadowsocksr.@global[0].pdnsd_enable)
 if [ "$_cur_pdnsd" != "0" ]; then
 	uci set shadowsocksr.@global[0].pdnsd_enable='0' \
 		|| log "ERROR: 写入 pdnsd_enable=0 失败"
-	log "ssr-plus: pdnsd_enable ${_cur_pdnsd:-空} -> 0（:5335 交给 dnschain 过滤器）"
+	log "ssr-plus: pdnsd_enable ${_cur_pdnsd:-空} -> 0（解析全部交给框架）"
+fi
+
+# ------------------------------------------------------------
+# 2.1 SSR-Plus：必须启用 IPv6 流量代理（v0.10.0 硬要求）
+#
+# 为什么：国外节点只有 IPv4。若不开 IPv6 流量代理：
+#   - 国外域名拿到真实 AAAA 后，客户端会优先走 IPv6 直连 → 被 RST
+#   - 若为此抑制 AAAA，又会让国外站点失去双栈能力
+#
+# 开启后（实测 ipv6_support=1）：
+#   - 装上 ss_spec6_* 代理链（10 条）+ fwmark 0x53535250 策略路由 table 999
+#   - get_filter_aaaa() 返回 0，不再抑制 AAAA
+#   - set_ipv6_dns_filter 把 dnsmasq.filter_aaaa 设为 0
+#   - 实测 curl -6 google → 302、youtube → 200、baidu → 200（国内直连）
+# ------------------------------------------------------------
+_cur_v6=$(uci -q get shadowsocksr.@global[0].ipv6_support)
+if [ "$_cur_v6" != "1" ]; then
+	uci set shadowsocksr.@global[0].ipv6_support='1' \
+		|| log "ERROR: 写入 ipv6_support=1 失败"
+	log "ssr-plus: ipv6_support ${_cur_v6:-空} -> 1（国外 IPv6 也走代理）"
+fi
+
+# filter_aaaa 必须为 0（v0.10.0 反转 v0.9.x 的期望值）
+# 抑制 AAAA 会让国外站点失去双栈；而 ipv6_support=1 已把 IPv6 送进代理，
+# 不存在「IPv6 直连被 RST」的问题。
+_cur_aaaa=$(uci -q get shadowsocksr.@global[0].filter_aaaa)
+if [ "$_cur_aaaa" != "0" ]; then
+	uci set shadowsocksr.@global[0].filter_aaaa='0' \
+		|| log "ERROR: 写入 filter_aaaa=0 失败"
+	log "ssr-plus: filter_aaaa ${_cur_aaaa:-空} -> 0（保留国外双栈）"
 fi
 
 # tunnel_forward_mosdns 不再使用（MosDNS 不在默认链路上）

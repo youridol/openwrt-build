@@ -601,10 +601,14 @@ jobs:
           # 只查「文件在仓库里」不够，必须查「符号进了 .config」。
           # 符号推导同 trafficctl：LUCI_BASENAME=dnschain
           #   → luci-i18n-dnschain-zh-cn
+          #
+          # v0.10.0：不再要求 CONFIG_PACKAGE_chinadns-ng。
+          # 框架已移除该组件（-t 不支持 DoH，而落地节点到 853 不通）。
+          # SSR-Plus 自己仍带该二进制（INCLUDE_ChinaDNS_NG），但框架不依赖它，
+          # 故不作为硬断言 —— 避免 SSR-Plus 关掉该 INCLUDE 时误报框架有问题。
           dfail=0
           for sym in CONFIG_PACKAGE_luci-app-dnschain \
-                     CONFIG_PACKAGE_luci-i18n-dnschain-zh-cn \
-                     CONFIG_PACKAGE_chinadns-ng; do
+                     CONFIG_PACKAGE_luci-i18n-dnschain-zh-cn; do
             if grep -q "^${sym}=y$" .config; then
               echo "OK   ${sym}=y"
             else
@@ -615,8 +619,6 @@ jobs:
           if [ "$dfail" != "0" ]; then
             echo "--- .config 中与 dnschain 有关的全部符号 ---"
             grep -E "dnschain" .config || echo "  (一条都没有 → 包被依赖求解整体丢弃)"
-            echo "--- .config 中与 chinadns-ng 有关的全部符号 ---"
-            grep -E "chinadns" .config || echo "  (一条都没有)"
             echo "  提示：若 luci-app-dnschain 一条都没有，检查 package/ 是否已复制进"
             echo "        lede/package/（见 'Add luci-app-dnschain' 步骤）。"
             exit 1
@@ -869,16 +871,38 @@ jobs:
           fi
           echo "OK   无 --cache / --fallback / --ipv6-disabled"
 
-          # ── 4. chinadns-ng 必须用 -N tag:gfw（不能是裸 -N）────────
-          if grep -v '^[[:space:]]*#' "$LIB" | grep -q 'echo "tag:gfw"'; then
-            echo "OK   -N 带 tag:gfw（不是裸 -N）"
+          # ── 4. v0.10.0：不再有 chinadns-ng ─────────────────────────
+          #
+          # 旧断言要求「-N tag:gfw」存在，那是 chinadns-ng 的 AAAA 抑制参数。
+          # v0.10.0 移除了 chinadns-ng（它的 -t 不支持 DoH，而落地节点到
+          # 853 全部不通），改为双 dnsproxy 实例 + dnsmasq 分流。
+          # 故这里反转成「不得再出现 filter 参数生成」。
+          if grep -v '^[[:space:]]*#' "$LIB" | grep -q 'dc_gen_filter_args'; then
+            echo "FAIL 库脚本仍定义 dc_gen_filter_args（chinadns-ng 已移除）"
+            rc=1
           else
-            echo "FAIL 缺少 -N tag:gfw（裸 -N 会连带抑制未来引入的其他组）"
+            echo "OK   无 dc_gen_filter_args（chinadns-ng 已移除）"
+          fi
+
+          # 必须有国外实例参数生成函数
+          if grep -v '^[[:space:]]*#' "$LIB" | grep -q 'dc_gen_foreign_args'; then
+            echo "OK   有 dc_gen_foreign_args（国外 dnsproxy 实例）"
+          else
+            echo "FAIL 缺少 dc_gen_foreign_args"
             rc=1
           fi
 
+          # 分流必须由 dnsmasq 的 server= 承担，**不能**用 dnsproxy 的
+          # [/域名/] 形式 —— 实测 17767 条会让 dnsproxy 资源耗尽
+          # （verbose 日志 idx=3..17769，查询直接 connection timed out）。
+          if grep -v '^[[:space:]]*#' "$LIB" | grep -q '\[/&/\]'; then
+            echo "FAIL 仍生成 [/域名/] 形式（17767 条会耗尽 dnsproxy 资源）"
+            rc=1
+          else
+            echo "OK   无 [/域名/] 形式（分流由 dnsmasq 承担）"
+          fi
+
           # ── 5. 不得写入明文 114.114.114.114 ────────────────────────
-          # chinadns-ng 的 -c 默认值就是明文 114，必须显式避开（ADR §10.3）
           if grep -v '^[[:space:]]*#' "$LIB" | grep -q '114\.114\.114\.114'; then
             echo "FAIL 出现明文 114.114.114.114"
             rc=1
@@ -886,14 +910,17 @@ jobs:
             echo "OK   无明文 114.114.114.114"
           fi
 
-          # ── 6. IDNA 过滤必须存在（否则 dnsproxy 整体起不来）────────
-          # 实测: 124 个 xn-- 域名会让 dnsproxy 报
-          #   idna: invalid label "wcvs22d1m"  并**整体拒绝启动**
+          # ── 6. v0.10.0：**不再过滤 xn--** ──────────────────────────
+          #
+          # 旧断言要求过滤 xn--，理由是 dnsproxy 的 [/域名/] 形式不认 punycode。
+          # 但 v0.10.0 改用 dnsmasq 的 server=/域名/ 形式，dnsmasq 原生支持
+          # punycode，过滤反而让 58 条 IDNA 域名失去分流
+          # （实测 apple.xn--czr694b 等全部解析失败）。
           if grep -v '^[[:space:]]*#' "$LIB" | grep -q "grep -vE 'xn--'"; then
-            echo "OK   生成上游文件时过滤 xn--"
-          else
-            echo "FAIL 未过滤 xn--（dnsproxy 会整体拒绝启动）"
+            echo "FAIL 仍过滤 xn--（dnsmasq 支持 punycode，过滤会丢失 58 条域名）"
             rc=1
+          else
+            echo "OK   不过滤 xn--（分流由 dnsmasq 承担，支持 punycode）"
           fi
 
           # ── 7. nft 片段只能写裸 chain（AGENTS 红线 7）──────────────
@@ -918,8 +945,16 @@ jobs:
           fi
 
           # ── 9. 配置文件必须含关键默认值 ────────────────────────────
-          for kv in "profile 'primary'" "entry_port '5353'" \
-                    "foreign 'suppress'" "domestic 'keep'"; do
+          #
+          # v0.10.0 变更：
+          #   - 删除 profile 'primary'（单档案，不再有 coexist）
+          #   - 删除 foreign 'suppress' → 改为 foreign 'keep'
+          #     （ipv6_support=1 后国外 IPv6 走代理，无需抑制 AAAA）
+          #   - 新增 foreign_port '5336'（国外 dnsproxy 实例）
+          #   - 新增 require_ipv6 '1'（SSR-Plus 的 IPv6 流量代理）
+          for kv in "entry_port '5353'" "foreign_port '5336'" \
+                    "foreign 'keep'" "domestic 'keep'" \
+                    "require_ipv6 '1'" "filter_https_rr '0'"; do
             if grep -q "$kv" "$CONF"; then
               echo "OK   配置含 $kv"
             else
@@ -927,6 +962,20 @@ jobs:
               rc=1
             fi
           done
+
+          # 国外上游必须是 DoH（不是 DoT）
+          if grep -q "list server 'https://dns.google/dns-query'" "$CONF"; then
+            echo "OK   国外上游为 DoH"
+          else
+            echo "FAIL 国外上游不是 DoH（DoT 到 853 在本环境不通）"
+            rc=1
+          fi
+          if grep -q "list server 'tls://8.8.8.8'" "$CONF"; then
+            echo "FAIL 国外上游仍是 DoT（tls://8.8.8.8），落地节点到 853 不通"
+            rc=1
+          else
+            echo "OK   国外上游无 DoT"
+          fi
 
           # ── 10. P3：dnsproxy 的 cache 与 fallback 必须关闭/删除 ──────
           # ADR-0003 §10.5：缓存只在 dnsmasq 一层。
