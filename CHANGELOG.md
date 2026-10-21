@@ -2,6 +2,96 @@
 
 本仓库所有功能/配置改动均记录于此。版本判型遵循全局规范（PATCH / MINOR / MAJOR）。
 
+## [v0.12.4] - 2026-10-22
+
+### 修复 — 概览卡片左侧留白 193px（视觉上「偏右、没居中」）
+
+用户再次反馈：概览页左边留白很大，整体偏右。
+
+#### 根因
+
+CBI 的 `.cbi-value` 是「**标签列固定 160px** + 字段列」两栏布局：
+
+```
+.cbi-value-title { width: 160px; flex: 0 0 160px }
+.cbi-value-field { flex: 1 1 0% }
+```
+
+这个布局对「标题 — 输入框」的短字段是对的（左侧 160px 用于对齐标签）。
+但概览里那 4 行字段区放的是**整块内容**：
+
+| 行 | 字段区内容 |
+|---|---|
+| 结论 | `SPAN.dc-badge`（状态徽标） |
+| 解析链路 | `DIV.dc-chain`（链路图，宽 1070） |
+| 链路指标 | `DIV.dc-metrics` + `DIV.dc-stats` |
+| 组件状态 | `DIV.dc-table-wrap`（5 列表格） |
+
+而它们的标签只有 4 个汉字（实测文本宽约 48px）。标签列仍占 160px，
+**左侧白白空出 193px**：
+
+```
+section 内容区左缘        191
+标签列                   192 ~ 352   （宽 160，文字只占 48）
+字段列（链路图等）       368 起
+左侧死空间               368 - 191 = 177px
+```
+
+用户框选的正是这块区域。
+
+#### 修复
+
+把「字段区放整块内容」的行改成**竖排**：标签变成上方的小标题，
+内容占满整行宽度。
+
+判据用 CSS `:has()` 按**内容类型**匹配（CBI 不支持给 option 加自定义
+CSS 类，所以不能从 Lua 侧打标记）：
+
+```css
+.cbi-value:has(> .cbi-value-field > .dc-chain),
+.cbi-value:has(> .cbi-value-field > .dc-metrics),
+.cbi-value:has(> .cbi-value-field > .dc-table-wrap),
+.cbi-value:has(> .cbi-value-field > .dc-stats),
+.cbi-value:has(> .cbi-value-field > .dc-badge),
+.cbi-value:has(> .cbi-value-field > .dc-alert) {
+	display: block;
+}
+/* 标签列取消固定宽度，变上方小标题 */
+.cbi-value:has(...) > .cbi-value-title { width: auto; flex: none; margin: 0 0 8px; ... }
+/* 字段列占满整行 */
+.cbi-value:has(...) > .cbi-value-field { width: 100%; flex: none; }
+```
+
+**JS 兜底**（老 WebKit 无 `:has()`）：`markBlockRows()` 遍历
+`.cbi-value > .cbi-value-field`，检查**直接子元素**是否带
+`dc-chain` / `dc-metrics` / `dc-stats` / `dc-table-wrap` / `dc-badge` /
+`dc-alert` 之一，命中就给该行加 `.dc-block-row`。
+
+只看直接子元素是有意的：表格内部也有 `.dc-table`，若用后代匹配会让
+整行误判（虽然结果相同，但语义上应只认「字段区第一层是块级组件」）。
+
+#### 验证
+
+修复后逐 tab 测量「字段列左缘 − 内容区左缘」（即左侧死空间）：
+
+| Tab | 块级行 | 最大死空间 |
+|---|---|---|
+| **概览** | 结论 / 解析链路 / 链路指标 / 组件状态 | **1px** |
+| 解析 | 国外 AAAA / 当前监听 / 当前统计 | 177px |
+| 分流 | 规模 / IP 集归属核对 | 177px |
+| 代理 | SSR-Plus 当前状态 | 177px |
+| DHCP | 实际下发 | 177px |
+| 诊断 | 结果 | 177px |
+
+概览的 177px → **1px**（红框区域消失，链路图从卡片左缘开始）。
+
+其他 tab 保留 177px 是**正确的**：它们的字段是真正的表单控件
+（服务器列表、端口输入框、开关），标签最长 22 个汉字
+（「拒绝 LAN 出向 853（DoT/DoQ）」实测文本宽 210px），
+160px 标签列用于让这些字段纵向对齐，属 CBI 表单的正常形态。
+
+页面其余未变：HTTP 200、0 Lua 错误、12 section、selftest **16/16 PASS**。
+
 ## [v0.12.3] - 2026-10-22
 
 ### 修复 — 各 Tab 内图表与组件偏右、超出卡片边界

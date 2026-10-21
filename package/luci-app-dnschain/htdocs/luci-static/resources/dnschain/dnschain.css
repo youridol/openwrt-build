@@ -248,6 +248,85 @@ html[data-darkmode="true"] {
 	line-height: 1.5;
 }
 
+/* ── 整块内容行：取消标签列 ────────────────────────────────────── */
+
+/*
+ * CBI 的 .cbi-value 是「标签列（固定 160px）+ 字段列」两栏布局。
+ * 这对「标题 — 输入框」的短字段是对的，但本页概览里那 4 行
+ * （结论 / 解析链路 / 链路指标 / 组件状态）字段区放的是**整块内容**
+ * （链路图、指标条、统计卡、表格），不是短输入框。
+ *
+ * 后果：标签列仍占 160px，而概览的标签只有 4 个汉字（约 60px），
+ * 左侧白白空出 193px —— 用户看到的「左边留白很大、整体偏右」就是它。
+ *
+ * 解法：这类行改成竖排 —— 标签变成上方的小标题，内容占满整行宽度。
+ * 判据用 :has() 按内容类型匹配，不依赖 Lua 侧加标记（CBI 不支持给
+ * option 加自定义 CSS 类）。JS 侧有同样逻辑的兜底（见 dnschain.js
+ * 的 markBlockRows），供不支持 :has() 的旧浏览器使用。
+ */
+
+.cbi-value:has(> .cbi-value-field > .dc-chain),
+.cbi-value:has(> .cbi-value-field > .dc-badge),
+.cbi-value:has(> .cbi-value-field > .dc-metrics),
+.cbi-value:has(> .cbi-value-field > .dc-table-wrap),
+.cbi-value:has(> .cbi-value-field > .dc-stats),
+.cbi-value:has(> .cbi-value-field > .dc-alert) {
+	display: block;
+}
+
+.cbi-value:has(> .cbi-value-field > .dc-chain) > .cbi-value-title,
+.cbi-value:has(> .cbi-value-field > .dc-badge) > .cbi-value-title,
+.cbi-value:has(> .cbi-value-field > .dc-metrics) > .cbi-value-title,
+.cbi-value:has(> .cbi-value-field > .dc-table-wrap) > .cbi-value-title,
+.cbi-value:has(> .cbi-value-field > .dc-stats) > .cbi-value-title,
+.cbi-value:has(> .cbi-value-field > .dc-alert) > .cbi-value-title {
+	width: auto;
+	max-width: none;
+	flex: none;
+	margin: 0 0 8px;
+	padding: 0;
+	font-size: 12px;
+	font-weight: 600;
+	opacity: 0.72;
+	text-align: left;
+}
+
+.cbi-value:has(> .cbi-value-field > .dc-chain) > .cbi-value-field,
+.cbi-value:has(> .cbi-value-field > .dc-badge) > .cbi-value-field,
+.cbi-value:has(> .cbi-value-field > .dc-metrics) > .cbi-value-field,
+.cbi-value:has(> .cbi-value-field > .dc-table-wrap) > .cbi-value-field,
+.cbi-value:has(> .cbi-value-field > .dc-stats) > .cbi-value-field,
+.cbi-value:has(> .cbi-value-field > .dc-alert) > .cbi-value-field {
+	width: 100%;
+	max-width: none;
+	flex: none;
+	margin: 0;
+}
+
+/* JS 兜底路径用的类（不支持 :has() 时由 markBlockRows 添加） */
+.cbi-value.dc-block-row {
+	display: block;
+}
+
+.cbi-value.dc-block-row > .cbi-value-title {
+	width: auto;
+	max-width: none;
+	flex: none;
+	margin: 0 0 8px;
+	padding: 0;
+	font-size: 12px;
+	font-weight: 600;
+	opacity: 0.72;
+	text-align: left;
+}
+
+.cbi-value.dc-block-row > .cbi-value-field {
+	width: 100%;
+	max-width: none;
+	flex: none;
+	margin: 0;
+}
+
 /* ── 指标（统一条形图）───────────────────────────────────────────── */
 
 .dc-metrics {

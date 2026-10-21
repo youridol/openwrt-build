@@ -295,6 +295,42 @@ jobs:
             exit 1
           fi
 
+          # 断言「整块内容行」取消标签列（v0.12.4）
+          #
+          # CBI 的 .cbi-value 标签列固定 160px。概览里放链路图/指标条/
+          # 统计卡/表格的那 4 行标签只有 4 个汉字，左侧白空 193px
+          # （用户报的「左边留白很大」）。必须用 :has() 把它们改成竖排，
+          # 并有 JS 兜底供不支持 :has() 的浏览器使用。
+          if grep -q 'cbi-value:has(> .cbi-value-field > .dc-chain)' "$CSS"; then
+            echo "OK   CSS 含整块内容行竖排规则"
+          else
+            echo "FAIL CSS 缺少 .cbi-value:has(... > .dc-chain) 竖排规则（左侧会留白 193px）" >&2
+            exit 1
+          fi
+
+          for cls in dc-metrics dc-table-wrap dc-stats dc-badge dc-alert; do
+            if grep -q "cbi-value:has(> .cbi-value-field > .$cls)" "$CSS"; then
+              echo "OK   $cls 已纳入竖排规则"
+            else
+              echo "FAIL $cls 未纳入竖排规则（该行会左留白）" >&2
+              exit 1
+            fi
+          done
+
+          if grep -q 'markBlockRows' "$JS"; then
+            echo "OK   JS 含 markBlockRows 兜底"
+          else
+            echo "FAIL JS 缺少 markBlockRows()（老 WebKit 会左留白）" >&2
+            exit 1
+          fi
+
+          if grep -q 'dc-block-row' "$CSS" && grep -q 'dc-block-row' "$JS"; then
+            echo "OK   .dc-block-row 兜底类在 CSS 与 JS 都有"
+          else
+            echo "FAIL .dc-block-row 兜底类不完整" >&2
+            exit 1
+          fi
+
           # 视图层的 3 个表格都必须套滚动容器
           GEN=package/luci-app-dnschain/luasrc/model/cbi/dnschain/general.lua
           opened=$(grep -c 'dc-table-wrap"><table class="dc-table"' "$GEN" || true)

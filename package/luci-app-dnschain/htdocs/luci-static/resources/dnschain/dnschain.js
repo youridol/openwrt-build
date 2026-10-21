@@ -162,11 +162,45 @@
 		}
 	}
 
+	/**
+	 * 把「整块内容」行改成竖排（标签在上、内容占满整行）。
+	 *
+	 * CBI 的 .cbi-value 是「标签列 160px + 字段列」两栏布局，对短输入框
+	 * 合适；但概览里 4 行放的是链路图/指标条/统计卡/表格，标签却只有
+	 * 4 个汉字，左侧白空 193px —— 用户看到的「左边留白很大」就是它。
+	 *
+	 * CSS 里用 :has() 按内容类型匹配，这里用 JS 兜底（老 WebKit 无 :has()）。
+	 * 判据：字段区第一个元素带 dc- 前缀的块级类。
+	 */
+	var BLOCK_CLASSES = ['dc-chain', 'dc-metrics', 'dc-stats', 'dc-table-wrap', 'dc-alert', 'dc-badge'];
+
+	function markBlockRows() {
+		var fields = document.querySelectorAll('.cbi-value > .cbi-value-field');
+		for (var i = 0; i < fields.length; i++) {
+			var field = fields[i];
+			var row = field.parentNode;
+			if (!row || row.classList.contains('dc-block-row')) continue;
+
+			/* 只看直接子元素 —— 深层同名元素（比如表格里的 .dc-table）
+			 * 不该让整行变竖排 */
+			var hit = false;
+			for (var j = 0; j < field.children.length; j++) {
+				var el = field.children[j];
+				for (var k = 0; k < BLOCK_CLASSES.length; k++) {
+					if (el.classList.contains(BLOCK_CLASSES[k])) { hit = true; break; }
+				}
+				if (hit) break;
+			}
+			if (hit) row.classList.add('dc-block-row');
+		}
+	}
+
 	function init() {
 		meta = readMeta();
 		if (!meta) return;
 
 		dropEmptyTabmenu();
+		markBlockRows();
 
 		/* 收起承载元数据的空 section：CBI 会给它套 .cbi-section 与
 		 * .cbi-value 两层，实测占 11px，在 tab 栏上方留一段空白。
