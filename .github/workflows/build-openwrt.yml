@@ -427,21 +427,31 @@ jobs:
           # 的 INCLUDE 开关将来被关掉时框架静默失去过滤器二进制。
           echo "CONFIG_PACKAGE_chinadns-ng=y" >> .config
 
-          # ── LuCI 主题：shadcn 为默认，关掉其他主题 ──────────────────
+          # ── LuCI 主题：shadcn 为默认 ────────────────────────────────
           #
           # 只写 =y 不够：LuCI 的默认主题由 luci.main.mediaurlbase 决定，
-          # 而 lede 默认装 bootstrap 并把它设为默认。两者并存时若
-          # mediaurlbase 仍指向 bootstrap，shadcn 装了也看不到。
-          # 故这里三重处理：
+          # 而 lede 默认把它指向 bootstrap。两者并存时若 mediaurlbase
+          # 仍指向 bootstrap，shadcn 装了也看不到。故需要：
           #   (a) shadcn =y
-          #   (b) 显式关掉其他主题（减少体积，且避免回退到它们）
-          #   (c) 默认值在 uci-defaults 里设（见下一个步骤）
+          #   (b) 默认值在 uci-defaults 里无条件写（见 99-zzz-luci-theme-shadcn）
+          #
+          # ⚠️ **不要试图关掉 bootstrap**（v0.9.1 首次构建踩过）：
+          # lede 的 collections/luci/Makefile（标准 LuCI 集合包）里有
+          #   LUCI_DEPENDS:=+uhttpd ... +luci-mod-admin-full +luci-theme-bootstrap ...
+          # 即它**硬依赖** bootstrap。写 `# CONFIG_PACKAGE_luci-theme-bootstrap
+          # is not set` 会被下一条 make defconfig 的依赖求解再次选回 =y，
+          # 于是断言 `bootstrap 仍被启用` 失败，构建中止
+          # （run 39549176947 就是这样挂的）。
+          #
+          # 正确的做法是**保留 bootstrap 但切换默认**：
+          # 代价只是固件多约 300KB，换来的是可回退 ——
+          # 万一 shadcn 在真机上有兼容问题，把 mediaurlbase 改回
+          # /luci-static/bootstrap 即可，不需要重新编译。
           echo "CONFIG_PACKAGE_luci-theme-shadcn=y" >> .config
-          for t in bootstrap material openwrt argon; do
+          # 其余非默认主题仍可关（它们不在集合包的依赖里）
+          for t in material openwrt openwrt-2020 argon design; do
             echo "# CONFIG_PACKAGE_luci-theme-$t is not set" >> .config
           done
-          # LuCI 的全局主题选择符号（部分版本存在）
-          echo "CONFIG_LUCI_THEME_SHADCN=y" >> .config
 
           # ALL_DOH: dnsproxy + luci-app-dnsproxy + CA 证书（https-dns-proxy 已彻底移除）
           # 二进制来自 helloworld feed(0.83.0)，init/config 来自 openwrt-build/files
@@ -623,8 +633,17 @@ jobs:
           done
 
           echo "=== LuCI 主题：shadcn 必须启用 ==="
-          # 三条都要查，理由同 dnschain：
-          # 「文件复制了」不等于「符号进了 .config」，更不等于「成了默认主题」。
+          # 判据分两类（v0.9.1 修正过一次，见下方说明）：
+          #   (a) shadcn 必须 =y —— 缺它就没有新主题
+          #   (b) 非默认主题应关闭 —— 但不能要求 bootstrap 关闭
+          #
+          # ⚠️ 为什么 bootstrap 允许保留：
+          # lede 的 collections/luci/Makefile 硬依赖 +luci-theme-bootstrap，
+          # 写 `is not set` 会在 make defconfig 时被依赖求解再次选回 =y。
+          # 早先的断言要求 bootstrap 关闭 → 必然失败（run 39549176947）。
+          # 保留它反而是好事：shadcn 若在真机上有兼容问题，把
+          # luci.main.mediaurlbase 改回 /luci-static/bootstrap 即可回退，
+          # 不需要重新编译固件。
           tfail2=0
           if grep -q '^CONFIG_PACKAGE_luci-theme-shadcn=y$' .config; then
             echo "OK   CONFIG_PACKAGE_luci-theme-shadcn=y"
@@ -632,14 +651,18 @@ jobs:
             echo "FAIL luci-theme-shadcn 未启用"
             tfail2=1
           fi
-          # 其他主题不得残留（体积 + 避免回退）
-          for t in bootstrap material openwrt argon; do
+          # bootstrap 仅报告，不判失败
+          if grep -q '^CONFIG_PACKAGE_luci-theme-bootstrap=y$' .config; then
+            echo "OK   luci-theme-bootstrap=y（保留作回退路径，属预期）"
+          fi
+          # 其余主题应关闭
+          for t in material openwrt openwrt-2020 argon design; do
             if grep -q "^CONFIG_PACKAGE_luci-theme-${t}=y$" .config; then
               echo "FAIL luci-theme-${t} 仍被启用（应已关闭）"
               tfail2=1
             fi
           done
-          [ "$tfail2" = "0" ] && echo "OK   其他主题均已关闭"
+          [ "$tfail2" = "0" ] && echo "OK   其他非默认主题均已关闭"
           if [ "$tfail2" != "0" ]; then
             echo "--- .config 中与 luci-theme 有关的全部符号 ---"
             grep -E 'luci-theme' .config || echo "  (一条都没有 → 主题包未被识别)"

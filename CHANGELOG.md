@@ -4,6 +4,46 @@
 
 ## [v0.9.1] - 2026-10-21
 
+### 修复 — 不能关掉 `luci-theme-bootstrap`（v0.9.1 首次构建失败）
+
+run `39549176947` 失败于 `Verify SQM / i18n enabled`：
+
+```
+=== LuCI 主题：shadcn 必须启用 ===
+OK   CONFIG_PACKAGE_luci-theme-shadcn=y
+FAIL luci-theme-bootstrap 仍被启用（应已关闭）
+--- .config 中与 luci-theme 有关的全部符号 ---
+CONFIG_PACKAGE_luci-theme-bootstrap=y
+CONFIG_PACKAGE_luci-theme-shadcn=y
+```
+
+**根因**：lede 的 `collections/luci/Makefile`（标准 LuCI 集合包）**硬依赖**
+`+luci-theme-bootstrap`：
+
+```make
+LUCI_TITLE:=Standard OpenWrt set including full admin with ppp support and the default Bootstrap theme
+LUCI_DEPENDS:= \
+  +uhttpd +uhttpd-mod-ubus +luci-mod-admin-full +luci-theme-bootstrap \
+  ...
+```
+
+写 `# CONFIG_PACKAGE_luci-theme-bootstrap is not set` 只会被下一条
+`make defconfig` 的依赖求解**再次选回 `=y`**。这是我在设计时没查清的
+依赖关系，属于过度设计。
+
+**修正**：保留 bootstrap，只切换默认主题。
+
+| 项 | 改前 | 改后 |
+|---|---|---|
+| `luci-theme-shadcn` | `=y` | `=y` |
+| `luci-theme-bootstrap` | 试图关闭 → **失败** | **保留**（`=y`，作回退路径） |
+| `material`/`openwrt`/`openwrt-2020`/`argon`/`design` | 关闭 | 关闭（不在集合包依赖里，可关） |
+| 断言 | 要求 bootstrap 必须关闭 | bootstrap 仅报告；shadcn 必须启用；其余主题必须关闭 |
+
+**保留 bootstrap 反而更好**：shadcn 若在真机上有兼容问题，把
+`luci.main.mediaurlbase` 改回 `/luci-static/bootstrap` 即可回退，
+**不需要重新编译固件**。代价只是固件多约 300 KB。
+
 ### 新增 — LuCI 主题 shadcn 编入固件并设为默认
 
 按用户要求把 `youridol/luci-theme-shadcn` 作为固件的默认 LuCI 主题。
@@ -12,8 +52,8 @@
 |---|---|---|
 | 新增 `Fetch luci-theme-shadcn` 步骤 | CI | `git clone --depth 1` 只取构建需要的 5 项（`Makefile` / `root` / `htdocs` / `ucode` / `LICENSE`），排除 `.dev`/`.husky`/`.github` 等开发工具链 |
 | 新增 `files/etc/uci-defaults/99-zzz-luci-theme-shadcn` | overlay | **无条件**设 `luci.main.mediaurlbase=/luci-static/shadcn` |
-| `.config` 启用 | CI | `luci-theme-shadcn=y`、`LUCI_THEME_SHADCN=y`，并关掉 `bootstrap`/`material`/`openwrt`/`argon` |
-| 新增契约断言 | CI | 主题符号入 `.config`、其他主题已关、overlay 脚本就位且排序晚于 `30_` |
+| `.config` 启用 | CI | `luci-theme-shadcn=y`，关掉非默认主题 |
+| 新增契约断言 | CI | 主题符号入 `.config`、overlay 脚本就位且排序晚于 `30_` |
 
 **为什么必须自己写 overlay 脚本（主题包自带的那个不够）**
 
@@ -42,8 +82,7 @@ fi
 
 - 该仓库不在 lede 的任何 feed 里
 - feed 机制会拉全部分支且无 commit 固定，主题更新导致样式错乱时很难定位版本
-- 主题的 `main.css`（134 KB）与 6 个 woff2 **已预构建入库**，不需要前端构建，
-  直接按 LuCI 包编译即可
+- 主题的 `main.css`（134 KB）与 6 个 woff2 **已预构建入库**，不需要前端构建
 - 实测体积 1020 KB / 67 个文件（htdocs 占 896 KB）
 
 ### 修复 — `Download package sources` 卡死导致 6 小时超时
@@ -86,11 +125,12 @@ fi
 | 1 | YAML 语法 | `yaml.safe_load` | PASS |
 | 2 | 超时防护 6 项 | 提取步骤脚本逐项断言 | 全 OK |
 | 3 | 主题 Fetch 步骤 5 项 | 提取步骤脚本逐项断言 | 全 OK |
-| 4 | `.config` 主题符号 | 3 项断言 | 全 OK |
-| 5 | overlay 脚本 | `sh -n`（dash） | PASS |
-| 6 | 断言路径正确性 | 确认 `Apply files overlay` 在断言之后，故用 `../openwrt-build/` 前缀 | PASS |
-| 7 | **真实 clone 主题** | `git clone --depth 1` + 复制 + 4 项契约断言 | 全 OK（commit `625a8c1`，1020 KB / 67 文件） |
-| 8 | 行尾 | `od -c` 统计 CR | 全 0 |
+| 4 | **不再关闭 bootstrap** | 断言 for 循环与独立语句都不含 bootstrap | PASS |
+| 5 | 主题断言修正 | bootstrap 仅报告、shadcn 必须启用、其余主题必须关闭 | PASS |
+| 6 | overlay 脚本 | `sh -n`（dash） | PASS |
+| 7 | 断言路径正确性 | 确认 `Apply files overlay` 在断言之后，故用 `../openwrt-build/` 前缀 | PASS |
+| 8 | **真实 clone 主题** | `git clone --depth 1` + 复制 + 4 项契约断言 | 全 OK（commit `625a8c1`，1020 KB / 67 文件） |
+| 9 | 行尾 | `od -c` 统计 CR | 全 0 |
 
 **真实 clone 测试的实测数据**：
 
