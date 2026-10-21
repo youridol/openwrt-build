@@ -355,3 +355,258 @@ msgstr "v0.10.0 起国外 AAAA 不再抑制。SSR-Plus 的 IPv6 流量代理（i
 
 msgid "端口与实例"
 msgstr "端口与实例"
+
+msgid "国内 dnsproxy 未监听 —— 客户机全部无法解析"
+msgstr "国内 dnsproxy 未监听 —— 客户机全部无法解析"
+
+msgid "国外 dnsproxy 未监听 —— gfw 域名将 SERVFAIL，国内不受影响"
+msgstr "国外 dnsproxy 未监听 —— gfw 域名将 SERVFAIL，国内不受影响"
+
+msgid "国外端口被其他进程占用 —— gfw 域名会走错解析器"
+msgstr "国外端口被其他进程占用 —— gfw 域名会走错解析器"
+
+msgid "IPv6 流量代理未开 —— 国外 IPv6 会直连被 RST"
+msgstr "IPv6 流量代理未开 —— 国外 IPv6 会直连被 RST"
+
+msgid "解析链路"
+msgstr "解析链路"
+
+msgid "DNS 解析链路图"
+msgstr "DNS 解析链路图"
+
+msgid "LAN 客户机"
+msgstr "LAN 客户机"
+
+msgid "DHCP 下发"
+msgstr "DHCP 下发"
+
+msgid "缓存 + 分流"
+msgstr "缓存 + 分流"
+
+msgid "dnsproxy 国内"
+msgstr "dnsproxy 国内"
+
+msgid "阿里 DoT/DoH"
+msgstr "阿里 DoT/DoH"
+
+msgid "dnsproxy 国外"
+msgstr "dnsproxy 国外"
+
+msgid "国内上游"
+msgstr "国内上游"
+
+msgid "直连"
+msgstr "直连"
+
+msgid "未运行"
+msgstr "未运行"
+
+msgid "国外上游"
+msgstr "国外上游"
+
+msgid "经代理"
+msgstr "经代理"
+
+msgid "默认"
+msgstr "默认"
+
+msgid "gfw 域名"
+msgstr "gfw 域名"
+
+msgid "国外域名解析结果经 nftset 写入 blacklist → 流量进 :1234"
+msgstr "国外域名解析结果经 nftset 写入 blacklist → 流量进 :1234"
+
+msgid "链路指标"
+msgstr "链路指标"
+
+msgid "缓存插入"
+msgstr "缓存插入"
+
+msgid "dnsmasq 写入缓存的条目"
+msgstr "dnsmasq 写入缓存的条目"
+
+msgid "转发上游"
+msgstr "转发上游"
+
+msgid "交给 dnsproxy 的查询"
+msgstr "交给 dnsproxy 的查询"
+
+msgid "本地应答"
+msgstr "本地应答"
+
+msgid "缓存或 hosts 直接命中"
+msgstr "缓存或 hosts 直接命中"
+
+msgid "分流规则"
+msgstr "分流规则"
+
+msgid "条 server=/域名/"
+msgstr "条 server=/域名/"
+
+msgid "代理 IP 集"
+msgstr "代理 IP 集"
+
+msgid "个国外 IP"
+msgstr "个国外 IP"
+
+msgid "国内 IP 段"
+msgstr "国内 IP 段"
+
+msgid "个 CIDR"
+msgstr "个 CIDR"
+
+msgid "未应答"
+msgstr "未应答"
+
+msgid "次查询"
+msgstr "次查询"
+
+msgid "组件状态"
+msgstr "组件状态"
+
+msgid "唯一缓存层 + 唯一分流层 + DHCP"
+msgstr "唯一缓存层 + 唯一分流层 + DHCP"
+
+msgid "dnsproxy（国内）"
+msgstr "dnsproxy（国内）"
+
+msgid "阿里 DoT/DoH，直连"
+msgstr "阿里 DoT/DoH，直连"
+
+msgid "dnsproxy（国外）"
+msgstr "dnsproxy（国外）"
+
+msgid "Google DoH，经代理出站"
+msgstr "Google DoH，经代理出站"
+
+msgid "透明代理（IPv4 + IPv6）"
+msgstr "透明代理（IPv4 + IPv6）"
+
+msgid "IPv6 流量代理"
+msgstr "IPv6 流量代理"
+
+msgid "已启用，国外 IPv6 也走代理"
+msgstr "已启用，国外 IPv6 也走代理"
+
+msgid "未启用 —— 国外 IPv6 会直连被 RST"
+msgstr "未启用 —— 国外 IPv6 会直连被 RST"
+
+msgid "让自带 DoT 的客户端快速失败并回落明文 53，从而被本框架的策略覆盖。<br/>规则优先级 <code>-151</code>，先于 SSR-Plus 的 <code>mangle(-150)</code>。<br/><b>与「对客户机提供 DoH/DoT 服务端」互斥。</b>"
+msgstr "让自带 DoT 的客户端快速失败并回落明文 53，从而被本框架的策略覆盖。<br/>规则优先级 <code>-151</code>，先于 SSR-Plus 的 <code>mangle(-150)</code>。<br/><b>与「对客户机提供 DoH/DoT 服务端」互斥。</b>"
+
+msgid "尽力阻断公共 DoH"
+msgstr "尽力阻断公共 DoH"
+
+msgid "443 无法可靠区分 DoH 与普通 HTTPS，故此项只做<b>标注</b>，不实际拦截。默认关闭。"
+msgstr "443 无法可靠区分 DoH 与普通 HTTPS，故此项只做<b>标注</b>，不实际拦截。默认关闭。"
+
+msgid "国内实例端口"
+msgstr "国内实例端口"
+
+msgid "dnsproxy 实例 1 的监听端口，默认 5353。改动后需重启框架；与国外端口<b>不能相同</b>。"
+msgstr "dnsproxy 实例 1 的监听端口，默认 5353。改动后需重启框架；与国外端口<b>不能相同</b>。"
+
+msgid "国外实例端口"
+msgstr "国外实例端口"
+
+msgid "dnsproxy 实例 2 的监听端口，默认 5336。框架会用 <code>server=/域名/127.0.0.1#本端口</code> 把 gfw 域名分流过来。"
+msgstr "dnsproxy 实例 2 的监听端口，默认 5336。框架会用 <code>server=/域名/127.0.0.1#本端口</code> 把 gfw 域名分流过来。"
+
+msgid "用于<b>不在</b> gfw 名单里的域名。直连出站，可混用 DoT 与 DoH，dnsproxy 会并行查询取最快。"
+msgstr "用于<b>不在</b> gfw 名单里的域名。直连出站，可混用 DoT 与 DoH，dnsproxy 会并行查询取最快。"
+
+msgid "用于 gfw 名单里的域名。<b>必须用 DoH（https://，走 443）</b>，不能用 DoT（tls://，走 853）—— 实测落地节点到 853 全部 <code>peer sent close notify</code>，到 443 正常。"
+msgstr "用于 gfw 名单里的域名。<b>必须用 DoH（https://，走 443）</b>，不能用 DoT（tls://，走 853）—— 实测落地节点到 853 全部 <code>peer sent close notify</code>，到 443 正常。"
+
+msgid "双栈策略"
+msgstr "双栈策略"
+
+msgid "国外节点通常只有 IPv4。<b>启用 IPv6 流量代理</b>时，国外 IPv6 也会走代理，可以保留真实 AAAA；<b>不启用</b>时，国外 IPv6 是直连，拿到 AAAA 会被 RST，必须抑制。"
+msgstr "国外节点通常只有 IPv4。<b>启用 IPv6 流量代理</b>时，国外 IPv6 也会走代理，可以保留真实 AAAA；<b>不启用</b>时，国外 IPv6 是直连，拿到 AAAA 会被 RST，必须抑制。"
+
+msgid "始终保留（国内双栈不受影响）"
+msgstr "始终保留（国内双栈不受影响）"
+
+msgid "国外 AAAA"
+msgstr "国外 AAAA"
+
+msgid "<b>保留</b>（返回真实 AAAA）"
+msgstr "<b>保留</b>（返回真实 AAAA）"
+
+msgid "<b>抑制</b>（返回空答复 rcode=0 ancount=0）"
+msgstr "<b>抑制</b>（返回空答复 rcode=0 ancount=0）"
+
+msgid "注意：偏好值是「抑制」，但 ipv6_support=1 已把它强制覆盖为「保留」。"
+msgstr "注意：偏好值是「抑制」，但 ipv6_support=1 已把它强制覆盖为「保留」。"
+
+msgid "抑制国外 AAAA"
+msgstr "抑制国外 AAAA"
+
+msgid "写 <code>shadowsocksr.@global[0].filter_aaaa</code>。<br/><b>启用 IPv6 流量代理时此项无效</b> —— SSR-Plus 会强制覆盖为「保留」，因为它已经把国外 IPv6 送进代理，抑制只会让国外站点失去双栈。<br/>只有<b>关闭</b> IPv6 流量代理时，此项才真正决定行为。"
+msgstr "写 <code>shadowsocksr.@global[0].filter_aaaa</code>。<br/><b>启用 IPv6 流量代理时此项无效</b> —— SSR-Plus 会强制覆盖为「保留」，因为它已经把国外 IPv6 送进代理，抑制只会让国外站点失去双栈。<br/>只有<b>关闭</b> IPv6 流量代理时，此项才真正决定行为。"
+
+msgid "关闭 —— 保留 AAAA（推荐）"
+msgstr "关闭 —— 保留 AAAA（推荐）"
+
+msgid "开启 —— 抑制国外 AAAA"
+msgstr "开启 —— 抑制国外 AAAA"
+
+msgid "实际生效值"
+msgstr "实际生效值"
+
+msgid "偏好 <code>shadowsocksr.filter_aaaa=%s</code> · 生效 <code>dnsmasq.filter_aaaa=%s</code> · IPv6 流量代理 <code>ipv6_support=%s</code>"
+msgstr "偏好 <code>shadowsocksr.filter_aaaa=%s</code> · 生效 <code>dnsmasq.filter_aaaa=%s</code> · IPv6 流量代理 <code>ipv6_support=%s</code>"
+
+msgid "抑制 HTTPS/SVCB 记录"
+msgstr "抑制 HTTPS/SVCB 记录"
+
+msgid "qtype 64（SVCB）与 65（HTTPS）可携带 <code>ipv6hint</code>，客户端能绕过 AAAA 抑制拿到 IPv6 地址。<br/>v0.10.0 起<b>默认关闭</b>：IPv6 流量代理已把国外 IPv6 送进代理，不再需要防止 ipv6hint 泄漏。只有<b>关闭</b> IPv6 流量代理、又要抑制 AAAA 时，才需要同时打开此项。"
+msgstr "qtype 64（SVCB）与 65（HTTPS）可携带 <code>ipv6hint</code>，客户端能绕过 AAAA 抑制拿到 IPv6 地址。<br/>v0.10.0 起<b>默认关闭</b>：IPv6 流量代理已把国外 IPv6 送进代理，不再需要防止 ipv6hint 泄漏。只有<b>关闭</b> IPv6 流量代理、又要抑制 AAAA 时，才需要同时打开此项。"
+
+msgid "不启 DNS 后端（解析全部交给本框架）"
+msgstr "不启 DNS 后端（解析全部交给本框架）"
+
+msgid "使用 DNS2TCP 查询（会另起解析器，与框架冲突）"
+msgstr "使用 DNS2TCP 查询（会另起解析器，与框架冲突）"
+
+msgid "使用 MOSDNS 查询（会另起解析器，与框架冲突）"
+msgstr "使用 MOSDNS 查询（会另起解析器，与框架冲突）"
+
+msgid "使用 DNSPROXY 查询（会再起一个 dnsproxy，与框架冲突）"
+msgstr "使用 DNSPROXY 查询（会再起一个 dnsproxy，与框架冲突）"
+
+msgid "使用 ChinaDNS-NG 查询（会另起解析器，与框架冲突）"
+msgstr "使用 ChinaDNS-NG 查询（会另起解析器，与框架冲突）"
+
+msgid "优先使用模块内置 DNS（不绑端口）"
+msgstr "优先使用模块内置 DNS（不绑端口）"
+
+msgid "ipv6_support = 1 —— 已启用，国外 IPv6 也走代理（国外 AAAA 保留）"
+msgstr "ipv6_support = 1 —— 已启用，国外 IPv6 也走代理（国外 AAAA 保留）"
+
+msgid "ipv6_support = %s —— 未启用，国外 IPv6 会直连被 RST"
+msgstr "ipv6_support = %s —— 未启用，国外 IPv6 会直连被 RST"
+
+msgid "0 — 不启 DNS 后端（推荐）"
+msgstr "0 — 不启 DNS 后端（推荐）"
+
+msgid "GFW 源 %d 行 · 基础 %d 行 · 已导入 %d 条<br/>最近更新：%s"
+msgstr "GFW 源 %d 行 · 基础 %d 行 · 已导入 %d 条<br/>最近更新：%s"
+
+msgid "GFW 名单源"
+msgstr "GFW 名单源"
+
+msgid "只读源文件。框架从这里抽取域名生成分流规则，<b>不修改</b>该文件。"
+msgstr "只读源文件。框架从这里抽取域名生成分流规则，<b>不修改</b>该文件。"
+
+msgid "基础名单源"
+msgstr "基础名单源"
+
+msgid "SSR-Plus 的基础域名列表，与 GFW 名单一起导入。"
+msgstr "SSR-Plus 的基础域名列表，与 GFW 名单一起导入。"
+
+msgid "强制代理名单源"
+msgstr "强制代理名单源"
+
+msgid "SSR-Plus 的 <code>black.list</code>，命中即走代理。"
+msgstr "SSR-Plus 的 <code>black.list</code>，命中即走代理。"

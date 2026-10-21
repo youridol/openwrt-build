@@ -88,8 +88,15 @@ function M.output_ports()
 end
 
 --- 从上游 URL 抽端口
+--
+-- ⚠️ 必须防御非字符串入参。
+-- 实测（2026-10-22）：保存页面时报 500，
+--   dnschain.lua:95: attempt to call method 'match' (a nil value)
+-- 根因是 uci:foreach 返回的 sec.server 在多值 list 时是 table，
+-- 而 DynamicList 的 validate 收到的 value 也可能是 table。
+-- 旧代码直接 url:match() 就崩了 —— 页面「保存并应用」整体 500。
 function M.upstream_port(url)
-	if not url or url == "" then
+	if type(url) ~= "string" or url == "" then
 		return nil
 	end
 	local scheme = url:match("^([%w+]+)://")
@@ -112,14 +119,28 @@ end
 
 --- 校验一组上游端口是否都在代理端口集内
 --- 返回 (ok, 越界列表)
+--
+--- urls 里可能混入 table（uci list 值）与 nil，统一在这里摊平。
 function M.validate_upstreams(urls)
 	local ports = M.output_ports()
 	if ports == "" then
 		-- nft 尚未就绪时不阻断
 		return true, {}
 	end
+
+	-- 摊平：接受 string / table / nil 的任意混合
+	local flat = {}
+	local function push(v)
+		if type(v) == "string" then
+			if v ~= "" then flat[#flat + 1] = v end
+		elseif type(v) == "table" then
+			for _, x in ipairs(v) do push(x) end
+		end
+	end
+	for _, u in ipairs(urls or {}) do push(u) end
+
 	local bad = {}
-	for _, u in ipairs(urls) do
+	for _, u in ipairs(flat) do
 		local p = M.upstream_port(u)
 		if p then
 			if not ("," .. ports .. ","):find("," .. p .. ",", 1, true) then
@@ -158,6 +179,65 @@ function M.cache_stats()
 		stats[k] = tonumber(v)
 	end
 	return stats
+end
+
+--- nft 集合的元素数
+--
+-- blacklist = 国外域名的解析结果（由 dnsmasq 的 nftset= 写入）
+-- china     = SSR-Plus 维护的国内 IP 段
+function M.set_count(name)
+	local out = sys.exec(
+		"nft list set inet ss_spec " .. name .. " 2>/dev/null " ..
+		"| grep -cE '([0-9]{1,3}\\.){3}[0-9]{1,3}'") or "0"
+	return tonumber((out:gsub("%s+", ""))) or 0
+end
+
+--- 链路快照：链路图与图表都从这里取数，一次采齐
+--
+-- 全部字段都是「实测值」，取不到时给 nil，由视图层显示「—」，
+-- 不编造 0（0 与「未知」是两件事）。
+function M.chain_snapshot()
+	local entry = M.entry_port()
+	local fport = M.foreign_port()
+	local v6 = M.ssr_ipv6()
+	local cs = M.cache_stats()
+
+	local function listening(port, proto)
+		return M.port_owner(port, proto or "udp") ~= ""
+	end
+
+	local split_lines = 0
+	local f = io.open("/var/etc/dnschain/foreign-split.conf", "r")
+	if f then
+		for _ in f:lines() do split_lines = split_lines + 1 end
+		f:close()
+	end
+
+	return {
+		-- 组件存活
+		dnsmasq      = listening("53", "udp"),
+		dnsproxy_cn  = listening(entry, "udp"),
+		dnsproxy_fg  = listening(fport, "udp"),
+		proxy_1234   = listening("1234", "tcp"),
+		ipv6_proxy   = (v6 == "1"),
+
+		-- 端口与规模
+		entry_port   = entry,
+		foreign_port = fport,
+		split_count  = split_lines,
+		blacklist    = M.set_count("blacklist"),
+		china        = M.set_count("china"),
+
+		-- dnsmasq 计数
+		inserted     = cs.dns_cache_inserted,
+		forwarded    = cs.dns_queries_forwarded,
+		local_ans    = cs.dns_local_answered,
+		unanswered   = cs.dns_unanswered,
+
+		-- AAAA 状态
+		aaaa_pref    = M.ssr_filter_aaaa(),
+		aaaa_eff     = M.dnsmasq_filter_aaaa(),
+	}
 end
 
 ------------------------------------------------------------------------
@@ -229,6 +309,53 @@ end
 --- 当前 SSR-Plus 的 IPv6 流量代理开关
 function M.ssr_ipv6()
 	return (sys.exec("uci -q get shadowsocksr.@global[0].ipv6_support 2>/dev/null") or ""):gsub("%s+", "")
+end
+
+--- SSR-Plus 的 AAAA 抑制「用户偏好」值
+--
+-- ⚠️ 这不是实际生效值。ipv6_support=1 时 SSR-Plus 会覆盖它。
+-- 判据要读 M.dnsmasq_filter_aaaa()。
+function M.ssr_filter_aaaa()
+	return (sys.exec("uci -q get shadowsocksr.@global[0].filter_aaaa 2>/dev/null") or ""):gsub("%s+", "")
+end
+
+--- dnsmasq 的 AAAA 抑制「实际生效」值
+--
+-- 实测（2026-10-22）：shadowsocksr.filter_aaaa=1 而本值=0，
+-- 因为 ipv6_support=1 时 get_filter_aaaa() 强制返回 0。
+function M.dnsmasq_filter_aaaa()
+	return (sys.exec("uci -q get dhcp.@dnsmasq[0].filter_aaaa 2>/dev/null") or ""):gsub("%s+", "")
+end
+
+--- 把用户偏好同步到 dnsmasq 的生效值
+--
+-- 复刻 SSR-Plus 的 set_ipv6_dns_filter() 逻辑，但不重启 shadowsocksr
+-- （那会断代理 3–10 秒）。规则：
+--   ipv6_support=1  → dnsmasq.filter_aaaa 必须为 0（强制保留 AAAA）
+--   否则            → dnsmasq.filter_aaaa 跟随用户偏好
+--
+-- 返回 (ok, message)
+function M.sync_dnsmasq_filter_aaaa()
+	local v6 = M.ssr_ipv6()
+	local pref = M.ssr_filter_aaaa()
+	local target
+
+	if v6 == "1" then
+		target = "0"
+	else
+		target = (pref == "1") and "1" or "0"
+	end
+
+	local cur = M.dnsmasq_filter_aaaa()
+	if cur == target then
+		return true, nil
+	end
+
+	sys.exec("uci -q set dhcp.@dnsmasq[0].filter_aaaa='" .. target .. "' && uci -q commit dhcp")
+	-- 必须 restart 而非 reload：实测 reload（SIGHUP）不重读 conf-dir，
+	-- 而 filter_aaaa 是写进 /var/etc/dnsmasq.conf.* 的
+	sys.exec("/etc/init.d/dnsmasq restart >/dev/null 2>&1")
+	return true, target
 end
 
 --- 国外 dnsproxy 实例端口（v0.10.0 取代 filter_port）

@@ -2,6 +2,174 @@
 
 本仓库所有功能/配置改动均记录于此。版本判型遵循全局规范（PATCH / MINOR / MAJOR）。
 
+## [v0.11.0] - 2026-10-22
+
+### 新增 — DNS 链路页升级为配置总控台（链路图 + 图表 + filter_aaaa 控制）
+
+用户要求三件事：把 `shadowsocksr.filter_aaaa` 加到页面用滑块控制；检查
+`dns_chain` 页的渲染 BUG；把全部控制功能补全为 DNS 配置总控台，并加图表
+与链路图。施工中发现 **4 个真实渲染/提交 BUG**，一并修掉。
+
+#### BUG 1：4 个 section 全部渲染为空（最严重）
+
+现象：`概览`、`拦截总开关`、`端口与实例`、`操作` 四个 section 只显示
+`This section contains no values yet`，里面的 `当前状态`、`链路状态`、
+`当前端口`、4 个操作按钮全部不渲染。
+
+根因：配置里是 `config dnschain 'main'` —— **类型名 `dnschain`，名字 `main`**。
+而页面写的是 `m:section(TypedSection, "main")`，即「找类型为 `main` 的
+section」—— 该类型不存在，于是拿到空集合。
+
+修复：4 处改成 `TypedSection, "dnschain"`。
+
+实测：空 section 从 4 → 0，配置项从 18 → 30 项，页面 37988 → 49260 字节。
+
+#### BUG 2：上游服务器一个输入框都没有
+
+现象：`解析策略` section 只渲染出 `上游服务器` 标题和两个 Flag，
+`cn`/`foreign` 的 5 条上游地址（`tls://223.5.5.5` 等）**完全不可见、不可编辑**。
+
+根因：`TypedSection + anonymous=true + template="cbi/tblsection"`。
+`tblsection` 期望「每行一个具名 section」，而 `anonymous` 把 `cn`/`foreign`
+两行合并，于是表格里只有列头、没有输入框。
+
+修复：拆成两个 `NamedSection`（分别绑定 `cn` 与 `foreign`），去掉 `tblsection`。
+语义也更清楚——国内池与国外池的约束本来就不同（国内可混用 DoT/DoH，
+国外必须 DoH）。
+
+实测：国内上游渲染出 3 个输入框，国外上游 2 个。
+
+#### BUG 3：点「保存并应用」报 HTTP 500
+
+现象：浏览器点保存后整页 500，任何配置都存不进去。
+
+根因（从 500 页面抓到）：
+```
+dnschain.lua:95: attempt to call method 'match' (a nil value)
+```
+`upstream_port(url)` 直接 `url:match(...)`，而 `uci:foreach` 返回的
+`sec.server` 在多值 list 时是 **table**，`DynamicList` 的 `value` 也可能是
+table —— 传进来就崩。
+
+修复：
+- `upstream_port()` 加 `type(url) ~= "string"` 防御
+- `validate_upstreams()` 增加 `collect_strings()` 摊平（接受
+  string/table/nil 任意混合）
+- 页面里的 `validate_upstream()` 同样改用 `collect_strings()`
+
+实测：完整表单提交从 500 → 200。
+
+#### BUG 4：`%s` 被字面写进 UCI
+
+现象：`shadowsocksr.@global[0].filter_aaaa` 的值变成字符串 `%s`。
+
+根因：`luci.sys.call("...'%s'...", v)` —— **`luci.sys.call` 不支持 `%s` 插值**，
+它把参数原样当 shell 命令执行。
+
+修复：改字符串拼接（`v` 只可能是 `"0"`/`"1"`，无注入风险）。
+
+#### 新增：`filter_aaaa` 控制（用户明确要求）
+
+页面「双栈策略」段新增三项：
+
+| 控件 | 作用 |
+|---|---|
+| **抑制国外 AAAA**（下拉） | 写 `shadowsocksr.@global[0].filter_aaaa`，两选项：`关闭 — 保留 AAAA（推荐）` / `开启 — 抑制国外 AAAA` |
+| **国外 AAAA**（状态） | 显示**实际生效值**，并在被覆盖时给出红字警示 |
+| **实际生效值**（状态） | 同时显示 `shadowsocksr.filter_aaaa` / `dnsmasq.filter_aaaa` / `ipv6_support` 三个值 |
+
+**关键设计：如实暴露联动关系，不假装滑块有效。**
+
+实测（路由器上）：
+
+```
+shadowsocksr.filter_aaaa = 1   ← 用户偏好
+ipv6_support             = 1
+dnsmasq.filter_aaaa      = 0   ← 被 SSR-Plus 强制覆盖
+```
+
+`ipv6_support=1` 时，SSR-Plus 的 `get_filter_aaaa()` 直接返回 0 并调
+`set_ipv6_dns_filter` 把 `dnsmasq.filter_aaaa` 设为 0 —— **无论偏好填什么**。
+
+所以滑块的真实语义是「**关闭** IPv6 流量代理时要不要抑制 AAAA」。
+页面用下拉旁的解释 + 红字警示把这一点讲清楚，而不是让用户以为设了就有用。
+
+保存时 `sync_dnsmasq_filter_aaaa()` 会立即同步 dnsmasq 侧生效值，
+**不重启 shadowsocksr**（那会断代理 3–10 秒）。
+
+实测双向写入：
+
+| 操作 | HTTP | `shadowsocksr.filter_aaaa` | `dnsmasq.filter_aaaa` |
+|---|---|---|---|
+| 设「关闭」 | 200 | 0 | 0 |
+| 设「开启」 | 200 | 1 | 0（被 ipv6_support=1 覆盖，符合预期） |
+
+#### 新增：解析链路图（内联 SVG，首屏主角）
+
+7 节点三段式布局，全部用内联 SVG 实现（不引外部库）：
+
+```
+LAN 客户机 ──▶ dnsmasq ──┬──▶ dnsproxy 国内 ──▶ 国内上游（直连）
+                          └──▶ dnsproxy 国外 ──▶ SSR-Plus ──▶ 国外上游（经代理）
+```
+
+- 节点颜色随存活状态变化（绿=正常 / 红=故障）
+- 连线颜色同步，故障链路一眼可见
+- 标注「默认」「gfw 域名」放在折线旁的空白处，**不压线**
+- 底部标注 nftset 入集路径
+- 用 `currentColor` + 显式语义色，**浅色与深色主题都验证过**
+
+> 布局迭代 3 轮才定稿：初版两个 dnsproxy 上下错开 160px 却用斜线连接，
+> 斜线正好穿过两行标注，实测截图里文字被线压住；改为直角折线并把标注
+> 移到折线旁后解决。
+
+#### 新增：链路指标（条形图 + 规模卡片）
+
+- 三条相对长度条形：缓存插入 / 转发上游 / 本地应答，绝对值标在右侧
+- 四张规模卡片：分流规则条数 / 代理 IP 集元素 / 国内 IP 段 / 未应答次数
+- 图表限宽 620px（不限宽时 1387px 会把条形拉成横线，比例读不出）
+
+数据来自 `chain_snapshot()` 一次采齐，全部是实测值；取不到时显示 `—`
+而不是 `0`（0 与「未知」是两件事）。
+
+#### 补全的控制项（配置键 100% 覆盖）
+
+补齐 6 个此前未暴露的键：
+
+| 键 | 说明 |
+|---|---|
+| `main.entry_port` | 国内实例端口（默认 5353） |
+| `main.foreign_port` | 国外实例端口（默认 5336） |
+| `main.intercept_doh` | 尽力阻断公共 DoH（仅标注） |
+| `aaaa.filter_https_rr` | 抑制 SVCB/HTTPS 记录（默认关闭） |
+| `lists.gfw_source` | GFW 名单源路径 |
+| `lists.base_source` | 基础名单源路径 |
+| `lists.black_source` | 强制代理名单源路径 |
+
+另修正 7 个 `DummyValue` 缺 `rawhtml`（含 HTML 的显示成裸标签）。
+
+#### 新增工具：`tools/extract-dnschain-i18n.py`
+
+提取 `translate()` 字符串（正确处理多行 `..` 拼接），与 PO 比对。
+`--write` 追加缺失条目。本次补齐 85 条，PO 从 117 → 197 条。
+
+#### 验证
+
+| # | 项目 | 方式 | 结果 |
+|---|---|---|---|
+| 1 | 3 个 Lua 文件语法 | `luac -p` | PASS |
+| 2 | 空 section | 浏览器实测 | **4 → 0** |
+| 3 | 配置项数 | 浏览器实测 | 18 → 30 |
+| 4 | 上游输入框 | 浏览器实测 | 0 → 5（国内 3 + 国外 2） |
+| 5 | 保存并应用 | 完整表单 POST | **500 → 200** |
+| 6 | `filter_aaaa` 双向写入 | POST + `uci get` | 0↔1 正确 |
+| 7 | 链路图 SVG | 浏览器实测 | 7 节点，浅色/深色均正常 |
+| 8 | 图表 | 浏览器实测 | 3 条形 + 4 卡片 |
+| 9 | 配置键覆盖 | 脚本比对 | 100% |
+| 10 | i18n 覆盖 | `extract-dnschain-i18n.py` | 173 条全覆盖 |
+| 11 | PO 结构 | 脚本校验 | 197 条、0 重复、0 空 msgstr |
+| 12 | `rawhtml` 覆盖 | 脚本校验 | 全部覆盖 |
+
 ## [v0.10.0] - 2026-10-21
 
 ### 重构 — 移除 chinadns-ng，改双 dnsproxy 实例 + dnsmasq 分流
