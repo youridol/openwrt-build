@@ -14,8 +14,51 @@ m = Map("dnschain", translate("DNS 链路"),
 		"不实现解析逻辑——解析由 dnsproxy 与策略过滤器完成。"))
 
 ------------------------------------------------------------------------
--- 概览：一句话结论 + 状态表
+-- 让按钮的操作结果能显示到页面上
+--
+-- 为什么需要这段（v0.11.1 修）：
+--
+-- 本页 5 个按钮（清空缓存 / 导入名单 / 更新 GFW / 一键归一 / 重新自检）
+-- 原先都在 write() 里写 `m.message = "..."`，但**从来不会显示**。
+-- 这是从 v0.9 就存在的 bug，不只是本次新增的按钮。
+--
+-- 实测查明的三层原因（缺一层都不显示）：
+--
+--   ① Button 的 write() 需要**非空 formvalue** 才触发。
+--      /usr/lib/lua/luci/cbi.lua:1424 是 `if fvalue and #fvalue > 0`。
+--      按钮 HTML 的 value 是按钮文字（cbi/button.htm），浏览器提交会带上，
+--      所以真实点击没问题；用 curl 测时必须传 `name=按钮文字` 而非 `name=`。
+--
+--   ② dispatcher.lua:237 是 `local cstate = res:parse()` —— **返回值被丢弃**。
+--      所以 state_handler 返回什么都不会传到模板。
+--
+--   ③ dispatcher.lua:298 读的是 `res.message`，即 **map 对象自身的字段**
+--      （res 就是 map）。所以消息必须写到 `self.message`。
+--
+--   `m.message` 这个字段名是 SimpleForm 的（cbi/simpleform.htm:22），
+--   Map 模板不读它 —— 这就是原写法无效的原因。
+--
+-- 解法：write() 登记消息 → 覆写 state_handler，在 parse 结束时把它
+-- 写到 `self.message`（dispatcher 随后会读到并传给 map.htm）。
 ------------------------------------------------------------------------
+
+local _pending_message = nil
+
+--- 供按钮 write() 调用：登记一条要显示给用户的消息
+local function setmsg(msg)
+	_pending_message = msg
+end
+
+local _orig_state_handler = m.state_handler
+function m.state_handler(self, state)
+	local res = _orig_state_handler and _orig_state_handler(self, state)
+	if _pending_message then
+		-- 关键：写到 map 对象自身，dispatcher 读的就是这个字段
+		self.message = _pending_message
+		_pending_message = nil
+	end
+	return res
+end
 
 ------------------------------------------------------------------------
 -- 概览：一句话结论 + 链路图 + 图表
@@ -815,13 +858,19 @@ s = m:section(TypedSection, "dnschain", translate("操作"))
 s.anonymous = true
 s.addremove = false
 
+-- 按钮：全部写操作后必须 ds.invalidate()。
+-- 原因：v0.11.1 加了请求级缓存，selftest / chain_snapshot / list_stats 等
+-- 在同一请求内只跑一次。按钮执行完若不清缓存，页面上显示的还是旧结果
+-- ——用户会以为「点了没反应」。
+
 o = s:option(Button, "_flush_cache", translate("清空全部缓存"),
 	translate("发送 SIGHUP 清空 dnsmasq 缓存：进程不重启、客户机无感知。" ..
 		"「清空指定域名」做不到——dnsmasq 与 dnsproxy 都没有按域名淘汰单条缓存的接口。"))
 o.inputstyle = "reload"
 function o.write(self, section)
 	local ok, msg = ds.flush_cache()
-	m.message = (ok and "✓ " or "✗ ") .. msg
+	ds.invalidate()
+	setmsg((ok and "✓ " or "✗ ") .. msg)
 end
 
 o = s:option(Button, "_import", translate("手动导入名单"),
@@ -829,7 +878,8 @@ o = s:option(Button, "_import", translate("手动导入名单"),
 o.inputstyle = "apply"
 function o.write(self, section)
 	local ok, out = ds.import_lists()
-	m.message = "✓ " .. translate("已导入") .. "<br/><pre>" .. (out or "") .. "</pre>"
+	ds.invalidate()
+	setmsg("✓ " .. translate("已导入") .. "\n" .. (out or ""))
 end
 
 o = s:option(Button, "_update_gfw", translate("立即更新 GFW 名单"),
@@ -837,7 +887,8 @@ o = s:option(Button, "_update_gfw", translate("立即更新 GFW 名单"),
 o.inputstyle = "apply"
 function o.write(self, section)
 	local ok, msg = ds.update_gfw_list()
-	m.message = (ok and "✓ " or "✗ ") .. msg
+	ds.invalidate()
+	setmsg((ok and "✓ " or "✗ ") .. msg)
 end
 
 o = s:option(Button, "_reconcile", translate("一键归一"),
@@ -845,7 +896,21 @@ o = s:option(Button, "_reconcile", translate("一键归一"),
 o.inputstyle = "apply"
 function o.write(self, section)
 	local ok, out = ds.reconcile_now()
-	m.message = "✓ " .. translate("已归一") .. "<br/><pre>" .. (out or "") .. "</pre>"
+	ds.invalidate()
+	setmsg("✓ " .. translate("已归一") .. "\n" .. (out or ""))
+end
+
+-- 一键自检按钮：跑完后清缓存，让同请求内的「当前状态」与「自检表格」重算。
+o = s:option(Button, "_selftest_now", translate("立即重新自检"),
+	translate("重新执行全部自检项。页面默认复用首次结果以加快加载，" ..
+		"点此可强制刷新。"))
+o.inputstyle = "apply"
+function o.write(self, section)
+	ds.invalidate("selftest")
+	local r = ds.selftest()
+	setmsg(translate("已重新自检") .. "：" ..
+		string.format("PASS=%d", r.pass or 0) ..
+		(r.conclusion ~= "" and (" — " .. r.conclusion) or ""))
 end
 
 return m

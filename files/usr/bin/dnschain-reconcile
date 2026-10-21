@@ -98,7 +98,16 @@ reconcile_invariants() {
 
 		# router_proxy 必须为 1：否则路由器自身的 DoH 出向不进代理
 		# → dnsproxy 查国外 DoH 会直连被墙 → 国外域名全超时
-		reconcile_key "access_control.@global[0].router_proxy" "1" \
+		#
+		# ⚠️ 完整键名是 shadowsocksr.@access_control[0].router_proxy。
+		# v0.10.0~v0.11.0 曾误写成 "access_control.@global[0].router_proxy"
+		# （缺包名、section 名也错），导致每次「一键归一」都报：
+		#   dnschain: ERROR: 写入 access_control.@global[0].router_proxy=1 失败（原值 ''）
+		# 该键实际已为 1，所以功能没坏，只是收敛器每次都误报失败。
+		# 实测确认（2026-10-22）：
+		#   uci -q get shadowsocksr.@access_control[0].router_proxy → 1
+		#   uci show shadowsocksr | grep -c access_control       → 5 个 section
+		reconcile_key "shadowsocksr.@access_control[0].router_proxy" "1" \
 			"路由器自身出向走代理" || rc=1
 	fi
 

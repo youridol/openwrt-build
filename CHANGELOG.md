@@ -2,6 +2,181 @@
 
 本仓库所有功能/配置改动均记录于此。版本判型遵循全局规范（PATCH / MINOR / MAJOR）。
 
+## [v0.11.1] - 2026-10-22
+
+### 修复 — DNS 链路页从其他页面切过来要等 7.4 秒
+
+用户报告：从其他页面切到 `dns_chain` 很慢。实测确认 **7.4 秒**，
+而同固件的其他页面 **0.04 秒** —— 慢 **170 倍**。
+
+#### 定位过程
+
+用 `/proc/uptime` 做秒表（BusyBox 的 `date` 不支持 `%N`，`time` 内建的
+输出格式又被管道吃掉，两种常见计时法在这里都不可用）逐项测：
+
+```
+dnschain-selftest        1370 ms   ← 被调用 2 次
+ubus call dnsmasq metrics  10 ms
+nft list set china        120 ms   ← 2025 个 CIDR
+netstat                   20 ms    ← 每次 port_owner() 都起一个
+```
+
+页面里 `ds.selftest()` 被调用 **2 次**（「当前状态」+「自检表格」），
+`ds.chain_snapshot()` 也被调用 **2 次**（链路图 + 图表），而
+`chain_snapshot` 内部要查 4 个端口 → 4 个 `netstat` 进程。
+同一份数据被反复采集，累计约 7.4 秒。
+
+#### 修复 1：请求级缓存（主要收益）
+
+在 `dnschain.lua` 加模块级 `cached(key, fn)`：同一 Lua 请求内每个采集函数
+只真正执行一次。LuCI 每个 HTTP 请求是独立进程，模块级 table 天然只活一次
+请求，无需失效逻辑、不会跨请求串数据。
+
+覆盖：`selftest` / `chain_snapshot` / `cache_stats` / `list_stats` /
+`set_count` / 6 个 uci 读取。
+
+写操作（5 个按钮 + `sync_dnsmasq_filter_aaaa`）后调 `M.invalidate()`，
+保证同请求内后续读取看到新值。
+
+#### 修复 2：`listen_table()` 一次采集代替 N 次 netstat
+
+原 `port_owner()` 每次起一个 `netstat -lnup`/`-lntp`。改为跑一次
+`netstat -lntup`（TCP+UDP 合并），解析成 `{ ["udp:53"] = "16800" }` 表，
+后续全部查表。`chain_snapshot` 的 4 次查询从 4 个进程降到 0。
+
+#### 修复 3：`list_stats()` 改用纯 Lua 数行
+
+原实现每个文件起一次 `wc -l`（3 个进程）+ 一次 `date -r`。改为
+`io.open` + `gmatch("\n")` 数行（文件都在 page cache，35630 行 < 10ms）。
+只保留 `date -r`（Lua 无 stat mtime 接口）。
+
+#### 修复 4：`fw4 check` 按 mtime 指纹缓存
+
+`fw4 check` 单次 **620ms**，占 selftest 45% —— 它要重新渲染整个 ruleset
+模板（34 条 chain）再交给 `nft -c` 校验。
+
+但它的结论只在「fw4 相关输入变了」时才变：`/etc/nftables.d/*.nft`、
+`/etc/config/firewall`、fw4 模板、`ruleset-post/*.nft`。这些文件的
+mtime 不变时，重复校验必然同结果。
+
+改为按 mtime 指纹缓存到 `/tmp`（重启即清）：
+- 输入没变 → 复用上次结论（0ms）
+- 输入变了 → 重新校验
+- `DNSCHAIN_FW4_NO_CACHE=1` → 强制重算（排障用）
+
+#### 修复 5：第 15 项 grep 加 `^` 锚定（30 倍）
+
+该项扫描全部 conf-dir（实测 2.1MB / 35630 行 `server=`），原正则
+`server=/[^/]+/...` **没有行首锚定**，grep 要对每行尝试所有起始位置，
+回溯代价高。
+
+实测对比：
+
+| 写法 | 耗时 |
+|---|---|
+| `server=/[^/]+/...`（无锚定） | 300 ms |
+| `^server=/[^/]+/...`（有锚定） | **10 ms** |
+
+#### 修复 6：第 2 项改为反选短路
+
+`dnschain-split.conf` 实测 1.5MB / 17813 行。原实现用
+`grep -hoE ... | sed | sort -u | tr` 收集全部端口再去重（3 个进程，170ms）。
+改为「反选不等于 fport 的行 + head -1」，正常情况下扫到第一行即可确认
+（170ms → 40ms）。
+
+#### 效果
+
+| 指标 | 修复前 | 修复后 | 倍数 |
+|---|---|---|---|
+| 页面加载 | 7.40 s | **1.22 s** | 6.1× |
+| selftest 单次 | 1370 ms | **660 ms** | 2.1× |
+
+#### 顺带修掉 3 个此前未发现的 BUG
+
+**BUG A：所有组件显示红色 ✗「未监听」（最危险）**
+
+`listen_table()` 的正则写成 `^(%u%l%l)`（首字母**大写**），而 BusyBox
+`netstat` 输出的 Proto 是**小写** `tcp`/`udp` → 匹配不到任何行 →
+所有端口判成「未监听」。
+
+症状极具误导性：页面上 dnsmasq / 两个 dnsproxy / SSR-Plus 全变红 ✗、
+结论行显示「国内 dnsproxy 未监听 —— 客户机全部无法解析」，
+**而服务其实全在正常运行**。这类 bug 会让人以为全线故障。
+
+同时修正 UDP 行没有 State 列的问题（不能固定列数，要取最后一个字段）。
+
+**BUG B：5 个按钮的操作结果从来不显示**
+
+本页「清空缓存 / 导入名单 / 更新 GFW / 一键归一」4 个按钮从 v0.9 起
+就在 `write()` 里写 `m.message = "..."`，但**从来没显示过**。
+本次新增的「立即重新自检」也一样。
+
+实测查明的三层原因（缺一层都不显示）：
+
+1. Button 的 `write()` 需要**非空 formvalue** 才触发 ——
+   `cbi.lua:1424` 是 `if fvalue and #fvalue > 0`。按钮 HTML 的 value
+   是按钮文字，浏览器提交会带上（用 curl 测时必须传 `name=按钮文字`）。
+2. `dispatcher.lua:237` 是 `local cstate = res:parse()` —— **返回值被丢弃**，
+   所以 `state_handler` 返回什么都到不了模板。
+3. `dispatcher.lua:298` 读的是 `res.message`，即 **map 对象自身的字段**。
+
+而 `m.message` 这个字段名是 **SimpleForm** 的（`cbi/simpleform.htm:22`），
+Map 模板不读它 —— 这就是原写法无效的原因。
+
+修复：`write()` 登记到 `_pending_message` → 覆写 `m.state_handler`，
+在 parse 结束时写到 `self.message`。同时把消息里的 `<br/><pre>` 改成
+`\n`（`map.htm` 用 `pcdata()` 转义 HTML，标签会显示成 `&#60;br/&#62;`）。
+
+实测 4 个按钮消息均正确显示：
+```
+已重新自检：PASS=16 — 链路正常
+✓ 已归一
+✓ 已清空 dnsmasq 缓存（零中断）
+✓ 已导入
+```
+
+**BUG C：`reconcile` 每次都误报写入失败**
+
+`dnschain-reconcile` 第 101 行写的是
+`access_control.@global[0].router_proxy` —— **缺包名，section 名也错**。
+每次「一键归一」都输出：
+
+```
+dnschain: ERROR: 写入 access_control.@global[0].router_proxy=1 失败（原值 ''）
+```
+
+而该键实际已为 1（功能没坏，只是收敛器每次误报）。
+正确键名是 `shadowsocksr.@access_control[0].router_proxy`。
+
+### 新增 — 「立即重新自检」按钮
+
+页面默认复用首次自检结果以加快加载。该按钮强制重算，
+满足「用户主动要看最新状态」的场景。
+
+### 验证
+
+| # | 项目 | 方式 | 结果 |
+|---|---|---|---|
+| 1 | 页面加载耗时 | 路由器 curl 5 次 | **7.40s → 1.22s** |
+| 2 | selftest 耗时 | `/proc/uptime` 秒表 | **1370ms → 660ms** |
+| 3 | 组件状态 | 页面统计 | **12 个 ✓、0 个 ✗** |
+| 4 | 按钮消息 | 4 个按钮 HTTP POST | 全部正确显示 |
+| 5 | `reconcile` | 直接执行 | 无 ERROR 输出 |
+| 6 | 页面完整性 | 浏览器实测 | 12 section、0 空、0 Lua 错误 |
+| 7 | 链路图 / 图表 | 浏览器实测 | 7 节点 / 3 条形 + 4 卡片 |
+| 8 | DNS 链路回归 | selftest + 解析 + 端到端 | **16/16 PASS** |
+| 9 | 浅色 / 深色主题 | 浏览器截图 | 均正常 |
+
+DNS 链路本身未受影响：
+```
+国内 baidu A      183.2.172.177
+国内 taobao AAAA  240e:950:400:1:3::6d
+国外 google A     142.251.157.119
+国外 google AAAA  2001:4860:4827:7700::
+google -4/‑6      302/302
+baidu  -4/‑6      200/200
+```
+
 ## [v0.11.0] - 2026-10-22
 
 ### 新增 — DNS 链路页升级为配置总控台（链路图 + 图表 + filter_aaaa 控制）

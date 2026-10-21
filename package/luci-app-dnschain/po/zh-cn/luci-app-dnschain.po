@@ -610,3 +610,12 @@ msgstr "强制代理名单源"
 
 msgid "SSR-Plus 的 <code>black.list</code>，命中即走代理。"
 msgstr "SSR-Plus 的 <code>black.list</code>，命中即走代理。"
+
+msgid "立即重新自检"
+msgstr "立即重新自检"
+
+msgid "重新执行全部自检项。页面默认复用首次结果以加快加载，点此可强制刷新。"
+msgstr "重新执行全部自检项。页面默认复用首次结果以加快加载，点此可强制刷新。"
+
+msgid "已重新自检"
+msgstr "已重新自检"

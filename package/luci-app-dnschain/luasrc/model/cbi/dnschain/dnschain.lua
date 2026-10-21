@@ -22,6 +22,55 @@ local M = {}
 M.sys = sys
 
 ------------------------------------------------------------------------
+-- 请求级缓存
+--
+-- 为什么需要它（v0.11.1 性能修复）：
+--
+-- 实测（2026-10-22，路由器上）本页面加载 7.4 秒，而其他页面 0.04 秒 ——
+-- 慢 170 倍。逐项计时后定位到「同一份数据被反复采集」：
+--
+--   ds.selftest()        被调用 2 次 × 1370ms = 2740ms
+--   ds.chain_snapshot()  被调用 2 次，每次内部起 9 个进程
+--                        （4×netstat + 2×nft + 4×uci + 1×ubus）
+--   ds.cache_stats()     被调用 2 次
+--   ds.list_stats()      被调用 1 次
+--
+-- 其中 nft list set china 单次 120ms（2025 个 CIDR），
+-- netstat 单次 20ms。重复采集累计约 7.4 秒。
+--
+-- 解法：在模块级做**请求级**缓存 —— 同一个 Lua 请求内，
+-- 每个采集函数只真正执行一次，后续命中缓存。
+--
+-- 为什么不是全局缓存：LuCI 每个 HTTP 请求是独立的 Lua 进程/上下文，
+-- 模块级 table 天然只活一次请求，无需失效逻辑，也不会跨请求串数据。
+-- 页面上的「保存后立即刷新」会发起新请求 → 拿到新数据。
+------------------------------------------------------------------------
+
+local _cache = {}
+
+--- 带缓存的取值：同一请求内 key 只计算一次
+local function cached(key, fn)
+	local v = _cache[key]
+	if v == nil then
+		v = fn()
+		-- 用 sentinel 区分「算出来是 nil」与「还没算」
+		if v == nil then v = false end
+		_cache[key] = v
+	end
+	if v == false then return nil end
+	return v
+end
+
+--- 显式失效（写操作后调用，让同请求内后续读取看到新值）
+function M.invalidate(key)
+	if key then
+		_cache[key] = nil
+	else
+		_cache = {}
+	end
+end
+
+------------------------------------------------------------------------
 -- 运行时状态读取（全部只读，供页面展示）
 ------------------------------------------------------------------------
 
@@ -45,12 +94,56 @@ function M.read_args(name)
 	return lines
 end
 
+--- 一次性采集全部监听端口表
+--
+-- 性能要点（v0.11.1）：原实现每次 port_owner() 都起一个 netstat 进程，
+-- 而 chain_snapshot 要查 4 个端口、页面又调 2 次 chain_snapshot
+-- → 8 个 netstat 进程（单次 20ms）。改为「跑一次 netstat，
+-- 把结果解析成 { ["udp:53"] = "1234" } 表」，后续全部查表。
+--
+-- 用 -lntup 一次同时拿到 TCP 与 UDP（BusyBox netstat 支持组合标志），
+-- 比分别跑 -lnup / -lntp 少一半进程。
+function M.listen_table()
+	return cached("listen_table", function()
+		local out = sys.exec("netstat -lntup 2>/dev/null") or ""
+		local tbl = {}
+
+		-- BusyBox netstat 的行形如（注意 Proto 是**小写**）：
+		--   tcp        0      0 192.168.3.254:53   0.0.0.0:*   LISTEN  16800/dnsmasq
+		--   udp        0      0 127.0.0.1:5353     0.0.0.0:*           17071/dnsproxy
+		--   tcp6       0      0 :::80              :::*        LISTEN  1590/uhttpd
+		--
+		-- ⚠️ 两个实测踩过的坑（v0.11.1）：
+		--   1. Proto 是 **小写**。原先写 `^(%u%l%l)`（首字母大写）匹配不到任何行，
+		--      导致所有端口都被判成「未监听」—— 页面上所有组件变红 ✗，
+		--      而服务其实全在跑。这是最危险的一类 bug：看起来像全线故障。
+		--   2. UDP 行没有 State 列（LISTEN 只在 TCP 出现），所以不能固定列数，
+		--      要用「最后一个是 PID/名字」的取法。
+		for line in out:gmatch("[^\n]+") do
+			-- 小写 proto（tcp/udp，可能带 6 后缀）
+			local proto, addr, rest = line:match("^(%a%a%a%d?)%s+%d+%s+%d+%s+(%S+)%s+%S+%s+(.+)$")
+			if proto and addr then
+				proto = proto:lower():gsub("6$", "")
+				local port = addr:match(":(%d+)$")
+				if port then
+					-- rest 里可能是 "LISTEN  17071/dnsproxy" 或 "17071/dnsproxy" 或 "-"
+					local pid = rest:match("(%d+)/") or rest:match("(%d+)%s*$")
+					local key = proto .. ":" .. port
+					if not tbl[key] or (pid and tbl[key] == "") then
+						tbl[key] = pid or ""
+					end
+				end
+			end
+		end
+		return tbl
+	end) or {}
+end
+
 --- 端口监听者 PID
 function M.port_owner(port, proto)
-	proto = proto or "udp"
-	local flag = (proto == "udp") and "-lnup" or "-lntp"
-	local out = sys.exec("netstat " .. flag .. " 2>/dev/null | awk '$4 ~ /:" .. port .. "$/ {print $NF}' | sed 's|/.*||' | head -1") or ""
-	return (out:gsub("%s+", ""))
+	proto = (proto or "udp"):lower()
+	local tbl = M.listen_table()
+	return tbl[proto .. ":" .. tostring(port)] or ""
 end
 
 --- 端口是否被监听
@@ -152,44 +245,68 @@ function M.validate_upstreams(urls)
 end
 
 --- 名单规模
+--
+-- 性能要点（v0.11.1）：原实现每个文件起一次 `wc -l`、再起一次 `date -r`，
+-- 共 4 个进程。改为纯 Lua 读文件数行（这些文件都在 page cache 里，
+-- 实测 35630 行的文件数行耗时 < 10ms），完全不 fork。
 function M.list_stats()
-	local stats = {}
-	local function count(path)
-		if not fs.access(path) then
-			return 0
+	return cached("list_stats", function()
+		local stats = {}
+
+		-- 纯 Lua 数行：只数 \n，不构造行数组（35630 行时省内存也更快）
+		local function count(path)
+			local f = io.open(path, "r")
+			if not f then
+				return 0
+			end
+			local data = f:read("*a") or ""
+			f:close()
+			local n = 0
+			for _ in data:gmatch("\n") do n = n + 1 end
+			-- 最后一行没有换行符时补 1
+			if data ~= "" and data:sub(-1) ~= "\n" then n = n + 1 end
+			return n
 		end
-		local out = sys.exec("wc -l < " .. path .. " 2>/dev/null") or "0"
-		return tonumber((out:gsub("%s+", ""))) or 0
-	end
-	stats.gfw_lines = count("/etc/ssrplus/gfw_list.conf")
-	stats.base_lines = count("/etc/ssrplus/gfw_base.conf")
-	-- v0.10.0：分流规则由 dnsmasq 承担，文件名为 foreign-split.conf
-	stats.domains = count("/var/etc/dnschain/foreign-split.conf")
-	-- 修改时间：BusyBox 的 stat 不支持 -c（实测报错），改用 date -r
-	local mt = sys.exec("date -r /etc/ssrplus/gfw_list.conf '+%Y-%m-%d %H:%M' 2>/dev/null") or ""
-	stats.updated = (mt:gsub("%s+$", ""))
-	return stats
+
+		stats.gfw_lines = count("/etc/ssrplus/gfw_list.conf")
+		stats.base_lines = count("/etc/ssrplus/gfw_base.conf")
+		-- v0.10.0：分流规则由 dnsmasq 承担，文件名为 foreign-split.conf
+		stats.domains = count("/var/etc/dnschain/foreign-split.conf")
+
+		-- 修改时间：BusyBox 的 stat 不支持 -c（实测报错），改用 date -r。
+		-- 这一次保留外部命令（Lua 无 stat mtime 接口），但只在缓存未命中时跑一次。
+		local mt = sys.exec("date -r /etc/ssrplus/gfw_list.conf '+%Y-%m-%d %H:%M' 2>/dev/null") or ""
+		stats.updated = (mt:gsub("%s+$", ""))
+		return stats
+	end)
 end
 
 --- 缓存统计（dnsmasq metrics）
 function M.cache_stats()
-	local out = sys.exec("ubus call dnsmasq metrics 2>/dev/null") or ""
-	local stats = {}
-	for k, v in out:gmatch('"([%w_]+)"%s*:%s*(%d+)') do
-		stats[k] = tonumber(v)
-	end
-	return stats
+	return cached("cache_stats", function()
+		local out = sys.exec("ubus call dnsmasq metrics 2>/dev/null") or ""
+		local stats = {}
+		for k, v in out:gmatch('"([%w_]+)"%s*:%s*(%d+)') do
+			stats[k] = tonumber(v)
+		end
+		return stats
+	end)
 end
 
 --- nft 集合的元素数
 --
 -- blacklist = 国外域名的解析结果（由 dnsmasq 的 nftset= 写入）
 -- china     = SSR-Plus 维护的国内 IP 段
+--
+-- 性能要点（v0.11.1）：`nft list set china` 有 2025 个 CIDR，
+-- 单次 120ms。缓存后同一请求内只跑一次。
 function M.set_count(name)
-	local out = sys.exec(
-		"nft list set inet ss_spec " .. name .. " 2>/dev/null " ..
-		"| grep -cE '([0-9]{1,3}\\.){3}[0-9]{1,3}'") or "0"
-	return tonumber((out:gsub("%s+", ""))) or 0
+	return cached("set_count:" .. name, function()
+		local out = sys.exec(
+			"nft list set inet ss_spec " .. name .. " 2>/dev/null " ..
+			"| grep -cE '([0-9]{1,3}\\.){3}[0-9]{1,3}'") or "0"
+		return tonumber((out:gsub("%s+", ""))) or 0
+	end) or 0
 end
 
 --- 链路快照：链路图与图表都从这里取数，一次采齐
@@ -197,47 +314,45 @@ end
 -- 全部字段都是「实测值」，取不到时给 nil，由视图层显示「—」，
 -- 不编造 0（0 与「未知」是两件事）。
 function M.chain_snapshot()
-	local entry = M.entry_port()
-	local fport = M.foreign_port()
-	local v6 = M.ssr_ipv6()
-	local cs = M.cache_stats()
+	return cached("chain_snapshot", function()
+		local entry = M.entry_port()
+		local fport = M.foreign_port()
+		local v6 = M.ssr_ipv6()
+		local cs = M.cache_stats()
 
-	local function listening(port, proto)
-		return M.port_owner(port, proto or "udp") ~= ""
-	end
+		local function listening(port, proto)
+			return M.port_owner(port, proto or "udp") ~= ""
+		end
 
-	local split_lines = 0
-	local f = io.open("/var/etc/dnschain/foreign-split.conf", "r")
-	if f then
-		for _ in f:lines() do split_lines = split_lines + 1 end
-		f:close()
-	end
+		-- 分流条数复用 list_stats 的结果（它已缓存，且用的是纯 Lua 数行）
+		local split_lines = M.list_stats().domains or 0
 
-	return {
-		-- 组件存活
-		dnsmasq      = listening("53", "udp"),
-		dnsproxy_cn  = listening(entry, "udp"),
-		dnsproxy_fg  = listening(fport, "udp"),
-		proxy_1234   = listening("1234", "tcp"),
-		ipv6_proxy   = (v6 == "1"),
+		return {
+			-- 组件存活
+			dnsmasq      = listening("53", "udp"),
+			dnsproxy_cn  = listening(entry, "udp"),
+			dnsproxy_fg  = listening(fport, "udp"),
+			proxy_1234   = listening("1234", "tcp"),
+			ipv6_proxy   = (v6 == "1"),
 
-		-- 端口与规模
-		entry_port   = entry,
-		foreign_port = fport,
-		split_count  = split_lines,
-		blacklist    = M.set_count("blacklist"),
-		china        = M.set_count("china"),
+			-- 端口与规模
+			entry_port   = entry,
+			foreign_port = fport,
+			split_count  = split_lines,
+			blacklist    = M.set_count("blacklist"),
+			china        = M.set_count("china"),
 
-		-- dnsmasq 计数
-		inserted     = cs.dns_cache_inserted,
-		forwarded    = cs.dns_queries_forwarded,
-		local_ans    = cs.dns_local_answered,
-		unanswered   = cs.dns_unanswered,
+			-- dnsmasq 计数
+			inserted     = cs.dns_cache_inserted,
+			forwarded    = cs.dns_queries_forwarded,
+			local_ans    = cs.dns_local_answered,
+			unanswered   = cs.dns_unanswered,
 
-		-- AAAA 状态
-		aaaa_pref    = M.ssr_filter_aaaa(),
-		aaaa_eff     = M.dnsmasq_filter_aaaa(),
-	}
+			-- AAAA 状态
+			aaaa_pref    = M.ssr_filter_aaaa(),
+			aaaa_eff     = M.dnsmasq_filter_aaaa(),
+		}
+	end)
 end
 
 ------------------------------------------------------------------------
@@ -277,38 +392,61 @@ function M.reconcile_now()
 end
 
 --- 运行自检
+--
+-- 性能要点（v0.11.1）：selftest 单次实测 1370ms（它内部要跑 6+ 条 DNS 查询、
+-- nft/netstat 探测、配置比对）。页面里「当前状态」与「自检表格」两处都要它，
+-- 原来各跑一次 → 2740ms，占整页 7.4 秒的 37%。
+--
+-- 加请求级缓存后只跑一次。**注意**：不能用长 TTL 缓存 ——
+-- 自检结果要反映「此刻」的状态，用户点「一键自检」按钮必须看到新结果，
+-- 所以按钮回调里会显式 invalidate("selftest")。
 function M.selftest()
-	local out = sys.exec("/usr/bin/dnschain-selftest 2>&1") or ""
-	local items = {}
-	for line in out:gmatch("[^\n]+") do
-		local no, status, rest = line:match("^(%d+)%s+(%u+)%s+(.+)$")
-		if no then
-			local name, detail = rest:match("^([^—]+)—%s*(.*)$")
-			items[#items + 1] = {
-				no = tonumber(no),
-				status = status,
-				name = (name or rest):gsub("%s+$", ""),
-				detail = detail or ""
-			}
+	return cached("selftest", function()
+		local out = sys.exec("/usr/bin/dnschain-selftest 2>&1") or ""
+		local items = {}
+		for line in out:gmatch("[^\n]+") do
+			local no, status, rest = line:match("^(%d+)%s+(%u+)%s+(.+)$")
+			if no then
+				local name, detail = rest:match("^([^—]+)—%s*(.*)$")
+				items[#items + 1] = {
+					no = tonumber(no),
+					status = status,
+					name = (name or rest):gsub("%s+$", ""),
+					detail = detail or ""
+				}
+			end
 		end
-	end
-	local summary = out:match("SUMMARY PASS=(%d+) FAIL=(%d+) SKIP=(%d+)")
-	local conclusion = out:match("CONCLUSION:%s*([^\n]+)")
-	return {
-		items = items,
-		pass = summary and tonumber((summary)) or 0,
-		conclusion = conclusion or ""
-	}, out
+		local summary = out:match("SUMMARY PASS=(%d+) FAIL=(%d+) SKIP=(%d+)")
+		local conclusion = out:match("CONCLUSION:%s*([^\n]+)")
+		return {
+			items = items,
+			pass = summary and tonumber((summary)) or 0,
+			conclusion = conclusion or "",
+			raw = out,
+		}
+	end)
+end
+
+--- uci 单值读取（带缓存）
+--
+-- 性能要点（v0.11.1）：每次 sys.exec("uci -q get ...") 都是一次 fork。
+-- 页面里 ssr_mode / ssr_ipv6 / ssr_filter_aaaa / dnsmasq_filter_aaaa /
+-- entry_port / foreign_port 各被读多次（chain_snapshot 与 _ports 行都读），
+-- 累计 10+ 次 fork。统一走缓存。
+local function uci_get(key)
+	return cached("uci:" .. key, function()
+		return (sys.exec("uci -q get " .. key .. " 2>/dev/null") or ""):gsub("%s+", "")
+	end) or ""
 end
 
 --- 当前 SSR-Plus DNS 模式
 function M.ssr_mode()
-	return (sys.exec("uci -q get shadowsocksr.@global[0].pdnsd_enable 2>/dev/null") or ""):gsub("%s+", "")
+	return uci_get("shadowsocksr.@global[0].pdnsd_enable")
 end
 
 --- 当前 SSR-Plus 的 IPv6 流量代理开关
 function M.ssr_ipv6()
-	return (sys.exec("uci -q get shadowsocksr.@global[0].ipv6_support 2>/dev/null") or ""):gsub("%s+", "")
+	return uci_get("shadowsocksr.@global[0].ipv6_support")
 end
 
 --- SSR-Plus 的 AAAA 抑制「用户偏好」值
@@ -316,7 +454,7 @@ end
 -- ⚠️ 这不是实际生效值。ipv6_support=1 时 SSR-Plus 会覆盖它。
 -- 判据要读 M.dnsmasq_filter_aaaa()。
 function M.ssr_filter_aaaa()
-	return (sys.exec("uci -q get shadowsocksr.@global[0].filter_aaaa 2>/dev/null") or ""):gsub("%s+", "")
+	return uci_get("shadowsocksr.@global[0].filter_aaaa")
 end
 
 --- dnsmasq 的 AAAA 抑制「实际生效」值
@@ -324,7 +462,7 @@ end
 -- 实测（2026-10-22）：shadowsocksr.filter_aaaa=1 而本值=0，
 -- 因为 ipv6_support=1 时 get_filter_aaaa() 强制返回 0。
 function M.dnsmasq_filter_aaaa()
-	return (sys.exec("uci -q get dhcp.@dnsmasq[0].filter_aaaa 2>/dev/null") or ""):gsub("%s+", "")
+	return uci_get("dhcp.@dnsmasq[0].filter_aaaa")
 end
 
 --- 把用户偏好同步到 dnsmasq 的生效值
@@ -355,18 +493,20 @@ function M.sync_dnsmasq_filter_aaaa()
 	-- 必须 restart 而非 reload：实测 reload（SIGHUP）不重读 conf-dir，
 	-- 而 filter_aaaa 是写进 /var/etc/dnsmasq.conf.* 的
 	sys.exec("/etc/init.d/dnsmasq restart >/dev/null 2>&1")
+	-- 写后失效相关缓存，让同请求内后续读取看到新值
+	M.invalidate()
 	return true, target
 end
 
 --- 国外 dnsproxy 实例端口（v0.10.0 取代 filter_port）
 function M.foreign_port()
-	local p = (sys.exec("uci -q get dnschain.main.foreign_port 2>/dev/null") or ""):gsub("%s+", "")
+	local p = uci_get("dnschain.main.foreign_port")
 	return (p ~= "") and p or "5336"
 end
 
 --- 国内 dnsproxy 实例端口
 function M.entry_port()
-	local p = (sys.exec("uci -q get dnschain.main.entry_port 2>/dev/null") or ""):gsub("%s+", "")
+	local p = uci_get("dnschain.main.entry_port")
 	return (p ~= "") and p or "5353"
 end
 
