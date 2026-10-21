@@ -183,6 +183,8 @@ jobs:
                    luasrc/controller/dnschain.lua \
                    luasrc/model/cbi/dnschain/general.lua \
                    luasrc/model/cbi/dnschain/dnschain.lua \
+                   htdocs/luci-static/resources/dnschain/dnschain.css \
+                   htdocs/luci-static/resources/dnschain/dnschain.js \
                    root/usr/share/luci/menu.d/luci-app-dnschain.json \
                    root/usr/share/rpcd/acl.d/luci-app-dnschain.json \
                    po/zh-cn/luci-app-dnschain.po ; do
@@ -190,6 +192,43 @@ jobs:
               echo "OK   $f"
             else
               echo "FAIL 缺少 package/luci-app-dnschain/$f" >&2
+              exit 1
+            fi
+          done
+
+          # 断言视觉规范层的两条不变量（v0.12.0）
+          #
+          # ① CSS 必须同时定义浅色与暗色两套语义色令牌。
+          #    只写一套时，shadcn 主题切到暗色会出现「绿徽标配浅背景」
+          #    这种低对比组合（实测暗色下 dc-badge--ok 几乎看不清）。
+          # ② 两份资源都不能为空 —— 空文件会让页面静默退化成无样式，
+          #    而构建与运行时都不报错。
+          CSS=package/luci-app-dnschain/htdocs/luci-static/resources/dnschain/dnschain.css
+          JS=package/luci-app-dnschain/htdocs/luci-static/resources/dnschain/dnschain.js
+
+          if grep -q 'data-darkmode="true"' "$CSS"; then
+            echo "OK   CSS 含暗色令牌"
+          else
+            echo "FAIL CSS 缺少 html[data-darkmode] 暗色令牌块" >&2
+            exit 1
+          fi
+
+          for tok in --dc-ok --dc-warn --dc-bad --dc-info; do
+            n=$(grep -c -- "$tok:" "$CSS" || true)
+            if [ "$n" -ge 2 ]; then
+              echo "OK   $tok 定义 $n 次（浅色 + 暗色）"
+            else
+              echo "FAIL $tok 只定义 $n 次，暗色主题会缺色" >&2
+              exit 1
+            fi
+          done
+
+          for f in "$CSS" "$JS"; do
+            sz=$(wc -c < "$f")
+            if [ "$sz" -gt 500 ]; then
+              echo "OK   $(basename $f) ${sz}B"
+            else
+              echo "FAIL $(basename $f) 只有 ${sz}B，疑似空文件" >&2
               exit 1
             fi
           done

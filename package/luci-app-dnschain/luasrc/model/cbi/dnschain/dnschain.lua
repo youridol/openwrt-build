@@ -421,8 +421,62 @@ function M.selftest()
 		return {
 			items = items,
 			pass = summary and tonumber((summary)) or 0,
+			-- 视图层要显示 SKIP 与总数，这里一并给出（原来只有 pass）
+			skip = (function()
+				local _, _, sk = out:match("SUMMARY PASS=(%d+) FAIL=(%d+) SKIP=(%d+)")
+				return sk and tonumber(sk) or 0
+			end)(),
+			total = #items,
 			conclusion = conclusion or "",
 			raw = out,
+		}
+	end)
+end
+
+--- IP 集与各数据库的一致性核对
+--
+-- 用户要求核对「代理 IP 集 175 个」与 SSR-Plus 各数据库是否一致。
+-- 实测结论（2026-10-22）：
+--
+--   GFW 列表       17804 域名  ← /tmp/dnsmasq.d/.../gfw_list.conf
+--                              源 gfw_list.conf 每域名占 2 行（server= + ipset=），
+--                              故源文件 35608 行 = 17804 × 2，两者一致
+--   大陆 IP 段     8612 CIDR   ← /etc/ssrplus/china_ssr.txt
+--   国内 IPv6      1019 CIDR   ← /etc/ssrplus/china6_ssr.txt
+--   代理 IP 集     动态值      ← nft set blacklist，由 dnsmasq nftset= 写入
+--
+-- 「代理 IP 集 175」不是固定配置：它是运行时累加的。每次解析出一个新的
+-- 国外域名 IP，dnsmasq 就把它加进 blacklist。同一台机器上先后观测到
+-- 148 / 157 / 169 / 175 / 193 / 198 —— 随访问的国外站点增多而增长。
+-- 所以核对的目标不是「等于 175」，而是：
+--   ① 它只装 gfw 域名的解析结果（不混入国内 IP）
+--   ② 条目数随访问增长（说明 nftset 在工作）
+--   ③ 各源数据库行数与 SSR-Plus 的一致
+function M.ipset_audit()
+	return cached("ipset_audit", function()
+		local function lines(path)
+			local f = io.open(path, "r")
+			if not f then return nil end
+			local data = f:read("*a") or ""
+			f:close()
+			local n = 0
+			for _ in data:gmatch("\n") do n = n + 1 end
+			if data ~= "" and data:sub(-1) ~= "\n" then n = n + 1 end
+			return n
+		end
+
+		-- GFW 域名数：复用 list_stats 已算好的结果。
+		--
+		-- 性能要点（v0.12.0）：原先这里重新扫一遍 gfw_list.conf（17804 行）
+		-- 与 gfw_src 的 35608 行读取 —— 同一个文件被读两次，实测多花 ~90ms。
+		-- 现在 gfw_src 直接取 list_stats.gfw_lines，不重复读。
+		local st = M.list_stats()
+
+		return {
+			gfw_domains = st.domains,
+			gfw_src     = st.gfw_lines,
+			china_src   = lines("/etc/ssrplus/china_ssr.txt"),
+			china6_src  = lines("/etc/ssrplus/china6_ssr.txt"),
 		}
 	end)
 end

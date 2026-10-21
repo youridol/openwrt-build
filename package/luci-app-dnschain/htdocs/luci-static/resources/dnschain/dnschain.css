@@ -1,0 +1,364 @@
+/* =====================================================================
+ * luci-app-dnschain — 视觉规范层
+ *
+ * 设计取向：这是「诊断台」，不是营销页。首屏主角是解析链路图，
+ * 用户来这里的第一个问题是「现在请求怎么走、哪一段断了」。
+ *
+ * 为什么是这份文件（而不是引入 shadcn/ui 组件）：
+ *
+ *   本包是 LuCI 应用 —— Lua + CBI 服务端渲染，仓库里没有 React、
+ *   没有 package.json/components.json。`npx shadcn@latest info`
+ *   报告 framework="Manual"、config=null、components=[]。
+ *   shadcn 的组件（Tabs/Card/Chart/Badge）都是 React 组件，
+ *   在这里无法安装也无法运行。
+ *
+ *   所以这里实现的是 **shadcn 的视觉语言**，不是它的代码：
+ *   语义色令牌、圆角阶梯、卡片/徽标/提示条语法、间距节奏。
+ *   好处是与现有 shadcn 主题（luci-theme-shadcn）视觉一致，
+ *   且零构建、零依赖、离线可用。
+ *
+ * 颜色全部走 CSS 变量并带暗色回退：
+ *   shadcn 主题在 <html data-darkmode="true"> 上切换，
+ *   本文件同时定义浅色与暗色两套令牌，不依赖主题内部变量名。
+ * ===================================================================== */
+
+/* ── 语义色令牌 ──────────────────────────────────────────────────── */
+
+:root {
+	/* 状态色：与 shadcn 的 success/warning/danger 语义对齐 */
+	--dc-ok:        #16a34a;
+	--dc-ok-soft:   rgba(22, 163, 74, 0.12);
+	--dc-warn:      #d97706;
+	--dc-warn-soft: rgba(217, 119, 6, 0.12);
+	--dc-bad:       #dc2626;
+	--dc-bad-soft:  rgba(220, 38, 38, 0.12);
+	--dc-info:      #2563eb;
+	--dc-info-soft: rgba(37, 99, 235, 0.12);
+	--dc-idle:      #94a3b8;
+
+	/* 结构色 */
+	--dc-border:      rgba(148, 163, 184, 0.35);
+	--dc-border-soft: rgba(148, 163, 184, 0.2);
+	--dc-track:       rgba(148, 163, 184, 0.22);
+	--dc-surface:     rgba(148, 163, 184, 0.06);
+
+	/* 圆角阶梯（shadcn 默认 --radius = 0.5rem） */
+	--dc-r-sm: 6px;
+	--dc-r-md: 8px;
+	--dc-r-lg: 12px;
+
+	/* 文字层级 */
+	--dc-fg:       currentColor;
+	--dc-fg-muted: opacity: 0.65;
+}
+
+html[data-darkmode="true"] {
+	--dc-ok:        #4ade80;
+	--dc-ok-soft:   rgba(74, 222, 128, 0.15);
+	--dc-warn:      #fbbf24;
+	--dc-warn-soft: rgba(251, 191, 36, 0.15);
+	--dc-bad:       #f87171;
+	--dc-bad-soft:  rgba(248, 113, 113, 0.15);
+	--dc-info:      #60a5fa;
+	--dc-info-soft: rgba(96, 165, 250, 0.15);
+	--dc-idle:      #64748b;
+
+	--dc-border:      rgba(148, 163, 184, 0.28);
+	--dc-border-soft: rgba(148, 163, 184, 0.16);
+	--dc-track:       rgba(148, 163, 184, 0.18);
+	--dc-surface:     rgba(148, 163, 184, 0.08);
+}
+
+/* ── Tab 容器 ────────────────────────────────────────────────────── */
+
+/*
+ * 服务端用一个空 section 输出 tab 元数据（见 general.lua emit_tab_meta）。
+ * CBI 会给它套上 .cbi-section + .cbi-value 两层容器，实测占 11px 高，
+ * 在 tab 栏上方留出一段空白。这里把承载元数据的那一层彻底收掉。
+ */
+.cbi-section:has([data-dc-meta]),
+.cbi-value:has([data-dc-meta]) {
+	display: none !important;
+}
+
+.dc-tabs {
+	display: flex;
+	flex-wrap: wrap;
+	gap: 4px;
+	margin: 0 0 18px;
+	padding: 4px;
+	border: 1px solid var(--dc-border-soft);
+	border-radius: var(--dc-r-lg);
+	background: var(--dc-surface);
+}
+
+.dc-tab {
+	display: inline-flex;
+	align-items: center;
+	gap: 6px;
+	padding: 7px 14px;
+	border: 0;
+	border-radius: var(--dc-r-md);
+	background: transparent;
+	color: inherit;
+	font: inherit;
+	font-size: 13px;
+	line-height: 1.4;
+	cursor: pointer;
+	white-space: nowrap;
+	transition: background-color 0.15s, color 0.15s;
+}
+
+.dc-tab:hover {
+	background: var(--dc-border-soft);
+}
+
+.dc-tab[aria-selected="true"] {
+	background: var(--dc-info-soft);
+	color: var(--dc-info);
+	font-weight: 600;
+}
+
+.dc-tab__badge {
+	display: inline-block;
+	min-width: 18px;
+	padding: 0 5px;
+	border-radius: 9px;
+	background: var(--dc-bad);
+	color: #fff;
+	font-size: 10px;
+	font-weight: 600;
+	line-height: 18px;
+	text-align: center;
+}
+
+.dc-tabpanel[hidden] {
+	display: none !important;
+}
+
+/* ── 卡片 ────────────────────────────────────────────────────────── */
+
+.dc-card {
+	margin: 0 0 16px;
+	border: 1px solid var(--dc-border);
+	border-radius: var(--dc-r-lg);
+	overflow: hidden;
+}
+
+.dc-card__head {
+	display: flex;
+	align-items: baseline;
+	justify-content: space-between;
+	gap: 12px;
+	padding: 12px 16px;
+	border-bottom: 1px solid var(--dc-border-soft);
+	background: var(--dc-surface);
+}
+
+.dc-card__title {
+	margin: 0;
+	font-size: 14px;
+	font-weight: 600;
+	line-height: 1.4;
+}
+
+.dc-card__desc {
+	margin: 2px 0 0;
+	font-size: 12px;
+	opacity: 0.65;
+	line-height: 1.5;
+}
+
+.dc-card__body {
+	padding: 14px 16px;
+}
+
+.dc-card__body--flush {
+	padding: 0;
+}
+
+/* ── 徽标 ────────────────────────────────────────────────────────── */
+
+.dc-badge {
+	display: inline-flex;
+	align-items: center;
+	gap: 4px;
+	padding: 2px 8px;
+	border-radius: 999px;
+	font-size: 11px;
+	font-weight: 600;
+	line-height: 1.6;
+	white-space: nowrap;
+}
+
+.dc-badge--ok   { background: var(--dc-ok-soft);   color: var(--dc-ok); }
+.dc-badge--warn { background: var(--dc-warn-soft); color: var(--dc-warn); }
+.dc-badge--bad  { background: var(--dc-bad-soft);  color: var(--dc-bad); }
+.dc-badge--info { background: var(--dc-info-soft); color: var(--dc-info); }
+.dc-badge--mute { background: var(--dc-surface);   opacity: 0.7; }
+
+/* ── 提示条（对应 shadcn Alert）─────────────────────────────────── */
+
+.dc-alert {
+	display: flex;
+	gap: 10px;
+	padding: 10px 14px;
+	margin: 0 0 12px;
+	border: 1px solid var(--dc-border-soft);
+	border-left-width: 3px;
+	border-radius: var(--dc-r-md);
+	font-size: 12px;
+	line-height: 1.6;
+}
+
+.dc-alert--ok   { border-left-color: var(--dc-ok);   background: var(--dc-ok-soft); }
+.dc-alert--warn { border-left-color: var(--dc-warn); background: var(--dc-warn-soft); }
+.dc-alert--bad  { border-left-color: var(--dc-bad);  background: var(--dc-bad-soft); }
+.dc-alert--info { border-left-color: var(--dc-info); background: var(--dc-info-soft); }
+
+.dc-alert__icon {
+	flex: 0 0 auto;
+	font-weight: 700;
+	line-height: 1.5;
+}
+
+/* ── 指标（统一条形图）───────────────────────────────────────────── */
+
+.dc-metrics {
+	display: flex;
+	flex-direction: column;
+	gap: 8px;
+	max-width: 620px;
+}
+
+.dc-metric {
+	display: flex;
+	align-items: center;
+	gap: 10px;
+}
+
+.dc-metric__label {
+	flex: 0 0 84px;
+	font-size: 12px;
+	opacity: 0.8;
+}
+
+.dc-metric__track {
+	flex: 1 1 auto;
+	height: 8px;
+	border-radius: 999px;
+	background: var(--dc-track);
+	overflow: hidden;
+}
+
+.dc-metric__fill {
+	display: block;
+	height: 100%;
+	border-radius: 999px;
+	transition: width 0.3s ease;
+}
+
+.dc-metric__fill--ok   { background: var(--dc-ok); }
+.dc-metric__fill--info { background: var(--dc-info); }
+.dc-metric__fill--warn { background: var(--dc-warn); }
+.dc-metric__fill--bad  { background: var(--dc-bad); }
+
+.dc-metric__value {
+	flex: 0 0 auto;
+	min-width: 56px;
+	font-size: 12px;
+	font-variant-numeric: tabular-nums;
+	text-align: right;
+}
+
+/* ── 统计卡片组 ──────────────────────────────────────────────────── */
+
+.dc-stats {
+	display: grid;
+	grid-template-columns: repeat(auto-fit, minmax(130px, 1fr));
+	gap: 8px;
+	margin-top: 14px;
+}
+
+.dc-stat {
+	padding: 10px 12px;
+	border: 1px solid var(--dc-border);
+	border-radius: var(--dc-r-md);
+}
+
+.dc-stat__label {
+	font-size: 11px;
+	opacity: 0.7;
+	line-height: 1.4;
+}
+
+.dc-stat__value {
+	margin: 2px 0;
+	font-size: 20px;
+	font-weight: 600;
+	font-variant-numeric: tabular-nums;
+	line-height: 1.2;
+}
+
+.dc-stat__hint {
+	font-size: 10px;
+	opacity: 0.55;
+	line-height: 1.4;
+}
+
+/* ── 表格 ────────────────────────────────────────────────────────── */
+
+.dc-table {
+	width: 100%;
+	border-collapse: collapse;
+	font-size: 12px;
+}
+
+.dc-table th {
+	padding: 8px 10px;
+	border-bottom: 1px solid var(--dc-border);
+	text-align: left;
+	font-weight: 600;
+	font-size: 11px;
+	opacity: 0.7;
+	white-space: nowrap;
+}
+
+.dc-table td {
+	padding: 7px 10px;
+	border-bottom: 1px solid var(--dc-border-soft);
+	vertical-align: middle;
+}
+
+.dc-table tr:last-child td {
+	border-bottom: 0;
+}
+
+.dc-table__num {
+	font-variant-numeric: tabular-nums;
+	text-align: right;
+}
+
+/* ── 链路图容器 ──────────────────────────────────────────────────── */
+
+.dc-chain {
+	overflow-x: auto;
+	padding: 4px 0;
+}
+
+.dc-chain svg {
+	display: block;
+	width: 100%;
+	height: auto;
+	max-width: 1040px;
+	font-family: inherit;
+}
+
+/* ── 窄屏适配 ────────────────────────────────────────────────────── */
+
+@media (max-width: 720px) {
+	.dc-metrics { max-width: none; }
+	.dc-metric__label { flex-basis: 68px; font-size: 11px; }
+	.dc-tab { padding: 6px 10px; font-size: 12px; }
+	.dc-stats { grid-template-columns: repeat(auto-fit, minmax(104px, 1fr)); }
+}

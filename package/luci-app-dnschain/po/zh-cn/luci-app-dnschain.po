@@ -619,3 +619,216 @@ msgstr "重新执行全部自检项。页面默认复用首次结果以加快加
 
 msgid "已重新自检"
 msgstr "已重新自检"
+
+msgid "集中控制 DNS 解析链路。dnsmasq / dnsproxy / SSR-Plus 三层的可控参数都在这里，按功能分 Tab。"
+msgstr "集中控制 DNS 解析链路。dnsmasq / dnsproxy / SSR-Plus 三层的可控参数都在这里，按功能分 Tab。"
+
+msgid "解析"
+msgstr "解析"
+
+msgid "分流"
+msgstr "分流"
+
+msgid "代理"
+msgstr "代理"
+
+msgid "诊断"
+msgstr "诊断"
+
+msgid "拦截与框架开关"
+msgstr "拦截与框架开关"
+
+msgid "结论"
+msgstr "结论"
+
+msgid "未启用"
+msgstr "未启用"
+
+msgid "状态"
+msgstr "状态"
+
+msgid "国外上游的连接走 SSR-Plus 的 OUTPUT 链。要求 router_proxy=1 且 dports 含 443。<br/><b>不要关</b>：国外 DoH 直连会被墙，国外域名将全部无结果。"
+msgstr "国外上游的连接走 SSR-Plus 的 OUTPUT 链。要求 router_proxy=1 且 dports 含 443。<br/><b>不要关</b>：国外 DoH 直连会被墙，国外域名将全部无结果。"
+
+msgid "保留"
+msgstr "保留"
+
+msgid "抑制"
+msgstr "抑制"
+
+msgid "偏好值是「抑制」，但 ipv6_support=1 已强制覆盖为「保留」"
+msgstr "偏好值是「抑制」，但 ipv6_support=1 已强制覆盖为「保留」"
+
+msgid "写 <code>shadowsocksr.@global[0].filter_aaaa</code>。<br/><b>启用 IPv6 流量代理时此项无效</b> —— SSR-Plus 会强制覆盖为「保留」。<br/>只有<b>关闭</b> IPv6 流量代理时，此项才真正决定行为。"
+msgstr "写 <code>shadowsocksr.@global[0].filter_aaaa</code>。<br/><b>启用 IPv6 流量代理时此项无效</b> —— SSR-Plus 会强制覆盖为「保留」。<br/>只有<b>关闭</b> IPv6 流量代理时，此项才真正决定行为。"
+
+msgid "偏好 <code>filter_aaaa=%s</code> · 生效 <code>dnsmasq.filter_aaaa=%s</code> · <code>ipv6_support=%s</code>"
+msgstr "偏好 <code>filter_aaaa=%s</code> · 生效 <code>dnsmasq.filter_aaaa=%s</code> · <code>ipv6_support=%s</code>"
+
+msgid "qtype 64（SVCB）与 65（HTTPS）可携带 <code>ipv6hint</code>，客户端能绕过 AAAA 抑制拿到 IPv6 地址。<br/>v0.10.0 起<b>默认关闭</b>：IPv6 流量代理已把国外 IPv6 送进代理，不再需要防止 ipv6hint 泄漏。"
+msgstr "qtype 64（SVCB）与 65（HTTPS）可携带 <code>ipv6hint</code>，客户端能绕过 AAAA 抑制拿到 IPv6 地址。<br/>v0.10.0 起<b>默认关闭</b>：IPv6 流量代理已把国外 IPv6 送进代理，不再需要防止 ipv6hint 泄漏。"
+
+msgid "dnsproxy 实例 1 的监听端口，默认 5353。与国外端口<b>不能相同</b>。"
+msgstr "dnsproxy 实例 1 的监听端口，默认 5353。与国外端口<b>不能相同</b>。"
+
+msgid "当前监听"
+msgstr "当前监听"
+
+msgid "在监听"
+msgstr "在监听"
+
+msgid "缓存只在 dnsmasq 一层。dnsproxy 不缓存 —— 两处并存会让同一域名出现两份答案（实测：经 :53 与直连 :5353 返回不同 IP）。"
+msgstr "缓存只在 dnsmasq 一层。dnsproxy 不缓存 —— 两处并存会让同一域名出现两份答案（实测：经 :53 与直连 :5353 返回不同 IP）。"
+
+msgid "dnsmasq 的 cache-size。当前实测 8192 条足够家用；过大会占内存，过小会让命中率下降。"
+msgstr "dnsmasq 的 cache-size。当前实测 8192 条足够家用；过大会占内存，过小会让命中率下降。"
+
+msgid "插入 %s"
+msgstr "插入 %s"
+
+msgid "本地应答 %s"
+msgstr "本地应答 %s"
+
+msgid "转发 %s"
+msgstr "转发 %s"
+
+msgid "框架从 SSR-Plus 的名单文件抽取域名，生成 <code>server=/域名/127.0.0.1#国外端口</code> 与对应的 nftset 规则。它<b>不修改</b> SSR-Plus 的源文件。"
+msgstr "框架从 SSR-Plus 的名单文件抽取域名，生成 <code>server=/域名/127.0.0.1#国外端口</code> 与对应的 nftset 规则。它<b>不修改</b> SSR-Plus 的源文件。"
+
+msgid "规模"
+msgstr "规模"
+
+msgid "GFW 名单"
+msgstr "GFW 名单"
+
+msgid "行（含 ipset=）"
+msgstr "行（含 ipset=）"
+
+msgid "基础名单"
+msgstr "基础名单"
+
+msgid "行"
+msgstr "行"
+
+msgid "已生成分流"
+msgstr "已生成分流"
+
+msgid "最近更新"
+msgstr "最近更新"
+
+msgid "GFW 源文件 mtime"
+msgstr "GFW 源文件 mtime"
+
+msgid "IP 集归属核对"
+msgstr "IP 集归属核对"
+
+msgid "在册"
+msgstr "在册"
+
+msgid "缺失"
+msgstr "缺失"
+
+msgid "代理 IP 集（blacklist）"
+msgstr "代理 IP 集（blacklist）"
+
+msgid "运行时动态累加，随解析的国外域名增长，不是固定值"
+msgstr "运行时动态累加，随解析的国外域名增长，不是固定值"
+
+msgid "国内 IP 段（china）"
+msgstr "国内 IP 段（china）"
+
+msgid "源 china_ssr.txt；nft 会把相邻段合并成区间，故区间数少于源行数"
+msgstr "源 china_ssr.txt；nft 会把相邻段合并成区间，故区间数少于源行数"
+
+msgid "GFW 域名数"
+msgstr "GFW 域名数"
+
+msgid "源 gfw_list.conf 每域名占 2 行（server= + ipset=）"
+msgstr "源 gfw_list.conf 每域名占 2 行（server= + ipset=）"
+
+msgid "国内 IPv6 段"
+msgstr "国内 IPv6 段"
+
+msgid "源 china6_ssr.txt，供 SSR-Plus 的 IPv6 分流使用"
+msgstr "源 china6_ssr.txt，供 SSR-Plus 的 IPv6 分流使用"
+
+msgid "集合 / 数据库"
+msgstr "集合 / 数据库"
+
+msgid "实测"
+msgstr "实测"
+
+msgid "源行数"
+msgstr "源行数"
+
+msgid "框架与 SSR-Plus 的接口约定。收敛器在开机、SSR 配置变更、定时三处重放这些不变量。"
+msgstr "框架与 SSR-Plus 的接口约定。收敛器在开机、SSR 配置变更、定时三处重放这些不变量。"
+
+msgid "目标 DNS 模式"
+msgstr "目标 DNS 模式"
+
+msgid "SSR-Plus 的 <code>pdnsd_enable</code>。框架要接管解析，必须让它<b>不启动自己的 DNS 后端</b>，否则会有两个解析器抢答。"
+msgstr "SSR-Plus 的 <code>pdnsd_enable</code>。框架要接管解析，必须让它<b>不启动自己的 DNS 后端</b>，否则会有两个解析器抢答。"
+
+msgid "关闭后只告警、不修改 SSR-Plus 的键。"
+msgstr "关闭后只告警、不修改 SSR-Plus 的键。"
+
+msgid "SSR-Plus 当前状态"
+msgstr "SSR-Plus 当前状态"
+
+msgid "已让位"
+msgstr "已让位"
+
+msgid "会冲突"
+msgstr "会冲突"
+
+msgid "已启用"
+msgstr "已启用"
+
+msgid "出向走代理"
+msgstr "出向走代理"
+
+msgid "已关（推荐）"
+msgstr "已关（推荐）"
+
+msgid "会周期性重启"
+msgstr "会周期性重启"
+
+msgid "global_server=nil —— 客户机 DNS 会全部超时"
+msgstr "global_server=nil —— 客户机 DNS 会全部超时"
+
+msgid "正常"
+msgstr "正常"
+
+msgid "关闭后框架不生成分流规则、不启动自己的 dnsproxy 实例。"
+msgstr "关闭后框架不生成分流规则、不启动自己的 dnsproxy 实例。"
+
+msgid "开启：拦截静态 IP 客户机与 DHCP 客户机的 53，DHCP 下发路由器自身地址。关闭：只过滤不监听，客户机自行解析（DHCP 下发 DNS 生效）。"
+msgstr "开启：拦截静态 IP 客户机与 DHCP 客户机的 53，DHCP 下发路由器自身地址。关闭：只过滤不监听，客户机自行解析（DHCP 下发 DNS 生效）。"
+
+msgid "实际下发"
+msgstr "实际下发"
+
+msgid "拦截已开启 → 下发路由器自身 "
+msgstr "拦截已开启 → 下发路由器自身 "
+
+msgid "拦截已关闭 → 下发上方列表"
+msgstr "拦截已关闭 → 下发上方列表"
+
+msgid "16 项检查覆盖链路可达性、分流正确性、上游加密、双栈策略、fw4 可加载性与明文旁路。失败自动回滚见下方开关。"
+msgstr "16 项检查覆盖链路可达性、分流正确性、上游加密、双栈策略、fw4 可加载性与明文旁路。失败自动回滚见下方开关。"
+
+msgid "自检失败时自动回滚到上一次通过的配置快照。"
+msgstr "自检失败时自动回滚到上一次通过的配置快照。"
+
+msgid "0 表示关闭定时自检。"
+msgstr "0 表示关闭定时自检。"
+
+msgid "立即从 SSR-Plus 的名单文件重新生成框架的分流规则。"
+msgstr "立即从 SSR-Plus 的名单文件重新生成框架的分流规则。"
+
+msgid "更新 GFW 名单"
+msgstr "更新 GFW 名单"
+
+msgid "发送 SIGHUP 清空 dnsmasq 缓存：进程不重启、客户机无感知。「清空指定域名」做不到 —— dnsmasq 与 dnsproxy 都没有按域名淘汰单条缓存的接口。"
+msgstr "发送 SIGHUP 清空 dnsmasq 缓存：进程不重启、客户机无感知。「清空指定域名」做不到 —— dnsmasq 与 dnsproxy 都没有按域名淘汰单条缓存的接口。"

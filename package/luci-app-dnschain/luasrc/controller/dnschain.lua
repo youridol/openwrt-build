@@ -5,7 +5,10 @@ function index()
 		return
 	end
 
-	entry({"admin", "network", "dns_chain"},
+	local page = entry({"admin", "network", "dns_chain"},
 		cbi("dnschain/general"),
-		_("DNS 链路"), 45).dependent = false
+		_("DNS 链路"), 45)
+	page.dependent = false
+	-- 每次进入都重新渲染：页面内容是链路实况，缓存会显示过期状态
+	page.leaf = true
 end
