@@ -1,10 +1,21 @@
 # ADR-0003：DNS 链路框架 —— dnsproxy 唯一路由入口 + 框架自持策略过滤器
 
-- 状态：**提议（待批准，未落地到固件）**
+- 状态：**部分被取代（v0.10.0）** —— §5.3 第 5 条（国外 DoT 经代理）与 §5.4（AAAA 抑制策略）已由 [ADR-0005](0005-remove-chinadns-ng.md) 取代；其余章节仍有效
 - 日期：2026-10-20
 - 取代：本文件取代已被撤回的 `0003-dns-chain-architecture.md` 与 `0004-dns-chain-framework.md`（撤回原因见 §15）
+- 被取代：[ADR-0005](0005-remove-chinadns-ng.md)（2026-10-21，移除 chinadns-ng，改双 dnsproxy 实例）
 - 沿用：[ADR-0001](0001-filter-aaaa-semantics.md) 的拒绝集语义、[ADR-0002](0002-no-ipv6-proxy.md) 的「境外 IPv6 直连」取舍
-- 相关：`files/etc/config/dnsproxy`、`files/etc/init.d/dnsproxy`、`files/etc/uci-defaults/99-gaming-optimize`、`files/etc/ssrplus/mosdns-config.yaml`、`GLOSSARY.md`、CHANGELOG v0.8.0 / v0.8.6
+- 相关：`files/etc/config/dnsproxy`、`files/etc/init.d/dnsproxy`、`files/etc/uci-defaults/99-gaming-optimize`、`files/etc/ssrplus/mosdns-config.yaml`、`GLOSSARY.md`、CHANGELOG v0.8.0 / v0.8.6 / v0.10.0
+
+> ⚠️ **读本文前先读 [ADR-0005](0005-remove-chinadns-ng.md)。**
+> 本文 §5.3 第 5 条假设「国外解析用 IP 形式 DoT，经代理出站」，
+> 该假设在 2026-10-21 被实测推翻：落地节点到 `8.8.8.8:853` / `1.1.1.1:853`
+> 全部 `peer sent close notify`（只回 204 字节），而 `443` 完全正常。
+> 同时 `chinadns-ng` 的 `-t` 不支持 DoH（实测 `invalid proto: 'https://'`），
+> 形成死锁。v0.10.0 已移除 `chinadns-ng`，改为双 dnsproxy 实例 + dnsmasq 分流。
+>
+> §5.4 的 AAAA 抑制策略同样作废：v0.10.0 启用 SSR-Plus 的 IPv6 流量代理
+> （`ipv6_support=1`）后，国外 IPv6 也走代理，不再需要抑制 AAAA。
 
 ---
 

@@ -317,6 +317,19 @@
 
 ## 4. 固件运行时架构（DNS / 代理）
 
+> ⚠️ **本节下面那张图是「框架未接管时」的历史现状（v0.8.x 之前）。**
+> **v0.10.0 起固件默认走 `dnschain` 框架，实际链路是：**
+>
+> ```
+> LAN 客户端 → dnsmasq:53（唯一缓存 + 唯一分流层）
+>   ├─ 默认              → 127.0.0.1#5353  dnsproxy 实例 1（阿里 DoT/DoH，直连）
+>   ├─ server=/国外域名/ → 127.0.0.1#5336  dnsproxy 实例 2（Google DoH，经 :1234）
+>   └─ nftset=/国外域名/4#inet#ss_spec#blacklist   解析结果写入代理 IP 集
+> ```
+>
+> 详见 §4.0 与 [`docs/adr/0005-remove-chinadns-ng.md`](docs/adr/0005-remove-chinadns-ng.md)。
+> 下面这张旧图保留用于理解「为什么历史上有 mosdns / :5335 这些遗留物」。
+
 ```
 LAN 客户端
   └─ dnsmasq:53                     (noresolv=1, server=127.0.0.1#5353, dns-forward-max=1024)
@@ -362,20 +375,38 @@ LAN 客户端
 > 从未存在），且是孤岛文档（除彼此外全仓库零引用）——**引用 ADR 前先确认
 > 其结论在代码里有支撑**。
 
-### 4.0 ⚠️ `dnschain` 框架的七条硬约束（改它之前必读）
+### 4.0 ⚠️ `dnschain` 框架的硬约束（改它之前必读）
+
+> **v0.10.0 已移除 `chinadns-ng`**，改为「双 dnsproxy 实例 + dnsmasq 分流」。
+> 架构与推翻原因见 [`docs/adr/0005-remove-chinadns-ng.md`](docs/adr/0005-remove-chinadns-ng.md)。
+> 下表已按新架构更新；标 ~~删除线~~ 的是 v0.9.x 的旧约束，**已作废**。
+
+```
+dnsmasq:53（唯一缓存 + 唯一分流层）
+  ├─ 默认              → 127.0.0.1#5353  dnsproxy 实例 1（阿里 DoT/DoH，直连）
+  ├─ server=/国外域名/ → 127.0.0.1#5336  dnsproxy 实例 2（Google DoH，经 :1234）
+  └─ nftset=/国外域名/4#inet#ss_spec#blacklist   解析结果写入代理 IP 集
+```
 
 | # | 约束 | 违反的后果 | CI 断言 |
 |---|---|---|---|
-| 1 | **缓存只在 dnsmasq 一层**，`dnsproxy.args` / `filter.args` / `files/etc/config/dnsproxy` 都不得启用缓存 | 同一域名出现两份答案（实测：经 `:53` 与直连 `:5353` 返回不同 IP） | 有 |
-| 2 | **国外上游必须 IP 形式**，且端口必须在运行时 `ss_spec_output` 端口集内 | 路由器自身出向不进代理、静默直连后被墙 → 国外域名全 SERVFAIL | 有 |
-| 3 | **生成 dnsproxy 上游文件时必须过滤 `xn--`** | dnsproxy **整体拒绝启动**（不是跳过坏条目），实测 `idna: invalid label` | 有 |
-| 4 | **不配 `--fallback`、不用 `--ipv6-disabled`** | 前者回落污染上游并缓存；后者连国内 AAAA 一起砍 | 有 |
-| 5 | **`-N tag:gfw` 不能写成裸 `-N`；不得出现 `114.114.114.114`** | 裸 `-N` 会连带抑制将来引入的其他组；明文 114 是 chinadns-ng 的 `-c` 默认值 | 有 |
-| 6 | **`init.d/dnsproxy` 必须保留 `dnschain_takes_over` 让位逻辑** | 两个 procd 实例抢 `:5353`，后起的静默失败 | 有 |
-| 7 | **`applechina.conf` 必须保持 173 条且全部指向 `127.0.0.1#5353`** | 明文 `114.114.114.114` 绕过 dnsproxy，Apple 域名不走加密链路 | 有 |
+| 1 | **缓存只在 dnsmasq 一层**，`dnsproxy.args` / `dnsproxy-foreign.args` / `files/etc/config/dnsproxy` 都不得启用缓存 | 同一域名出现两份答案（实测：经 `:53` 与直连 `:5353` 返回不同 IP） | 有 |
+| 2 | **国外上游必须是 DoH（443），不能是 DoT（853）** | 落地节点到 853 全部 `peer sent close notify` → 国外域名全无结果 | 有 |
+| 3 | **分流必须由 `dnsmasq` 的 `server=/域名/` 承担，不能用 dnsproxy 的 `[/域名/]`** | 17767 条 `[/域名/]` 会让 dnsproxy 为每域名注册一条 reserved 上游，资源耗尽 → `connection timed out` | 有 |
+| 4 | **不得过滤 `xn--`** | dnsmasq 原生支持 punycode；过滤后 58 条 IDNA 域名失去分流，全部解析失败 | 有 |
+| 5 | **不配 `--fallback`、不用 `--ipv6-disabled`** | 前者回落污染上游并缓存；后者连国内 AAAA 一起砍 | 有 |
+| 6 | ~~`-N tag:gfw` 不能写成裸 `-N`~~ | **作废**（chinadns-ng 已移除） | — |
+| 7 | **不得出现 `114.114.114.114`** | 明文上游绕过加密链路 | 有 |
+| 8 | **`init.d/dnsproxy` 必须保留 `dnschain_takes_over` 让位逻辑** | 两个 procd 实例抢 `:5353`，后起的静默失败 | 有 |
+| 9 | **`applechina.conf` 必须保持 173 条且全部指向 `127.0.0.1#5353`** | 明文 `114.114.114.114` 绕过 dnsproxy，Apple 域名不走加密链路 | 有 |
+| 10 | **两个实例端口不能相同**（`entry_port` ≠ `foreign_port`） | 后起的实例静默失败 | 有（init 的 preflight） |
+| 11 | **SSR-Plus 的 `ipv6_support` 必须为 1** | 国外域名拿到真实 AAAA 却直连 → 被 RST | 有（reconcile + selftest 第 7 项） |
+| 12 | **`dnsmasq.filter_aaaa` 必须为 0** | 连国内 AAAA 一起砍（v0.10.0 起国外 AAAA 保留） | 有（selftest 第 7 项） |
 
 另有两条通用约束：**`dnschain` 不删、不重写 SSR-Plus 生成的任何文件**
-（保留 `server=/域名/#5335` 作为同策略旁路，ADR §9.1）；
+（`gfw_list.conf` 里的 `server=/域名/#5335` 保留原样；框架自己生成
+`dnschain-split.conf` 指向 `:5336`。实测 dnsmasq 对同一域名的多条 `server=`
+会全部作为候选，`:5335` 无监听时自动重试其它候选）；
 **所有脚本必须 POSIX sh（dash）兼容**（CI 用 `sh -n` + 禁 bash 语法双检）。
 
 **853 拒绝的优先级已实测**（2026-10-20，路由器上）：
@@ -654,8 +685,26 @@ dnsmasq 的 `SIGHUP` 只清缓存、不重新解析配置文件；而 OpenWrt �
 
 ## 5. ⚠️ `filter_aaaa` —— 语义随 dnsmasq 路由分裂而反转（动手前务必确认）
 
+> 🚨 **v0.10.0 起本节结论已再次反转，先读这里再读下文。**
+>
+> | 版本 | `filter_aaaa` | 原因 |
+> |---|---|---|
+> | v0.4.0 ~ v0.9.x | `'1'`（抑制） | 国外 IPv6 直连 → 会 RST |
+> | **v0.10.0 起** | **`'0'`（保留）** | SSR-Plus 的 IPv6 流量代理已把国外 IPv6 送进代理，不再需要抑制 |
+>
+> **实际生效的是 `dhcp.@dnsmasq[0].filter_aaaa`，不是
+> `shadowsocksr.@global[0].filter_aaaa`。** 后者是用户偏好，前者才决定行为：
+> `ipv6_support=1` 时 SSR-Plus 的 `get_filter_aaaa()` 直接返回 0，
+> 并调 `set_ipv6_dns_filter` 把 `dnsmasq.filter_aaaa` 设为 0。
+>
+> 实测（v0.10.0）：`shadowsocksr.filter_aaaa=1` 但 `dnsmasq.filter_aaaa=0`，
+> 而 AAAA 解析完全正常（taobao 2 条、google 8 条真实 AAAA）。
+> **判据必须读 `dnsmasq.filter_aaaa`** —— 读前者会得出错误结论。
+>
+> 下文（v0.4.0 时代的推演）保留用于理解历史，但**结论已不适用**。
+
 这是本仓库**最容易误改**的一个开关。它的「正确值」**不取决于开关字面，而取决于
-dnsmasq 把哪些域名指向 mosdns:5335**。当前仓库值 **`'1'`**（v0.4.0 起），
+dnsmasq 把哪些域名指向 mosdns:5335**。v0.4.0 时的仓库值是 **`'1'`**，
 具体理由与完整推演见 `docs/adr/0001-filter-aaaa-semantics.md`。
 
 | dnsmasq 路由 | `filter_aaaa` | 实际效果 |
