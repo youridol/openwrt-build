@@ -291,11 +291,32 @@ else
 	fail "分流片段生成缺 nftset 兜底（SSR-Plus 重建期间会把代理链路打掉）"
 fi
 
-if grep -q 'nft_after' "$ROOT/files/usr/bin/dnschain-reconcile" 2>/dev/null \
-   || grep -q 'nft_after' "files/usr/bin/dnschain-reconcile" 2>/dev/null; then
+# ⚠️ v0.14.3：自愈逻辑从 reconcile_lists 移到 reconcile_invariants。
+#
+#   原因：reconcile_lists 在「名单指纹未变」时直接 return 0，
+#   而 nftset 归零与名单变化无关（那是 SSR-Plus 重建窗口造成的）——
+#   放在那里等于「名单不变就永不检查」，实测确认自愈从不触发。
+#   invariants 每次收敛都跑，才是正确位置。
+if grep -q 'nft_now' "files/usr/bin/dnschain-reconcile" 2>/dev/null \
+   && grep -q 'dc_ss_spec_present' "files/usr/bin/dnschain-reconcile" 2>/dev/null; then
 	pass "reconcile 会检测并修复「nftset 行数为 0」的坏片段"
 else
 	fail "reconcile 不检测 nftset 归零（坏片段不会自愈）"
+fi
+
+# 自愈必须在 invariants 里（不能放 lists —— 那里名单不变就不跑）
+if awk '/^reconcile_invariants\(\)/,/^}/' "files/usr/bin/dnschain-reconcile" 2>/dev/null | grep -q 'nft_now'; then
+	pass "nftset 自愈在 invariants 里（每次收敛都检查）"
+else
+	fail "nftset 自愈不在 invariants（名单不变时永不检查）"
+fi
+
+# grep -c 双输出陷阱：不得再出现 `grep -c ... || echo 0`
+# （无匹配时得到 "0\n0"，算术比较报错 → 判据恒假）
+if sed 's/#.*//' "files/usr/bin/dnschain-reconcile" 2>/dev/null | grep -q 'grep -c.*|| echo 0'; then
+	fail "reconcile 仍有 grep -c || echo 0（会得到 0\\n0，判据恒假）"
+else
+	pass "reconcile 不用 grep -c || echo 0（避免双输出）"
 fi
 
 # ── selftest 结果缓存（v0.14.1 性能）──

@@ -1256,14 +1256,18 @@ o.placeholder = "https://dns.google/dns-query"
 
 o = s:option(Flag, "cert_verify", translate("校验上游证书"),
 	translate("dnsproxy 的 DoH 上游走标准 TLS（带 SNI），可以正常校验证书。" ..
-		"关闭后跳过校验，仅用于上游证书异常时的排障。"))
+		"关闭后跳过校验，仅用于上游证书异常时的排障。" ..
+		"<br/><b>注意：此项目前仅作记录，未接入 dnsproxy 的启动参数</b>" ..
+		"（框架始终使用 dnsproxy 的默认校验行为）。"))
 o.rmempty = true
 o.default = "1"
 
 o = s:option(Flag, "via_proxy", translate("经代理出站"),
 	translate("国外上游的连接走 SSR-Plus 的 OUTPUT 链。" ..
 		"要求 router_proxy=1 且 dports 含 443。" ..
-		"<br/><b>不要关</b>：国外 DoH 直连会被墙，国外域名将全部无结果。"))
+		"<br/><b>不要关</b>：国外 DoH 直连会被墙，国外域名将全部无结果。" ..
+		"<br/><b>注意：此项目前仅作记录，实际出站由 SSR-Plus 的" ..
+		" <code>router_proxy</code> 与 dports 决定</b>（框架不改这两项）。"))
 o.rmempty = true
 o.default = "1"
 
@@ -1698,7 +1702,9 @@ function o.cfgvalue()
 end
 
 o = s:option(Flag, "auto_rollback", translate("失败自动回滚"),
-	translate("自检失败时自动回滚到上一次通过的配置快照。"))
+	translate("自检失败时自动回滚到上一次通过的配置快照。" ..
+		"<br/><b>注意：此项目前仅作记录，回滚逻辑尚未实现</b>" ..
+		"（失败时只记日志，不会自动回滚配置）。"))
 o.rmempty = false
 o.default = "1"
 

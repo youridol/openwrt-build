@@ -105,10 +105,22 @@ uci -q delete dhcp.@dnsmasq[0].server 2>/dev/null
 uci add_list dhcp.@dnsmasq[0].server='127.0.0.1#5353' 2>/dev/null
 uci set dhcp.@dnsmasq[0].noresolv='1' 2>/dev/null
 uci set dhcp.@dnsmasq[0].dnsforwardmax='1024' 2>/dev/null
-uci set dhcp.@dnsmasq[0].cachesize='8192' 2>/dev/null
+# ⚠️ 缓存条目数必须读 dnschain.cache.size，不能硬编码（v0.14.3 修 M3）。
+#
+#   原先这里写死 8192，而页面「缓存 → 条目数」绑的是 dnschain.cache.size。
+#   用户把它改成 2048 或 65536 后**没有任何消费者**，实际生效值仍是 8192
+#   —— 页面显示值与生效值不一致，属最难排查的一类。
+_want_cs=$(uci -q get dnschain.cache.size 2>/dev/null)
+case "$_want_cs" in
+	''|*[!0-9]*) _want_cs=8192 ;;
+esac
+# dnsmasq 的合理区间：太小无意义，太大会吃内存
+[ "$_want_cs" -lt 128 ] && _want_cs=128
+[ "$_want_cs" -gt 65536 ] && _want_cs=65536
+uci set "dhcp.@dnsmasq[0].cachesize=$_want_cs" 2>/dev/null
 uci commit dhcp 2>/dev/null
 
-log "dnsmasq: server=127.0.0.1#5353, noresolv=1, dnsforwardmax=1024, cachesize=8192"
+log "dnsmasq: server=127.0.0.1#5353, noresolv=1, dnsforwardmax=1024, cachesize=${_want_cs}"
 
 # ------------------------------------------------------------
 # 5. 首次生成运行时配置（不启动服务，由 init 负责）
@@ -146,10 +158,27 @@ dc_gen_watch_servers >/dev/null 2>&1 \
 # 只写文件不配 --servers-file 等于没写：dnsmasq 不会去读它，
 # 改道就永远是「页面显示已改，实际没生效」。
 # ------------------------------------------------------------
+# ⚠️ 路径必须与库常量 DNSCHAIN_WATCH_SERVERS 一致（v0.14.3 修）。
+#
+#   原写法硬编码 `/var/etc/dnschain/watch.servers`，而库常量与
+#   init 的 update_serversfile 都用 `/var/run/dnsmasq/watch.servers`。
+#   正常路径下 init 启动时会纠正，所以平时看不出来；但服务未启用、
+#   preflight 失败、或用户首刷后先看页面再启动服务时，UCI 里就是
+#   那个错路径 —— dnsmasq 以 uid 453 运行、读不到该目录，
+#   **既不报错也不生效**，改道静默失效（AGENTS 约束 26 的症状）。
+#
+#   直接引用库常量，避免两处各写一份路径。
+_want_sf=""
+if [ -r /usr/share/dnschain/dnschain.sh ]; then
+	# 子 shell 取值，避免把库的函数与变量污染进本脚本
+	_want_sf=$(. /usr/share/dnschain/dnschain.sh 2>/dev/null; printf '%s' "$DNSCHAIN_WATCH_SERVERS")
+fi
+[ -n "$_want_sf" ] || _want_sf="/var/run/dnsmasq/watch.servers"
+
 _cur_sf=$(uci -q get dhcp.@dnsmasq[0].serversfile 2>/dev/null)
-if [ "$_cur_sf" != "/var/etc/dnschain/watch.servers" ]; then
-	uci set dhcp.@dnsmasq[0].serversfile='/var/etc/dnschain/watch.servers' 2>/dev/null \
-		&& log "dnsmasq: serversfile -> /var/etc/dnschain/watch.servers" \
+if [ "$_cur_sf" != "$_want_sf" ]; then
+	uci set "dhcp.@dnsmasq[0].serversfile=$_want_sf" 2>/dev/null \
+		&& log "dnsmasq: serversfile -> $_want_sf" \
 		|| log "ERROR: 写入 serversfile 失败"
 	uci commit dhcp 2>/dev/null
 fi

@@ -126,7 +126,7 @@ reconcile_invariants() {
 	# 唯一默认上游必须恰好一条 127.0.0.1#5353
 	entry=$(dc_get main entry_port 5353)
 	servers=$(uci -q get dhcp.@dnsmasq[0].server 2>/dev/null | tr ' ' '\n' | grep -v '^$')
-	cnt=$(echo "$servers" | grep -c . 2>/dev/null || echo 0)
+	cnt=$(printf '%s\n' "$servers" | awk 'NF { c++ } END { print c + 0 }')
 
 	if [ "$cnt" != "1" ] || [ "$servers" != "127.0.0.1#${entry}" ]; then
 		# 只在框架启用时重建
@@ -140,6 +140,52 @@ reconcile_invariants() {
 	# ---- dnsproxy：LAN 拦截开关由框架接管 ----
 	reconcile_key "dnsproxy.global.lan_dns_intercept" "1" \
 		"LAN DNS 强制拦截" || rc=1
+
+	# ---- 缓存条目数：把页面配置的 cache.size 同步给 dnsmasq ----
+	#
+	# 为什么要在收敛器里做（v0.14.3）：uci-defaults 只在首刷时跑一次，
+	# 用户在页面改「条目数」后若不刷机就永远不生效。收敛器每次开机
+	# 与配置变更都会跑，是让页面值真正落地的正确位置。
+	local want_cs cur_cs
+	want_cs=$(dc_get cache size 8192)
+	case "$want_cs" in
+		''|*[!0-9]*) want_cs=8192 ;;
+	esac
+	[ "$want_cs" -lt 128 ] && want_cs=128
+	[ "$want_cs" -gt 65536 ] && want_cs=65536
+	cur_cs=$(uci -q get dhcp.@dnsmasq[0].cachesize 2>/dev/null)
+	if [ "$cur_cs" != "$want_cs" ]; then
+		uci -q set "dhcp.@dnsmasq[0].cachesize=$want_cs" || rc=1
+		uci -q commit dhcp
+		dnschain_log "归一: dhcp.cachesize '${cur_cs}' -> '${want_cs}'（页面 cache.size）"
+	fi
+
+	# ---- 分流片段 nftset 归零自愈（v0.14.3 移到这里）----
+	#
+	# 实测故障：在 SSR-Plus 页面点「保存并应用」后，ssrplus 重建规则，
+	# `ss_spec` 表短暂消失。若 dnschain 恰在此窗口跑 apply/reconcile，
+	# 会生成 **23714 条 server= 但 0 条 nftset=** 的片段 ——
+	# 国外域名能解析，可解析出的 IP 不进 blacklist →
+	# **流量不走代理 → 国外链路整条断掉**，且日志干净。
+	#
+	# 为什么放在 invariants 而不是 reconcile_lists：
+	#   reconcile_lists 在名单指纹未变时直接 return，
+	#   而 nftset 归零与名单无关 —— 放那里等于永不检查。
+	local nft_now
+	nft_now=$(dc_count_lines '^nftset=' "$DNSCHAIN_DNSMASQ_CONF_DIR/dnschain-split.conf")
+	if [ "$nft_now" -eq 0 ] 2>/dev/null && dc_ss_spec_present; then
+		dnschain_log "WARN: 分流片段 nftset 行数为 0（ss_spec 已存在），重建一次"
+		dc_gen_dnsmasq_split >/dev/null 2>&1
+		nft_now=$(dc_count_lines '^nftset=' "$DNSCHAIN_DNSMASQ_CONF_DIR/dnschain-split.conf")
+		if [ "$nft_now" -gt 0 ] 2>/dev/null; then
+			dnschain_log "已修复：nftset 行数 ${nft_now}"
+			# 片段变了，dnsmasq 必须重启才生效（由 main 统一处理）
+			DNSCHAIN_SPLIT_CHANGED=1
+		else
+			dnschain_log "ERROR: 重建后 nftset 仍为 0，请检查 ss_spec 的 blacklist/china 集合"
+			rc=1
+		fi
+	fi
 
 	# ---- 缓存层唯一：dnsproxy 不能带 --cache ----
 	if grep -q '^--cache' "$DNSCHAIN_RUN_DIR/dnsproxy.args" 2>/dev/null; then
@@ -204,42 +250,15 @@ reconcile_lists() {
 		return 1
 	}
 
-	# ── 分流片段：检测「nftset 行被清空」并修复（v0.14.1）─────────
+	# 分流片段：名单变了就重建
 	#
-	# 实测故障：在 SSR-Plus 页面点「保存并应用」后，ssrplus 重建规则，
-	# `ss_spec` 表短暂消失。若 dnschain 恰在此窗口跑 apply，会生成
-	# **23714 条 server= 但 0 条 nftset=** 的片段 ——
-	# 国外域名能解析，可解析出的 IP 不进 blacklist →
-	# **流量不走代理 → 国外链路整条断掉**，且日志干净。
-	#
-	# 这里在重建前后各查一次：若 ss_spec 现在**在**、而片段里
-	# nftset 行数为 0，说明上一版是「窗口期生成的坏片段」，
-	# 必须重建（dc_gen_dnsmasq_split 内部也会保留上一版行做兜底，
-	# 但那是应急；此刻 ss_spec 已回来，应当生成完整版）。
-	local nft_before nft_after
-	nft_before=$(grep -c '^nftset=' "$DNSCHAIN_DNSMASQ_CONF_DIR/dnschain-split.conf" 2>/dev/null || echo 0)
-
+	# ⚠️ nftset 归零的**自愈**不在这里做（v0.14.3 修）。
+	#    本函数在「名单指纹未变」时会直接 return 0，
+	#    而 nftset 归零与名单是否变化无关（那是 SSR-Plus 重建窗口造成的）。
+	#    放在这里等于「名单不变就永不检查」—— 实测确认自愈从不触发。
+	#    自愈已移到 reconcile_invariants（每次收敛都跑）。
 	dc_gen_dnsmasq_split >/dev/null 2>&1 || \
 		dnschain_log "WARN: 重建 dnschain-split.conf 失败"
-
-	nft_after=$(grep -c '^nftset=' "$DNSCHAIN_DNSMASQ_CONF_DIR/dnschain-split.conf" 2>/dev/null || echo 0)
-
-	# 情况一：本来有、现在没了 → 生成期间 ss_spec 不在（窗口期）
-	# 情况二：本来就是 0、而 ss_spec 现在在 → 上一版是坏的，需再生成一次
-	if dc_ss_spec_present; then
-		if [ "$nft_after" -eq 0 ] 2>/dev/null; then
-			dnschain_log "WARN: 分流片段 nftset 行数为 0（ss_spec 已存在），强制重建一次"
-			dc_gen_dnsmasq_split >/dev/null 2>&1
-			nft_after=$(grep -c '^nftset=' "$DNSCHAIN_DNSMASQ_CONF_DIR/dnschain-split.conf" 2>/dev/null || echo 0)
-			if [ "$nft_after" -gt 0 ] 2>/dev/null; then
-				dnschain_log "已修复：nftset 行数 ${nft_after}"
-			else
-				dnschain_log "ERROR: 重建后 nftset 仍为 0，请检查 ss_spec 的 blacklist/china 集合"
-			fi
-		elif [ "$nft_before" -gt 0 ] 2>/dev/null && [ "$nft_after" -lt "$nft_before" ] 2>/dev/null; then
-			dnschain_log "WARN: nftset 行数从 ${nft_before} 降到 ${nft_after}（可能有域名集合缺失）"
-		fi
-	fi
 
 	dc_gen_watch_servers >/dev/null 2>&1
 
@@ -278,7 +297,13 @@ reconcile_intercept() {
 	if [ "$intercept" = "1" ]; then
 		# 拦截开启：DHCP 下发路由器自身地址（由 dnsmasq 默认行为提供），
 		# 故清掉自定义 dhcp-option 6
-		if uci -q get dhcp.@dnsmasq[0].dhcp_option 2>/dev/null | grep -q '^6,'; then
+		# ⚠️ 必须按**项**匹配，不能按行首（v0.14.3 修 M6）。
+		#    `uci get` 把 list 拼成一行空格分隔，`grep '^6,'` 只匹配行首。
+		#    若 DHCP option 里 DNS 不是第一项（例如先有 `3,192.168.3.1`
+		#    再有 `6,...`），这段永远不会删掉旧的明文 DNS 下发，
+		#    客户机继续拿到外部 DNS，绕过整个框架 —— 而页面显示「拦截已开启」。
+		if uci -q get dhcp.@dnsmasq[0].dhcp_option 2>/dev/null \
+			| tr ' ' '\n' | grep -q '^6,'; then
 			uci -q delete dhcp.@dnsmasq[0].dhcp_option
 			changed=1
 		fi
@@ -295,9 +320,19 @@ reconcile_intercept() {
 	fi
 
 	if [ "$changed" = "1" ]; then
-		uci -q commit dhcp
+		# ⚠️ 失败必须置非 0（v0.14.3 修 M9）。
+		#    原实现无条件 return 0，而 main 也不取它的 rc →
+		#    commit/restart 失败时收敛器仍以 0 退出，
+		#    页面「一键归一」永远报成功（违反 AGENTS 红线 3「禁止静默失败」）。
+		uci -q commit dhcp || {
+			dnschain_log "ERROR: 提交 dhcp 配置失败"
+			return 1
+		}
 		dnschain_log "拦截开关变化，重启 dnsmasq 使 DHCP 下发值生效（约 3 秒中断）"
-		/etc/init.d/dnsmasq restart >/dev/null 2>&1
+		/etc/init.d/dnsmasq restart >/dev/null 2>&1 || {
+			dnschain_log "ERROR: 重启 dnsmasq 失败，DHCP 下发值未生效"
+			return 1
+		}
 	fi
 	return 0
 }
@@ -317,6 +352,27 @@ main() {
 	[ $? -ne 0 ] && rc=1
 
 	reconcile_intercept
+	[ $? -ne 0 ] && rc=1
+
+	# 分流片段被自愈重建过 → dnsmasq 必须重启才生效
+	# （静态片段通过 conf-dir 加载，SIGHUP 不重读，AGENTS §4.4）
+	if [ -n "$DNSCHAIN_SPLIT_CHANGED" ]; then
+		DNSCHAIN_SPLIT_CHANGED=""
+		dnschain_log "分流片段已重建，重启 dnsmasq 使其生效"
+		/etc/init.d/dnsmasq restart >/dev/null 2>&1 || rc=1
+	fi
+
+	# 缓存条目数是 dnsmasq 的**启动参数**，改了必须重启才生效
+	# （reload 只清缓存、不重读配置）。这里比对「UCI 值」与
+	# 「进程实际生效值」，不一致才重启一次 —— 避免每轮都重启。
+	local want_cs eff_cs
+	want_cs=$(dc_get cache size 8192)
+	case "$want_cs" in ''|*[!0-9]*) want_cs=8192 ;; esac
+	eff_cs=$(sed -n 's/^cache-size=\([0-9]*\)$/\1/p' /var/etc/dnsmasq.conf.* 2>/dev/null | head -1)
+	if [ -n "$eff_cs" ] && [ "$want_cs" != "$eff_cs" ]; then
+		dnschain_log "缓存条目数待生效（配置 ${want_cs} / 实际 ${eff_cs}），重启 dnsmasq"
+		/etc/init.d/dnsmasq restart >/dev/null 2>&1 || rc=1
+	fi
 
 	if [ "$rc" -ne 0 ]; then
 		dnschain_log "收敛完成，但有错误（见上方日志）"

@@ -6,12 +6,19 @@
 # 设计依据：docs/adr/0003-dns-chain-framework.md
 #
 # 约束（AGENTS.md §6 第 11 条）：必须 POSIX sh（dash）兼容。
-#   禁止进程替换 <(...)、[[ ]]、数组、local。
+#   禁止：进程替换 <(...)、[[ ]]、关联数组（declare -A）。
+#
+#   `local` **可以**用 —— 本文件每个函数都在用，dash 与 BusyBox ash
+#   都支持它。原注释把 local 也列进禁令，与实际用法矛盾，
+#   会误导后续改动（有人据此删掉 local 反而引入变量污染）。
+#   已更正（v0.14.3）。
+#
+#   注意 `declare -A` 属 bash 专有：实测 BusyBox ash 不支持，
+#   写它只会得到一段永不执行的死代码（v0.14.3 删过一处）。
 # ============================================================
 
 DNSCHAIN_CONF="dnschain"
 DNSCHAIN_RUN_DIR="/var/etc/dnschain"
-DNSCHAIN_ETC_DIR="/etc/dnschain"
 DNSCHAIN_STATE_DIR="/var/run/dnschain"
 
 # 框架自持的组件路径
@@ -54,11 +61,30 @@ dc_get_list() {
 #     避免 SSR-Plus 自己起 mosdns/dns2tcp 制造第二个解析器）
 # coexist 下允许 1/4/5/6，但框架不强制改
 # ------------------------------------------------------------
+# ⚠️ 必须读 `ssr.mode`，不能读 `main.profile`（v0.14.3 修 M2）。
+#
+#   原实现读 `dc_get main profile primary`，而配置文件里**没有**
+#   `main.profile` 这个键 → 恒返回 "0"。而页面上用户能选
+#   「目标 DNS 模式」（`ssr.mode`：0 或 7）却**没有任何脚本读它**。
+#   结果：用户选「7 — 模块内置 DNS」并保存，收敛器仍强制写回
+#   `pdnsd_enable=0` —— 用户的操作被静默推翻，且没有任何提示。
+#
+#   同一个事实曾存在两个键（profile / ssr.mode），一个不存在、
+#   一个没人读。现在统一到 `ssr.mode`：
+#     · 有显式 ssr.mode → 用它（尊重用户选择）
+#     · 无 ssr.mode 但有 main.profile=coexist → 不强制（旧配置兼容）
+#     · 都没有 → 默认 0（框架要接管解析，必须让它不启自己的 DNS 后端）
 dc_ssr_mode_for_profile() {
-	local profile
+	local mode profile
+	mode=$(dc_get ssr mode "")
+	if [ -n "$mode" ]; then
+		echo "$mode"
+		return 0
+	fi
+	# 旧配置兼容：main.profile=coexist 表示「不强制，由用户决定」
 	profile=$(dc_get main profile primary)
 	case "$profile" in
-		coexist) echo "" ;;   # 不强制，由用户决定
+		coexist) echo "" ;;
 		*)       echo "0" ;;
 	esac
 }
@@ -105,10 +131,9 @@ dc_lists_fingerprint() {
 
 	total=0
 	md5s=""
-	if [ -r "$gfw" ]; then
-		total=$((total + $(wc -l < "$gfw")))
-		md5s="${md5s}$(md5sum "$gfw" 2>/dev/null | awk '{print $1}')"
-	fi
+	# gfw 已在函数开头 `[ -r ] || return` 过，这里无需再判（v0.14.3 清理）
+	total=$((total + $(wc -l < "$gfw")))
+	md5s="${md5s}$(md5sum "$gfw" 2>/dev/null | awk '{print $1}')"
 	if [ -r "$base" ]; then
 		total=$((total + $(wc -l < "$base")))
 		md5s="${md5s}$(md5sum "$base" 2>/dev/null | awk '{print $1}')"
@@ -130,13 +155,21 @@ dc_lists_fingerprint() {
 # 因为 dnsmasq 那条旁路能处理 punycode，需要保留完整集合）。
 # ------------------------------------------------------------
 dc_extract_domains() {
-	local gfw base
+	local gfw base black
 	gfw=$(dc_get lists gfw_source /etc/ssrplus/gfw_list.conf)
 	base=$(dc_get lists base_source /etc/ssrplus/gfw_base.conf)
+	# ⚠️ black_source 之前**没有消费者**（v0.14.3 修 M3）：
+	#    页面「名单 → 黑名单源」可配，但归属判定只读 gfw + base，
+	#    用户配的额外黑名单被完全忽略，且无从察觉。
+	#    SSR-Plus 的 black.list 是**裸域名**格式（一行一个，无 server=/ 前缀），
+	#    与 gfw_list 不同，故单独解析。
+	black=$(dc_get lists black_source /etc/ssrplus/black.list)
 
 	{
 		[ -r "$gfw" ] && sed -n 's|^server=/\([^/]*\)/.*|\1|p' "$gfw"
 		[ -r "$base" ] && sed -n 's|^server=/\([^/]*\)/.*|\1|p' "$base"
+		# black.list：一行一个域名，可能带 # 注释与空行
+		[ -r "$black" ] && sed -e 's/#.*//' -e 's/[[:space:]]//g' "$black"
 	} | grep -v '^$' | sort -u
 }
 
@@ -231,7 +264,26 @@ dc_gen_upstream_file() {
 	fi
 
 	dc_gen_custom_lists || return 1
-	[ -s "$DNSCHAIN_DB_DOMAINS" ] || dc_gen_db_domains >/dev/null
+
+	# ⚠️ 数据库文件必须真的就绪（v0.14.3 修 M7）。
+	#
+	#   原写法 `[ -s ... ] || dc_gen_db_domains >/dev/null` **不检查返回码**，
+	#   随后 `if [ -r "$DNSCHAIN_DB_DOMAINS" ]` 为假时 $tmp 保持空，
+	#   仍被 mv 成正式文件并 return 0 —— 静默产出 0 字节的
+	#   foreign-split.conf。故障只在后面的 preflight 里以
+	#   「foreign-split.conf 为空」出现，与真实原因（gfw 名单未就绪 /
+	#   生成失败）隔了两层。
+	if [ ! -s "$DNSCHAIN_DB_DOMAINS" ]; then
+		dc_gen_db_domains >/dev/null 2>&1 || {
+			dnschain_log "ERROR: 生成 db-domains 失败（gfw 名单不可读？）"
+			return 1
+		}
+	fi
+	if [ ! -s "$DNSCHAIN_DB_DOMAINS" ]; then
+		dnschain_log "ERROR: db-domains 为空，无法生成国外分流规则"
+		dnschain_log "ERROR: 请确认 lists.gfw_source 指向的名单文件存在且有内容"
+		return 1
+	fi
 
 	tmp=$(mktemp) || return 1
 	watch_f=$(mktemp) || { rm -f "$tmp"; return 1; }
@@ -798,59 +850,31 @@ dc_domain_class() {
 	#   但 **348KB 字符串的模式匹配本身很慢** —— 每次判定仍要
 	#   扫描整个串，8 个域名 0.60s，比原来还慢。
 	#
-	# 第三轮（当前）：改用**关联数组**做 O(1) 查表。
-	#   BusyBox ash 不保证支持关联数组，故先探测；不支持时
-	#   回落到「单次 grep -F 批量查所有候选后缀」——
-	#   一次 grep 解决一个域名，而不是每级标签一次。
+	# 第三轮（当前）：**一次 grep 批量比对所有候选后缀**。
+#
+#   曾尝试用关联数组（`declare -A`）做 O(1) 查表，但实测
+#   BusyBox ash **不支持** `declare -A`（`sh -c 'eval "declare -A x=()"'
+#   返回非 0），那整段是死代码；且 `declare` 属 bash 专有命令，
+#   与本文件「必须 POSIX sh 兼容」的声明冲突。已删除（v0.14.3）。
+#
+#   现在只有一条实现：把所有候选后缀拼成 pattern 列表，
+#   **一次** `grep -Fxf` 比对整个名单。实测 8 个域名 0.29s，够用。
 	if [ -r "$DNSCHAIN_DB_DOMAINS" ]; then
-		if [ -z "${_DC_DB_LOADED:-}" ]; then
-			# 探测 ash 是否支持关联数组（BusyBox 编译选项相关）
-			if (eval 'declare -A _dc_probe=()' ) 2>/dev/null; then
-				_DC_DB_HASH=1
-			else
-				_DC_DB_HASH=0
-			fi
-			_DC_DB_LOADED=1
-		fi
-
-		if [ "${_DC_DB_HASH:-0}" = "1" ]; then
-			# 关联数组：首次调用时装载一次
-			if [ -z "${_DC_DB_MAP_READY:-}" ]; then
-				declare -A _DC_DB_MAP 2>/dev/null
-				while IFS= read -r _dc_l; do
-					[ -n "$_dc_l" ] && _DC_DB_MAP["$_dc_l"]=1
-				done < "$DNSCHAIN_DB_DOMAINS"
-				_DC_DB_MAP_READY=1
-			fi
-			cur="$d"
-			while :; do
-				if [ -n "${_DC_DB_MAP[$cur]:-}" ]; then
-					echo "db-foreign"; return 0
-				fi
-				cur=${cur#*.}
-				case "$cur" in
-					*.*) ;;
-					*) break ;;
-				esac
-			done
-		else
-			# 回落：把所有候选后缀拼成一个 pattern 文件，**一次** grep
-			# 候选 = 自身 + 逐级剥标签后的后缀（至少保留两级）
-			_dc_cands=""
-			cur="$d"
-			while :; do
-				_dc_cands="$_dc_cands$cur
+		# 候选 = 自身 + 逐级剥标签后的后缀（至少保留两级）
+		_dc_cands=""
+		cur="$d"
+		while :; do
+			_dc_cands="$_dc_cands$cur
 "
-				cur=${cur#*.}
-				case "$cur" in
-					*.*) ;;
-					*) break ;;
-				esac
-			done
-			# grep -F 一次比对多个模式，命中即 db-foreign
-			if printf '%s' "$_dc_cands" | grep -Fxf - "$DNSCHAIN_DB_DOMAINS" 2>/dev/null | head -1 | grep -q .; then
-				echo "db-foreign"; return 0
-			fi
+			cur=${cur#*.}
+			case "$cur" in
+				*.*) ;;
+				*) break ;;
+			esac
+		done
+		# grep -F 一次比对多个模式，命中即 db-foreign
+		if printf '%s' "$_dc_cands" | grep -Fxf - "$DNSCHAIN_DB_DOMAINS" 2>/dev/null | head -1 | grep -q .; then
+			echo "db-foreign"; return 0
 		fi
 	fi
 
@@ -901,11 +925,6 @@ dc_domain_custom() {
 	esac
 }
 
-# 兼容旧名（供尚未迁移的调用点使用）。
-# 语义已变：现在只表示「归属由用户显式补全」，**不再**跳过改道。
-dc_domain_fixed() {
-	dc_domain_custom "$1"
-}
 
 # ------------------------------------------------------------
 # 自定义列表落盘（供归属判定与分流生成共用）
@@ -959,13 +978,41 @@ dc_ss_spec_present() {
 	nft list table inet ss_spec >/dev/null 2>&1
 }
 
+# 安全计数：永远输出**一个**整数，且 rc 恒为 0
+#
+# ⚠️ 为什么不能写 `grep -c ... || echo 0`（v0.14.3 修，实测复现）
+#
+#   `grep -c` 在**无匹配**时既打印 `0`、又返回 rc=1。于是
+#   `n=$(grep -c PATTERN f || echo 0)` 得到的是 **两行** "0\n0"：
+#       $ v=$(grep -c '^nftset=' /tmp/t || echo 0); echo "[$v]"
+#       [0
+#       0]
+#   而后续 `[ "$n" -eq 0 ]` 是算术比较，遇到含换行的值直接报错返回假
+#   （实测 rc=2）。后果是**判据恒假**：
+#     · reconcile 的「nftset 行数为 0 → 强制重建」自愈分支永不执行
+#     · dc_prev_nftset_count 返回脏值 → 重建窗口兜底也失效
+#   两者恰好都只在「计数为 0」时才是关键路径，于是 bug 只在故障时暴露。
+#
+# 用法: dc_count_lines <模式> <文件>
+#   —— 文件不存在或无匹配都返回单个 0。
+dc_count_lines() {
+	local n
+	[ -r "$2" ] || { echo 0; return 0; }
+	# 先取输出再兜底：awk 无匹配时本来就打印 0 且 rc=0，最稳
+	n=$(awk -v pat="$1" '$0 ~ pat { c++ } END { print c + 0 }' "$2" 2>/dev/null)
+	case "$n" in
+		''|*[!0-9]*) echo 0 ;;
+		*)           echo "$n" ;;
+	esac
+	return 0
+}
+
 # 上一版分流片段里有没有 nftset 行（用于重建窗口内的兜底）
 #
 # 参数：片段文件路径
-# 输出：上一版里 nftset 行的条数
+# 输出：上一版里 nftset 行的条数（单个整数）
 dc_prev_nftset_count() {
-	[ -r "$1" ] || { echo 0; return 0; }
-	grep -c '^nftset=' "$1" 2>/dev/null || echo 0
+	dc_count_lines '^nftset=' "$1"
 }
 
 # ------------------------------------------------------------
@@ -1117,7 +1164,19 @@ dc_gen_watch_servers() {
 	fport=$(dc_get main foreign_port 5336)
 	enabled=$(dc_get health enabled 1)
 
-	mkdir -p "$DNSCHAIN_RUN_DIR" || return 1
+	# ⚠️ 必须建**目标文件所在目录**，不是 RUN_DIR（v0.14.3 修 M5）。
+	#
+	#   原写法 mkdir 的是 $DNSCHAIN_RUN_DIR（/var/etc/dnschain），
+	#   而文件 mv 到 $DNSCHAIN_WATCH_SERVERS（/var/run/dnsmasq/）。
+	#   后者由 dnsmasq 自己创建 —— 首刷时（uci-defaults 阶段）
+	#   若 dnsmasq 尚未启动过，mv 就失败 → 本函数 return 1 →
+	#   generate_all return 1 → start_service 直接「生成运行时配置失败，
+	#   中止启动」，整条框架起不来，而错误信息不指向目录缺失。
+	_watch_dir=$(dirname "$DNSCHAIN_WATCH_SERVERS")
+	mkdir -p "$_watch_dir" 2>/dev/null || {
+		dnschain_log "ERROR: 无法创建 watch.servers 目录 ${_watch_dir}"
+		return 1
+	}
 
 	tmp=$(mktemp) || return 1
 
@@ -1266,6 +1325,7 @@ dc_run_timeout() {
 	# 先检查一次：命令若已瞬间完成，零等待返回
 	if [ -f "$flag" ]; then
 		wait "$pid" 2>/dev/null
+		rm -f "$flag" 2>/dev/null
 		echo 0
 		return 0
 	fi
@@ -1275,6 +1335,7 @@ dc_run_timeout() {
 		while [ "$spin" -lt "$spin_max" ]; do
 			if [ -f "$flag" ]; then
 				wait "$pid" 2>/dev/null
+				rm -f "$flag" 2>/dev/null
 				echo 0
 				return 0
 			fi
@@ -1541,6 +1602,27 @@ dc_health_cycle() {
 	#
 	# 拿不到锁就直接放弃本轮 —— 下一轮 interval 会再来，
 	# 比排队等待更合适（排队会让 daemon 的周期逐渐漂移）。
+	eport=$(dc_get main entry_port 5353)
+	fport=$(dc_get main foreign_port 5336)
+
+	# ⚠️ 实例就绪检查必须在**取锁之前**（v0.14.3 修）。
+	#
+	#   原顺序是「取锁 → 检查实例 → 不就绪就 return」，而那条 return
+	#   不释放锁。daemon 是常驻进程、`$$` 恒定不变，于是：
+	#     · 某一轮撞上 dnsproxy 未监听（开机时序 / dnsproxy 被 procd 重启
+	#       / 手动 stop-start）→ 锁写下且永不删除
+	#     · 后续每一轮 mkdir 失败 → 读到 holder pid → /proc/<pid> 存在
+	#       （就是自己）→ 打印「SKIP 已有一轮探测在跑」→ 永久跳过
+	#   结果：**改道功能从此完全停止**，而日志里是「正常 SKIP」、
+	#   页面只是状态不再更新 —— 最难看出来的那种失效。
+	#   实测复现：同一进程连跑 3 轮，第 2/3 轮均被自己的锁挡住。
+	#
+	#   现在把检查前移：不就绪时**根本没取锁**，直接返回是安全的。
+	if ! dc_port_listening "$eport" udp || ! dc_port_listening "$fport" udp; then
+		echo "SKIP 本地 dnsproxy 实例未就绪（:${eport} / :${fport}）"
+		return 0
+	fi
+
 	local lockd
 	lockd="$DNSCHAIN_STATE_DIR/.cycle.lock"
 	if ! mkdir "$lockd" 2>/dev/null; then
@@ -1556,14 +1638,6 @@ dc_health_cycle() {
 		mkdir "$lockd" 2>/dev/null || { echo "SKIP 取锁失败"; return 0; }
 	fi
 	echo $$ > "$lockd/pid" 2>/dev/null
-
-	eport=$(dc_get main entry_port 5353)
-	fport=$(dc_get main foreign_port 5336)
-
-	if ! dc_port_listening "$eport" udp || ! dc_port_listening "$fport" udp; then
-		echo "SKIP 本地 dnsproxy 实例未就绪（:${eport} / :${fport}）"
-		return 0
-	fi
 
 	tmo=$(dc_get health timeout 2)
 	retries=$(dc_get health retries 2)

@@ -20,7 +20,7 @@
 | `patches/luci-app-trafficctl/*.patch` | trafficctl 相对上游的差分记录（**不参与构建**，供跟进上游 + CI 一致性校验） | 由 `tools/regen-trafficctl-patches.py` 生成，勿手改 |
 | `tools/sync-trafficctl.sh` | 升级 trafficctl 到指定上游 tag（覆盖包目录 + 重算 patch + 回放校验） | 直接用 |
 | `tools/check-trafficctl-i18n.py` | 校验中文翻译覆盖率；`--write-pot` 重生成 pot 模板 | 直接用 |
-| `tools/verify-dnschain-domains.sh` | 域名归属与自动改道的 119 条契约断言（CI 与本地同一份） | 直接用 |
+| `tools/verify-dnschain-domains.sh` | 域名归属与自动改道的 121 条契约断言（CI 与本地同一份） | 直接用 |
 | `tools/check-dnschain-lua.py` | 用 lupa（真实 Lua）跑语法 + 模型 + **真实渲染页面每个 `cfgvalue()`** | 直接用 |
 | `tools/render-dnschain-diagrams.py` | 两张思维导图的纯几何校验 + 输出可打开的 HTML 预览 | 直接用 |
 | `tools/extract-dnschain-i18n.py` | 提取 `translate()` 中文并比对 PO（`--write` 追加缺失） | 直接用 |
@@ -416,7 +416,7 @@ dnsmasq:53（唯一缓存 + 唯一分流层）
 ### 4.0.1 ⚠️ 域名归属与自动改道的硬约束（v0.13.0）
 
 > 设计依据：[`docs/adr/0006-domain-routing-and-reroute.md`](docs/adr/0006-domain-routing-and-reroute.md)。
-> 落地校验：`sh tools/verify-dnschain-domains.sh`（119 条断言，CI 会跑）。
+> 落地校验：`sh tools/verify-dnschain-domains.sh`（121 条断言，CI 会跑）。
 
 先记住三个概念，混了就必然改错：
 
@@ -453,6 +453,14 @@ dnsmasq:53（唯一缓存 + 唯一分流层）
 | 35 | **状态文件写盘只能有一处实现**（`dc_health_upsert`） | `dc_health_write` 与 `dc_health_write_keep_last` 原先各复制一整段写盘逻辑，只差 `last` 取值。改一处忘另一处 → 两个入口写出**格式不同**的状态文件，而 `status`/页面都按 7 字段解析 | 有（契约 1 条） |
 | 36 | **selftest 缓存指纹必须覆盖所有影响结论的输入**（端口/进程/`ss_spec`/开关 + `filter_aaaa` + `ipv6_support` + gfw 行数 + 上游列表） | 漏项的症状是「改完配置看自检，60 秒内还是旧结论」，用户以为改动没生效。另：BusyBox **没有 `stat`**，取 mtime 必须用 `date -r <file> +%s` | 有（契约 2 条） |
 | 37 | **tab 切换必须修正滚动位置** | 各 tab 高度差数倍（分流约 3000px、概览约 900px）。只切 `hidden` 不管滚动时，从长 tab 滚到底再切短 tab，`scrollY` 仍停在旧值 → 屏幕只剩页脚，看起来像「页面空了」 | — |
+| 38 | **`dc_health_cycle` 的取锁必须在「实例就绪检查」之后** | 原顺序是「取锁 → 检查实例 → 不就绪就 `return`」，那条 `return` 不释放锁。daemon 是常驻进程、`$$` 恒定 → 某轮撞上 dnsproxy 未监听就永久自锁，后续每轮都打印「SKIP 已有一轮探测在跑」→ **改道功能完全停止而日志显示正常**。实测：同进程连跑 3 轮，第 2/3 轮全被自己的锁挡住 | 有（契约 1 条） |
+| 39 | **禁止 `n=$(grep -c PAT f \|\| echo 0)`**。无匹配时 `grep -c` 既打印 `0` 又返回 rc=1，`\|\| echo 0` 再追加一个 → 得到 `"0\n0"`，`[ "$n" -eq 0 ]` 算术比较报错返回假 → **判据恒假**。用 `dc_count_lines`（awk 实现，恒输出单个整数） | 实测 `v=$(grep -c '^x' /tmp/t \|\| echo 0); [ "$v" -eq 0 ]` → rc=2。后果：nftset 归零自愈永不触发、`dc_prev_nftset_count` 返回脏值 | 有（契约 1 条） |
+| 40 | **nftset 归零自愈必须在 `reconcile_invariants` 里**，不能放 `reconcile_lists` | `reconcile_lists` 在「名单指纹未变」时直接 `return 0`，而 nftset 归零与名单无关（SSR-Plus 重建窗口造成）→ 放那里等于**永不检查**。实测确认原位置从不触发 | 有（契约 1 条） |
+| 41 | **一次配置应用只能重启 dnsmasq 一次**。`reload_service` 用标记文件 `/var/run/dnschain/.dnsmasq-dirty` 抑制中间步骤，末尾统一重启 | 原调用链 `reload_service → reload_dnsmasq` + `stop → stop_service → reload_dnsmasq` + `start → start_service → reload_dnsmasq` = **3 次**（实测主进程出现 4 个不同 PID），每次约 3 秒中断 → 一次保存断 9 秒以上。更糟的是中间那次跑在「分流片段已被写成停止注释」的状态下。⚠️ 不能用环境变量传递：procd 的 stop/start 会重新 exec，变量跨不过去（实测只减到 2 次） | 有 |
+| 42 | **`stop_service` 必须清空 `watch.servers`，且在重启 dnsmasq 之前** | 该文件在 tmpfs、不会随 stop 消失，且 `serversfile` 仍指着它。stop 后重启 dnsmasq 会重读它 → 里面的 `server=/x/127.0.0.1#5336` 指向已停端口 → **关掉框架后这些域名稳定解析失败**，日志干净。清成注释占位而非删除（同 `update_dot_reject` 的理由） | 有 |
+| 43 | **`uci-defaults` 里的 `serversfile` 必须引用库常量 `DNSCHAIN_WATCH_SERVERS`**，不得硬编码 | 原写死 `/var/etc/dnschain/watch.servers`，而库与 init 用 `/var/run/dnsmasq/`。平时 init 会纠正，但服务未启用/`preflight` 失败/首刷后先看页面时 UCI 里就是错路径 → dnsmasq（uid 453）读不到该目录，**既不报错也不生效** | 有（契约 1 条） |
+| 44 | **`dc_run_timeout` 成功路径必须删 `.done` 标记文件** | 原只在入口 `rm -f`，而 `mktemp` 每次新路径 → 入口删不到别人的；成功返回两处又只 `wait`+`echo 0`+`return`。实测每次成功探测泄漏 1 个文件；健康 cycle 一轮约 48 次 × 每 60 秒 → **每天约 7 万个空文件**堆进 tmpfs，最终 `mktemp` 失败 → 探测全 FAIL → 误判双链都挂 | 有 |
+| 45 | **页面配置项必须有 shell 消费者，否则明示「仅作记录」** | 实测 11 个键（`cache.enabled`/`cache.size`/`lists.black_source`/`lists.import_interval`/`selftest.auto_rollback`/`selftest.interval`/`main.intercept_doh`/`foreign.via_proxy`/`foreign.cert_verify`/`aaaa.*`/`ssr.mode`）有 Lua 定义但零消费者 —— 用户改了不生效，且无从察觉。`cache.size` 与 `lists.black_source` 已接上消费者；其余在页面明示「仅作记录」 | 有（契约 1 条） |
 
 **改道判定的一句话规则**：首选链不通、且另一条链通 → 切到另一条。
 两条需求规则（国外不通改直连 / 国内不通改代理）是这同一判定的两个实例，
@@ -462,7 +470,7 @@ dnsmasq:53（唯一缓存 + 唯一分流层）
 **新增/修改这一块后必须跑**（CI 同一份逻辑）：
 
 ```sh
-sh tools/verify-dnschain-domains.sh          # 119 条契约断言
+sh tools/verify-dnschain-domains.sh          # 121 条契约断言
 python3 tools/check-dnschain-lua.py          # 88 条：语法 + 模型 + 真实渲染页面
 python3 tools/render-dnschain-diagrams.py    # 38 条：图示纯几何
 python3 tools/extract-dnschain-i18n.py       # 中文文案完整性（缺译会中英混排）

@@ -575,6 +575,159 @@ FANCY_SLEEP），实测 `sleep 0.05` / `sleep 0.1` **都失败**；
 `...|0|0|1` → 缓存自动失效并重跑 → 准确报出用户描述的那三项 FAIL。
 恢复后回到 20/20。
 
+#### 十九、运行时 shell 层深审：6 项严重 + 9 项中等缺陷修复（v0.14.3）
+
+对 `files/` 下 6 个运行时脚本（共 3887 行）做第二轮只读审查，
+逐条在路由器上实测验证后修复。**29 项报告里有 3 项经实测不成立，
+未作改动**（见末节）。
+
+##### S1 [严重] 健康探测取锁后提前返回不释放 → 改道功能永久停摆
+
+`dc_health_cycle` 原顺序是「取锁 → 检查实例就绪 → 不就绪就 `return 0`」，
+而那条 `return` **不释放锁**。
+
+daemon 是常驻进程、`$$` 恒定不变，于是：
+- 某轮撞上 dnsproxy 未监听（开机时序 / dnsproxy 被 procd 重启 / 手动 stop-start）
+  → 锁写下且永不删除
+- 后续每轮 `mkdir` 失败 → 读到 holder pid → `/proc/<pid>` 存在（就是自己）
+  → 打印「SKIP 已有一轮探测在跑」→ **永久跳过**
+
+结果：**改道功能从此完全停止**，而日志里是「正常 SKIP」、页面只是状态不再更新。
+
+实测复现（同一进程连跑 3 轮）：
+```
+第 1 轮: SKIP 本地 dnsproxy 实例未就绪（:5353 / :59999）
+   锁: 残留  pid=1641
+第 2 轮: SKIP 已有一轮探测在跑（pid=1641）
+第 3 轮: SKIP 已有一轮探测在跑（pid=1641）
+```
+
+修法：把实例就绪检查**移到取锁之前** —— 不就绪时根本没取锁，直接返回安全。
+实测修复后三轮都正确判断、锁无残留。
+
+##### S2 [严重] `grep -c || echo 0` 双输出 → nftset 自愈永不触发
+
+`grep -c` 在**无匹配**时既打印 `0`、又返回 rc=1。于是
+`n=$(grep -c PAT f || echo 0)` 得到的是**两行** `"0\n0"`：
+
+```
+$ v=$(grep -c '^nftset=' /tmp/t || echo 0); echo "[$v]"
+[0
+0]
+$ [ "$v" -eq 0 ]; echo $?
+2                     ← 算术比较报错返回假
+```
+
+后果是**判据恒假**，而它恰好只在「计数为 0」时才是关键路径：
+
+- reconcile 的「nftset 行数为 0 → 强制重建」自愈分支**永不执行**
+- `dc_prev_nftset_count` 返回脏值 → 重建窗口兜底也失效
+
+即 v0.14.1 想修的那个「代理链路整条断」故障在收敛路径上依然不自愈。
+
+修法：新增 `dc_count_lines`（awk 实现，恒输出单个整数、rc 恒 0），
+替换全仓库 6 处同类写法。
+
+##### S3 [严重] 一次配置应用重启 dnsmasq 3 次（约 9 秒中断）
+
+`reload_service` 的调用链是：
+```
+reload_service → reload_dnsmasq          （第 1 次）
+              → stop → stop_service → reload_dnsmasq（第 2 次）
+              → start → start_service → reload_dnsmasq（第 3 次）
+```
+实测一次 `/etc/init.d/dnschain reload` 期间 dnsmasq 主进程出现
+**4 个不同 PID**（6576→7704→7873→9467）。AGENTS §4.4 实测 restart 约
+3 秒完全不可用 → 一次保存断 9 秒以上。
+
+更糟的是第 2 次发生在 `stop_service` 已把分流片段写成「服务已停止」注释之后、
+`start` 重建之前 —— 那几秒 dnsmasq 跑在**没有分流片段**的状态下，
+所有国外域名走默认上游。
+
+修法：用标记文件 `/var/run/dnschain/.dnsmasq-dirty` 抑制中间步骤，
+末尾统一重启一次。
+**不能用环境变量**：procd 的 stop/start 会重新 exec，变量跨不过去
+（实测用环境变量只能减到 2 次）。
+
+##### S4 [严重] 首刷默认值把 serversfile 指到 ujail 白名单外
+
+`99-zz-dnschain:151` 写死 `/var/etc/dnschain/watch.servers`，
+而库常量与 init 的 `update_serversfile` 都用 `/var/run/dnsmasq/watch.servers`。
+
+平时 init 启动时会纠正，所以看不出来；但服务未启用、`preflight` 失败、
+或用户首刷后先看页面再启动服务时，UCI 里就是那个错路径 ——
+dnsmasq 以 uid 453 运行、读不到该目录，**既不报错也不生效**，
+改道静默失效（正是 AGENTS 约束 26 描述的症状）。
+
+修法：改为引用库常量（子 shell 取值，避免污染本脚本），并加区间校验。
+
+##### S5 [严重] stop 后 dnsmasq 仍按旧的 watch.servers 改道到已停端口
+
+`stop_service` 清掉了 health 状态、把两个片段改成注释，但**没清 `watch.servers`**，
+也没撤 `serversfile`，随后还 restart 了 dnsmasq。
+
+而 `/var/run/dnsmasq/watch.servers` 是 tmpfs 文件、不会随 stop 消失。
+stop 后重启 dnsmasq 会**重新读取**它 —— 里面若有
+`server=/github.com/127.0.0.1#5336` 而 `:5336` 已无人监听，
+这些观测域名就变成稳定解析失败。用户看到的是「关掉框架后 github 打不开了」，
+而日志干净。
+
+修法：`stop_service` 里把它清成注释占位（不删除，否则 dnsmasq 启动时读不到
+serversfile 会报错），**然后**再 restart dnsmasq —— 顺序不能反。
+
+##### S6 [严重] `dc_run_timeout` 每次成功调用泄漏一个 `.done` 文件
+
+完成标记文件只在入口 `rm -f`，但成功返回的两处都只 `wait` + `echo 0` + `return 0`，
+从不删除标记文件；而 `mktemp` 每次给新路径，入口那次删不到别人的。
+
+实测：两次 `dc_dns_class` 泄漏 2 个文件。
+健康 cycle 一轮 8 域名 × 2 链 × 最多 3 次重试 ≈ 48 次，
+daemon 每 60 秒一轮 → **每天约 7 万个空文件**堆进 tmpfs
+（/tmp 与 /var 同属内存盘），最终 `mktemp` 失败 → 探测全返回 FAIL
+→ 误判成双链都挂、页面标 both-bad。
+
+修法：成功返回前删掉标记文件。实测 10 次探测 + 完整 cycle 后零泄漏。
+
+##### 中等缺陷（9 项，全部实测确认后修复）
+
+| # | 问题 | 处置 |
+|---|---|---|
+| M2 | `dc_ssr_mode_for_profile` 读不存在的 `main.profile` → 恒返回 `"0"`；页面能选 `ssr.mode`（0/7）却**无人读**，用户选「7」被静默推翻 | 改为读 `ssr.mode`，保留 `main.profile=coexist` 兼容 |
+| M3 | 11 个页面配置项**零消费者**（`cache.size`/`lists.black_source`/`via_proxy`/`cert_verify`/`auto_rollback` 等），用户改了不生效且无从察觉 | `cache.size` → 写 `dhcp.cachesize`（uci-defaults + reconcile 双路）；`lists.black_source` → 接入归属判定；其余在页面明示「仅作记录」 |
+| M4 | 自检第 3 项对 `/var/etc/dnsmasq.conf.*` 通配，多份文件时 `grep -c` 输出 `路径:计数`，`head -1` 取到带路径的行 → 恒 FAIL | 改为从 dnsmasq 进程 argv 取真正在用的 `-C` 路径 |
+| M5 | `dc_gen_watch_servers` 建的是 `$DNSCHAIN_RUN_DIR`，却把文件 `mv` 到 `/var/run/dnsmasq/` → 后者不存在时整条启动失败 | 改为建目标文件所在目录，失败时把具体路径打进日志 |
+| M6 | `reconcile_intercept` 用 `grep '^6,'` 只匹配行首 → DNS 不是第一项时永不删除旧的明文 DNS 下发，客户机绕过整个框架 | 改为按项匹配（`tr ' ' '\n'` 后逐项判） |
+| M7 | `dc_gen_upstream_file` 不检查 `dc_gen_db_domains` 返回码，数据库缺失时静默产出 0 字节文件并报成功 | 显式检查两次，失败时写明原因（名单未就绪/生成失败） |
+| M8 | 关联数组分支（`declare -A`）在 BusyBox ash 下是死代码，且 `declare` 属 bash 专有，与「POSIX sh 兼容」声明冲突 | 删除该分支，只留 `grep -Fxf` 批量匹配一条实现 |
+| M9 | `main()` 丢弃 `reconcile_intercept` 的返回码，且该函数恒 `return 0` → commit/restart 失败时收敛器仍以 0 退出，页面「一键归一」永远报成功 | 函数内失败置非 0，`main` 取 rc |
+| M1 | 怀疑 `dc_dns_first_addr` 把 nslookup 的 Server 地址行当答案 | **实测不成立**：返回的是真实 IPv6 地址，未含 `:端口`。**未改动** |
+
+##### 清理（10 项死代码与过时注释）
+
+`DNSCHAIN_ETC_DIR`（定义后从未使用）、`dc_domain_fixed`（v0.14.0 语义矫正后的
+兼容壳，名字反而误导）、`verbose`（死变量）、`M.watch_servers_file`（无调用者
+且路径已漂移）、`dc_lists_fingerprint` 内层重复判断、`cmd_apply` 硬编码路径、
+自检指纹硬编码 gfw 路径、库头注释「禁止 local」（与全文实际用法矛盾）、
+自检头注释声称有定时任务（仓库里无任何调度）。
+
+##### 实测排除的 3 项（不改，避免无依据改动）
+
+| 怀疑 | 实测结论 |
+|---|---|
+| M1 `dc_dns_first_addr` 把 Server 行当答案 | 返回 `240e:ff:e020:99b:0:ff:b099:cff1`，是真实答案，未中招 |
+| M4 自检第 3 项恒 FAIL | 当前只有 1 份 `dnsmasq.conf.*`，未触发；但隐患真实，已按「取当前生效文件」加固 |
+| M8 `declare -A` 是否有支持 | `sh -c 'eval "declare -A x=()"'` 返回非 0 → 确认 ash 不支持，该分支确为死代码 |
+
+##### 验证
+
+```
+本地：dash 8/8、shell 90+23、lua 88、图示 38、契约 121、i18n 412、CI 模拟通过
+路由器：selftest 20/20、五条需求 54/54、页面 2.03s
+        :53/:5353/:5336 全 OK、nftset=23714、ss_spec=2
+        .done 零泄漏、锁无残留、serversfile 正确、cachesize 一致
+        nftset 归零自愈端到端验证通过（检测→重建→重启→链路 OK）
+```
+
 #### 十八、全链路严谨审查：7 项缺陷修复 + 文档对齐（v0.14.2）
 
 按要求逐条梳理每个功能链路、以代码与运行结果为依据审查，

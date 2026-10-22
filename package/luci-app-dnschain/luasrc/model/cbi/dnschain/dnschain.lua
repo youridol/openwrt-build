@@ -937,11 +937,6 @@ function M.health_daemon()
 end
 
 --- watch.servers 的实际内容（用于「当前改道生效情况」核对）
-function M.watch_servers_file()
-	return cached("watch_servers_file", function()
-		return read_lines(M.run_dir .. "/watch.servers")
-	end) or {}
-end
 
 --- 静态分流片段的条数（不含注释）
 --

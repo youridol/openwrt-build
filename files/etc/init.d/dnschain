@@ -322,7 +322,30 @@ start_foreign_dnsproxy() {
 # 注意：必须用 restart 而非 reload。实测 reload（SIGHUP）不重读 conf-dir，
 # 新生成的 nftset 规则不会被加载（AGENTS §4.4）。
 # ------------------------------------------------------------
+# ⚠️ DNSCHAIN_SKIP_DNSMASQ_RESTART=1 时只登记「待重启」，不真的重启。
+#
+# 为什么需要（v0.14.3 修 S3）：`reload_service` 原本的调用链是
+#   reload_service → reload_dnsmasq   （第 1 次）
+#                 → stop → stop_service → reload_dnsmasq（第 2 次）
+#                 → start → start_service → reload_dnsmasq（第 3 次）
+# 实测一次 `/etc/init.d/dnschain reload` 期间 dnsmasq 主进程出现了
+# **4 个不同 PID**（6576→7704→7873→9467），即至少重启 3 次。
+# 而 AGENTS §4.4 实测 restart 约 3 秒完全不可用 → 一次配置应用断 9 秒以上。
+#
+# 更糟的是第 2 次发生在 `stop_service` 已把分流片段写成「服务已停止」
+# 注释之后、`start` 重建之前 —— 那几秒 dnsmasq 跑在**没有分流片段**
+# 的中间状态下，所有国外域名走默认上游。
+#
+# 现在：reload_service 设标志 → 中间各步只登记 → 末尾统一重启一次。
+# 用**标记文件**而不是环境变量：procd 的 stop/start 会重新 exec
+# 本脚本，导出的变量跨不过那道边界（实测用环境变量只能减到 2 次）。
+DNSCHAIN_RESTART_FLAG="/var/run/dnschain/.dnsmasq-dirty"
+
 reload_dnsmasq() {
+	if [ -f "$DNSCHAIN_RESTART_FLAG" ]; then
+		# 已被 reload_service 接管：只登记，不重启
+		return 0
+	fi
 	if [ -x /etc/init.d/dnsmasq ]; then
 		/etc/init.d/dnsmasq restart >/dev/null 2>&1
 	fi
@@ -412,6 +435,25 @@ stop_service() {
 	# 上次的「已改道」状态继续跑，而那时链路可能是好的。
 	rm -f "$DNSCHAIN_HEALTH_STATE" 2>/dev/null
 
+	# ⚠️ 必须清空 watch.servers（v0.14.3 修），且**必须在重启 dnsmasq 之前**。
+	#
+	#   原实现没清它。而 `/var/run/dnsmasq/watch.servers` 是 tmpfs 文件、
+	#   不会随 stop 消失，且 `dhcp.@dnsmasq[0].serversfile` 仍指着它。
+	#   于是 stop 后重启 dnsmasq 会**重新读取**它，里面若有
+	#   `server=/github.com/127.0.0.1#5336` 而 :5336 已无人监听，
+	#   这些观测域名就变成稳定解析失败 —— 用户看到的是
+	#   「关掉框架后 github 打不开了」，而日志干净。
+	#
+	#   清成注释占位而不是删除：文件必须继续存在，否则 dnsmasq 启动时
+	#   读不到 serversfile 会在日志里报错（同 update_dot_reject 的理由）。
+	if [ -n "$DNSCHAIN_WATCH_SERVERS" ]; then
+		mkdir -p "$(dirname "$DNSCHAIN_WATCH_SERVERS")" 2>/dev/null
+		cat > "$DNSCHAIN_WATCH_SERVERS" <<-EOF
+			# dnschain: 服务已停止（由 init.d/dnschain 管理）
+		EOF
+		chmod 0644 "$DNSCHAIN_WATCH_SERVERS" 2>/dev/null
+	fi
+
 	if [ -x /etc/init.d/firewall ]; then
 		/etc/init.d/firewall reload >/dev/null 2>&1
 	fi
@@ -421,20 +463,34 @@ stop_service() {
 
 reload_service() {
 	# 配置变更后重新生成并重启实例
+	#
+	# ⚠️ 全程抑制 dnsmasq 重启，最后统一重启**一次**（v0.14.3 修 S3）。
+	#    理由见 reload_dnsmasq 上方的注释：原调用链会重启 3 次，
+	#    且中间那次让 dnsmasq 跑在「没有分流片段」的状态下。
+	mkdir -p /var/run/dnschain 2>/dev/null
+	: > "$DNSCHAIN_RESTART_FLAG" 2>/dev/null
+
 	config_load "$DNSCHAIN_CONF"
-	generate_all || return 1
+	generate_all || { rm -f "$DNSCHAIN_RESTART_FLAG"; return 1; }
 	if [ "$(dc_get main enabled 1)" = "1" ]; then
-		preflight || return 1
+		preflight || { rm -f "$DNSCHAIN_RESTART_FLAG"; return 1; }
 	fi
 	update_dnsmasq_split
 	update_serversfile
 	# 配置变了，旧的改道结论不再可信：清状态，按新归属重新开始
 	rm -f "$DNSCHAIN_HEALTH_STATE" 2>/dev/null
-	reload_dnsmasq
 	update_dot_reject
-	# 让 procd 重启实例
+
+	# 让 procd 重启实例（内部两次 reload_dnsmasq 都只登记）
 	stop
 	start
+
+	# 解除抑制，统一重启**一次**
+	rm -f "$DNSCHAIN_RESTART_FLAG" 2>/dev/null
+	if [ -x /etc/init.d/dnsmasq ]; then
+		/etc/init.d/dnsmasq restart >/dev/null 2>&1
+		dnschain_log "dnsmasq 已重启（一次性，配置变更后生效）"
+	fi
 }
 
 service_triggers() {

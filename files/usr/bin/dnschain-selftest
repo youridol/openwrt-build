@@ -161,7 +161,24 @@ check_all() {
 
 	# 3. dnsmasq 唯一默认上游恰好一条
 	local srv_cnt
-	srv_cnt=$(grep -c "^server=127.0.0.1#${entry}\$" /var/etc/dnsmasq.conf.* 2>/dev/null | head -1)
+	# ⚠️ 只看**当前生效**的那份配置（v0.14.3 修 M4）。
+	#
+	#   原写法对 `/var/etc/dnsmasq.conf.*` 通配，而 dnsmasq 的配置文件名
+	#   带 UCI 哈希（dnsmasq.conf.cfg01411c）。**改过 dnsmasq 配置后
+	#   旧文件会留在 /var/etc 直到重启**，此时通配匹配到 2 个以上文件，
+	#   `grep -c` 对多文件会输出 `路径:计数`，`head -1` 取到带路径的行，
+	#   与 "1" 比较必然不等 → 第 3 项恒 FAIL，看起来像链路坏了。
+	#
+	#   改为从 dnsmasq 进程 argv 取真正在用的 `-C` 路径。
+	_dc_conf=""
+	_dc_pid=$(dc_dnsmasq_pid)
+	if [ -n "$_dc_pid" ]; then
+		_dc_conf=$(tr '\0' '\n' < "/proc/${_dc_pid}/cmdline" 2>/dev/null \
+			| awk '/^-C$/ { getline; print; exit } /^-C./ { sub(/^-C/, ""); print; exit }')
+	fi
+	[ -n "$_dc_conf" ] && [ -r "$_dc_conf" ] || _dc_conf=$(ls -1t /var/etc/dnsmasq.conf.* 2>/dev/null | head -1)
+	srv_cnt=$(awk -v pat="^server=127.0.0.1#${entry}\$" '$0 ~ pat { c++ } END { print c + 0 }' "$_dc_conf" 2>/dev/null)
+	[ -n "$srv_cnt" ] || srv_cnt=0
 	[ -z "$srv_cnt" ] && srv_cnt=0
 	if [ "$srv_cnt" = "1" ]; then
 		emit 3 PASS "dnsmasq 唯一默认上游" "server=127.0.0.1#${entry} 恰好 1 条"
@@ -277,9 +294,12 @@ check_all() {
 
 	# 12. 国外 DoH 出站（v0.10.0：不再是 DoT）
 	local est
+	# ⚠️ 不能用 `grep -c ... || echo 0`（v0.14.3）：
+	#    grep -c 无匹配时既打印 0 又返回 rc=1，`|| echo 0` 会再追加一个 0，
+	#    得到 "0\n0"；随后 `[ "$est" -gt 0 ]` 算术比较报错返回假。
+	#    改用 awk 统计（无匹配时本来就打印 0 且 rc=0）。
 	est=$(netstat -antp 2>/dev/null \
-		| grep -E ':443' \
-		| grep -cE 'dns\.google|cloudflare-dns|142\.25[0-9]\.|104\.16\.|1\.1\.1\.1|8\.8\.8\.8' 2>/dev/null || echo 0)
+		| awk '/:443/ && /dns\.google|cloudflare-dns|142\.25[0-9]\.|104\.16\.|1\.1\.1\.1|8\.8\.8\.8/ { c++ } END { print c + 0 }')
 	if [ "$est" -gt 0 ] 2>/dev/null; then
 		emit 12 PASS "国外 DoH 出站" "${est} 条到 DoH 上游的 ESTABLISHED"
 	else
@@ -558,9 +578,7 @@ EOF
 # 入口
 # ------------------------------------------------------------
 main() {
-	local verbose use_cache cache_file cache_ttl now age
-	verbose=0
-	[ "$1" = "-v" ] && verbose=1
+	local use_cache cache_file cache_ttl now age
 
 	# ---- 结果缓存（v0.14.1）--------------------------------------
 	#
@@ -696,7 +714,11 @@ selftest_fingerprint() {
 	local aaaa v6 n_gfw up
 	aaaa=$(uci -q get dhcp.@dnsmasq[0].filter_aaaa 2>/dev/null)
 	v6=$(uci -q get shadowsocksr.@global[0].ipv6_support 2>/dev/null)
-	n_gfw=$(wc -l < /etc/ssrplus/gfw_list.conf 2>/dev/null || echo 0)
+	# 用可配置的 lists.gfw_source 而不是硬编码（v0.14.3 修 L6）：
+	# 用户改了源路径后，硬编码路径的行数永远是 0/旧值，
+	# 缓存失效判据漏项 → 名单变了却仍命中旧缓存。
+	_gfw_src=$(dc_get lists gfw_source /etc/ssrplus/gfw_list.conf)
+	n_gfw=$(wc -l < "$_gfw_src" 2>/dev/null || echo 0)
 	# 上游列表只取「两条链的条数 + 各自首项」——
 	# 完整串太长，而条数/首项变化已能覆盖「换了一组上游」这类改动。
 	#

@@ -209,7 +209,10 @@ cmd_apply() {
 	dc_gen_db_domains >/dev/null 2>&1
 
 	# 记录重启前的指纹：静态片段 + 观测域名文件
-	split_file=/tmp/dnsmasq.d/dnschain-split.conf
+	# 用库常量而不是硬编码（v0.14.3 修 L4）：
+	# conf-dir 变更时硬编码路径会让比对落到不存在的文件上，
+	# 永远走 "restarted" 或 "unchanged" 的错误分支。
+	split_file="${DNSCHAIN_DNSMASQ_CONF_DIR}/dnschain-split.conf"
 	before_split=""
 	before_watch=""
 	[ -r "$split_file" ] && before_split=$(md5sum "$split_file" 2>/dev/null | awk '{print $1}')
