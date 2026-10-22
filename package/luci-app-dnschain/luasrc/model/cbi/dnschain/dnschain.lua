@@ -741,6 +741,24 @@ end
 --
 -- 只设了 UCI 不生效：必须验运行进程的实际参数。
 -- 这是「改道看起来成功、实际没生效」的唯一可靠判据。
+--- 改道通道是否就绪
+--
+-- 判据必须查**生效的 dnsmasq 配置文件**，不能只看进程 argv
+-- （v0.13.0 路由器实测修正）。
+--
+-- OpenWrt 的 init.d/dnsmasq 是
+--   `append_parm "$cfg" "serversfile" "--servers-file"`
+-- 它把这个选项写进 /var/etc/dnsmasq.conf.*，**不放在命令行上**。
+-- 实测 dnsmasq 的 cmdline 只有：
+--   /usr/sbin/dnsmasq -C /var/etc/dnsmasq.conf.cfg01411c -k -x ...
+-- 而 `servers-file=` 出现在该配置文件第 21 行。
+-- 按 argv 判定会永远报「未就绪」，而通道其实是好的 ——
+-- 页面于是显示「改道通道未就绪」，用户会去排查一个不存在的故障。
+--
+-- 三条判据：
+--   a) UCI 配了路径
+--   b) 文件存在（且 dnsmasq 读得到 —— ujail 白名单见下）
+--   c) 生效的 dnsmasq 配置文件里真有 servers-file 指向它
 function M.serversfile_ready()
 	return cached("serversfile_ready", function()
 		local uci_sf = uci_get("dhcp.@dnsmasq[0].serversfile")
@@ -748,22 +766,143 @@ function M.serversfile_ready()
 			return { ready = false, reason = "uci-missing", path = "" }
 		end
 
+		if not fs.access(uci_sf) then
+			return { ready = false, reason = "file-missing", path = uci_sf }
+		end
+
+		-- c) 生效的 dnsmasq 配置里有没有指向它的 servers-file
+		local conf_found = false
+		local conf_glob = io.popen("ls /var/etc/dnsmasq.conf.* 2>/dev/null")
+		if conf_glob then
+			for path in conf_glob:lines() do
+				local f = io.open(path, "r")
+				if f then
+					local body = f:read("*a") or ""
+					f:close()
+					-- 精确匹配整行，避免 servers-file=/a 命中 /ab
+					if body:find("servers%-file=" .. uci_sf:gsub("[%^%$%(%)%%%.%[%]%*%+%-%?]", "%%%0") .. "\n") then
+						conf_found = true
+						break
+					end
+				end
+			end
+			conf_glob:close()
+		end
+
+		if not conf_found then
+			return { ready = false, reason = "conf-missing", path = uci_sf }
+		end
+
+		-- b2) ujail 是否允许 dnsmasq 读这个目录
+		--
+		-- dnsmasq 由 ujail 降权到 uid 453 运行，只能看到 init 脚本里
+		-- `procd_add_jail_mount` 声明过的路径。servers-file 指向白名单
+		-- 之外的目录时**既不报错也不生效** —— 最隐蔽的一种失效。
 		local pid = M.port_owner("53", "udp")
 		if pid == "" then
 			return { ready = false, reason = "no-dnsmasq", path = uci_sf }
 		end
 
-		local f = io.open("/proc/" .. pid .. "/cmdline", "r")
-		if not f then
-			return { ready = false, reason = "no-cmdline", path = uci_sf }
+		local ppid = ""
+		local st = io.open("/proc/" .. pid .. "/status", "r")
+		if st then
+			for line in st:lines() do
+				local p = line:match("^PPid:%s*(%d+)")
+				if p then ppid = p; break end
+			end
+			st:close()
 		end
-		local cmd = (f:read("*a") or ""):gsub("%z", "\n")
-		f:close()
 
-		if cmd:find("--servers%-file") then
-			return { ready = true, reason = "", path = uci_sf }
+		if ppid ~= "" then
+			local cf = io.open("/proc/" .. ppid .. "/cmdline", "r")
+			if cf then
+				local cmd = (cf:read("*a") or ""):gsub("%z", "\n")
+				cf:close()
+				local jail_dir = uci_sf:match("^(.*)/[^/]+$") or ""
+				if jail_dir ~= "" then
+					local found = false
+					for line in cmd:gmatch("[^\n]+") do
+						-- ujail 的挂载参数带尾斜杠（procd_add_jail_mount_rw /var/run/dnsmasq/）
+						local norm = line:gsub("/+$", "")
+						if norm == jail_dir then found = true; break end
+					end
+					if not found then
+						return { ready = false, reason = "jail-blocked", path = uci_sf }
+					end
+				end
+			end
 		end
-		return { ready = false, reason = "argv-missing", path = uci_sf }
+
+		return { ready = true, reason = "", path = uci_sf }
+	end)
+end
+
+--- 健康守护进程状态（页面要显示「自动改道是否在跑」）
+--
+-- 为什么需要：守护进程由 procd 托管（`procd_open_instance "health"`），
+-- 页面原来完全没有它的任何痕迹 —— 用户改了阈值、开了开关，
+-- 却无法确认「它到底有没有在跑」。开关显示「已启用」而守护进程
+-- 没起来时，自动改道**完全不发生**，且没有任何提示。
+function M.health_daemon()
+	return cached("health_daemon", function()
+		local enabled = uci_get("dnschain.health.enabled")
+		if enabled == nil or enabled == "" then enabled = "1" end
+
+		local interval = uci_get("dnschain.health.interval") or "60"
+
+		-- 找 procd 实例：遍历 /proc 找 `dnschain-health daemon`
+		local pid, uptime = "", ""
+		local d = io.popen("ls -d /proc/[0-9]* 2>/dev/null")
+		if d then
+			for p in d:lines() do
+				local n = p:match("^/proc/(%d+)$")
+				if n then
+					local f = io.open(p .. "/cmdline", "r")
+					if f then
+						local cmd = (f:read("*a") or ""):gsub("%z", " ")
+						f:close()
+						if cmd:find("dnschain%-health") and cmd:find("daemon") then
+							pid = n
+							local sf = io.open(p .. "/stat", "r")
+							if sf then
+								local line = sf:read("*l") or ""
+								sf:close()
+								local start = line:match("^%d+ %S+ %S+ %d+ %d+ %d+ %d+ %d+ %S+ %S+ %S+ %S+ %S+ %S+ %S+ %S+ %S+ %S+ %S+ %S+ (%d+)")
+								if start then uptime = start end
+							end
+							break
+						end
+					end
+				end
+			end
+			d:close()
+		end
+
+		-- 上次探测时间（从状态文件里取最大的 last）
+		local last = 0
+		local f = io.open("/var/run/dnschain/health.state", "r")
+		if f then
+			for line in f:lines() do
+				local t = line:match("|(%d+)|[^|]*$")
+				if t then
+					t = tonumber(t)
+					if t and t > last then last = t end
+				end
+			end
+			f:close()
+		end
+
+		local now = os.time()
+		local age = (last > 0) and (now - last) or -1
+
+		return {
+			enabled  = (enabled == "1"),
+			running  = (pid ~= ""),
+			pid      = pid,
+			interval = tonumber(interval) or 60,
+			last_run = last,
+			age      = age,
+		}
 	end)
 end
 

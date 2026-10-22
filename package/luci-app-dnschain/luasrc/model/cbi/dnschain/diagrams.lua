@@ -222,9 +222,22 @@ function D.route_map(opts)
 	local y_note2 = 504
 
 	local o = {}
+	-- ⚠️ 必须同时给出 width/height 固有尺寸（v0.13.0 实测修正）。
+	--
+	-- 只写 viewBox 时，SVG 没有「固有尺寸」，CSS 的 `width:auto`
+	-- 会回落到 `100%` —— 图被拉伸到容器宽度 1246px，高度等比放大到
+	-- 900px（520 × 1246/720），字号从 11px 涨到 19px。
+	-- 症状：一张 720×520 的图占满整屏还多，用户滚动时只看到几个
+	-- 放大的框，反馈「导图看不到」。DOM 里 SVG 在、内容完整、
+	-- 纯几何断言全绿 —— 问题只在「没有固有尺寸」这一点上。
+	--
+	-- 写死 width/height 后浏览器按 720×520 渲染，CSS 里再用
+	-- max-width:100% 兜住窄屏。
 	o[#o + 1] = string.format(
-		'<div class="dc-chain dc-chain--map"><svg viewBox="0 0 %d %d" role="img" ' ..
-		'aria-label="%s">', ROUTE_W, ROUTE_H, translate("域名判定链路图"))
+		'<div class="dc-chain dc-chain--map"><svg viewBox="0 0 %d %d" ' ..
+		'width="%d" height="%d" role="img" ' ..
+		'aria-label="%s">', ROUTE_W, ROUTE_H, ROUTE_W, ROUTE_H,
+		translate("域名判定链路图"))
 	o[#o + 1] = defs(p)
 
 	--------------------------------------------------------------------
@@ -440,9 +453,13 @@ function D.status_map(rows, summary)
 
 	local p = "dcst"
 	local o = {}
+	-- 同判定链路图：必须给 width/height 固有尺寸，
+	-- 否则 CSS `width:auto` 回落到 100%，图被拉伸放大（见上）。
 	o[#o + 1] = string.format(
-		'<div class="dc-chain dc-chain--map"><svg viewBox="0 0 %d %d" role="img" ' ..
-		'aria-label="%s">', STATUS_W, H, translate("改道状态思维导图"))
+		'<div class="dc-chain dc-chain--map"><svg viewBox="0 0 %d %d" ' ..
+		'width="%d" height="%d" role="img" ' ..
+		'aria-label="%s">', STATUS_W, H, STATUS_W, H,
+		translate("改道状态思维导图"))
 	o[#o + 1] = defs(p)
 
 	local x_root_r = X1 + 150

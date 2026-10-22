@@ -280,9 +280,14 @@ function o.cfgvalue()
 	local YBC = YB + NH / 2
 
 	local p = {}
+	-- 给固有尺寸（width/height）：与两张导图一致，避免 CSS `width:auto`
+	-- 在缺固有尺寸时回落到 100% 而放大。概览图本来就要自适应宽度，
+	-- 由 `.dc-chain svg { width:100%; height:auto }` 覆盖这里的属性值，
+	-- 所以写上是「有据可依的默认值」，不影响现有自适应行为。
 	p[#p + 1] = string.format(
-		'<div class="dc-chain"><svg viewBox="0 0 %d %d" role="img" aria-label="%s">',
-		W, H, translate("DNS 解析链路图"))
+		'<div class="dc-chain"><svg viewBox="0 0 %d %d" width="%d" height="%d" ' ..
+		'role="img" aria-label="%s">',
+		W, H, W, H, translate("DNS 解析链路图"))
 
 	-- 箭头标记：按状态色各定义一个。
 	-- 不能只定义一个固定灰色 —— 那样红/绿连线配灰箭头，看起来像没连上。
@@ -440,6 +445,22 @@ function o.cfgvalue()
 
 	p[#p + 1] = '</svg></div>'
 	return table.concat(p)
+end
+
+-- ── 分流决策（概览页也放一张，进来就能看到分流逻辑）──────────────
+--
+-- 为什么概览也要：用户反馈「找不到分流导图」—— 原来只在「域名」tab 里，
+-- 而「域名」tab 的入口按钮带徽标数字（「域名1」），看不出里面还有图。
+-- 概览是第一屏，把分流决策放在这里，用户不必先猜哪个 tab。
+--
+-- 与「域名」tab 里那张是**同一个函数**（dg.route_map），
+-- 不是两份实现 —— 两份必然漂移。
+o = s:option(DummyValue, "_route_map_overview", translate("分流决策"))
+o.rawhtml = true
+function o.cfgvalue()
+	local entry = ds.entry_port()
+	local fport = ds.foreign_port()
+	return dg.route_map({ entry_port = entry, foreign_port = fport })
 end
 
 -- ── 链路指标 ──────────────────────────────────────────────────────
@@ -879,8 +900,9 @@ end
 
 -- 通道就绪性：改道写进 servers-file 后必须真的被 dnsmasq 读到
 --
--- 只配 UCI 不生效的情况是存在的（dnsmasq 未重启、或进程被别处启动）。
--- 这一行是「改道看起来成功、实际没生效」的唯一可靠判据。
+-- 只配 UCI 不生效的情况是存在的（dnsmasq 未重启、ujail 白名单不含
+-- 该目录、进程被别处启动）。这一行是「改道看起来成功、实际没生效」
+-- 的唯一可靠判据。
 o = s:option(DummyValue, "_reroute_channel", translate("改道通道"))
 o.rawhtml = true
 function o.cfgvalue()
@@ -888,9 +910,10 @@ function o.cfgvalue()
 
 	local REASON = {
 		["uci-missing"]  = translate("dhcp.@dnsmasq[0].serversfile 未设置 —— 改道无法生效"),
+		["file-missing"] = translate("serversfile 指向的文件不存在 —— 框架可能未启动"),
 		["no-dnsmasq"]   = translate("dnsmasq 未运行"),
-		["no-cmdline"]   = translate("读不到 dnsmasq 的进程参数"),
-		["argv-missing"] = translate("UCI 已配 %s，但 dnsmasq 进程里没有 --servers-file（需重启 dnsmasq）"),
+		["conf-missing"] = translate("生效的 dnsmasq 配置里没有 servers-file —— 需重启 dnsmasq"),
+		["jail-blocked"] = translate("servers-file 所在目录不在 ujail 白名单内 —— dnsmasq 读不到，改道会静默失效"),
 	}
 
 	if st.ready then
@@ -900,13 +923,64 @@ function o.cfgvalue()
 	end
 
 	local reason = REASON[st.reason] or st.reason
-	if st.reason == "argv-missing" then
-		reason = string.format(reason, dg.esc(st.path))
-	end
-
 	return string.format(
 		'<span class="dc-badge dc-badge--bad">%s</span> %s',
 		translate("未就绪"), dg.esc(reason))
+end
+
+-- 自动改道的守护进程状态
+--
+-- 为什么必须有这一行（v0.13.0 补齐）：
+--   守护进程由 procd 托管（init.d/dnschain 的 `procd_open_instance "health"`），
+--   页面原来完全没有它的痕迹。于是出现一个无法自查的状态：
+--   开关显示「已启用」、阈值也都配好了，但守护进程没起来 ——
+--   **自动改道完全不发生，且没有任何提示**。
+--   用户只能靠「等很久发现域名没被改道」来推断，无从定位。
+o = s:option(DummyValue, "_health_daemon", translate("自动改道进程"))
+o.rawhtml = true
+function o.cfgvalue()
+	local hd = ds.health_daemon()
+
+	-- 三种状态分开表达，不要合并成「正常/异常」两档：
+	--   · 开关关闭        → 灰（不探测是用户的选择，不是故障）
+	--   · 开关开 + 在跑   → 绿
+	--   · 开关开 + 没跑   → 红（这才是故障：用户以为在自动改道）
+	if not hd.enabled then
+		return string.format(
+			'<span class="dc-badge">%s</span> %s',
+			translate("已关闭"),
+			translate("健康检测关闭，不探测也不改道；静态分流照常工作"))
+	end
+
+	if not hd.running then
+		return string.format(
+			'<span class="dc-badge dc-badge--bad">%s</span> %s',
+			translate("未运行"),
+			translate("开关已启用但守护进程没起来 —— 自动改道不会发生。" ..
+				"请执行 <code>/etc/init.d/dnschain restart</code>，并确认日志无报错"))
+	end
+
+	local parts = {}
+	parts[#parts + 1] = string.format(
+		'<span class="dc-badge dc-badge--ok">%s</span>', translate("运行中"))
+	parts[#parts + 1] = string.format(
+		'<span class="dc-small">pid %s · %s</span>',
+		dg.esc(hd.pid),
+		(hd.interval > 0)
+			and string.format(translate("每 %d 秒一轮"), hd.interval)
+			or translate("不自动轮询（仅手动触发）"))
+
+	if hd.age >= 0 then
+		parts[#parts + 1] = string.format(
+			'<span class="dc-small">%s %s</span>',
+			translate("上次探测"),
+			string.format(translate("%d 秒前"), hd.age))
+	else
+		parts[#parts + 1] = string.format(
+			'<span class="dc-small">%s</span>', translate("尚未探测过"))
+	end
+
+	return table.concat(parts, " ")
 end
 
 -- ── 改道明细表 ────────────────────────────────────────────────────

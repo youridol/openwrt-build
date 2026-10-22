@@ -1255,3 +1255,45 @@ msgstr "（无）"
 
 msgid "红色 = 需要人工介入；黄色 = 系统已自动处理，观察即可；绿色 = 按归属正常走"
 msgstr "红色 = 需要人工介入；黄色 = 系统已自动处理，观察即可；绿色 = 按归属正常走"
+
+msgid "分流决策"
+msgstr "分流决策"
+
+msgid "serversfile 指向的文件不存在 —— 框架可能未启动"
+msgstr "serversfile 指向的文件不存在 —— 框架可能未启动"
+
+msgid "生效的 dnsmasq 配置里没有 servers-file —— 需重启 dnsmasq"
+msgstr "生效的 dnsmasq 配置里没有 servers-file —— 需重启 dnsmasq"
+
+msgid "servers-file 所在目录不在 ujail 白名单内 —— dnsmasq 读不到，改道会静默失效"
+msgstr "servers-file 所在目录不在 ujail 白名单内 —— dnsmasq 读不到，改道会静默失效"
+
+msgid "自动改道进程"
+msgstr "自动改道进程"
+
+msgid "已关闭"
+msgstr "已关闭"
+
+msgid "健康检测关闭，不探测也不改道；静态分流照常工作"
+msgstr "健康检测关闭，不探测也不改道；静态分流照常工作"
+
+msgid "开关已启用但守护进程没起来 —— 自动改道不会发生。请执行 <code>/etc/init.d/dnschain restart</code>，并确认日志无报错"
+msgstr "开关已启用但守护进程没起来 —— 自动改道不会发生。请执行 <code>/etc/init.d/dnschain restart</code>，并确认日志无报错"
+
+msgid "运行中"
+msgstr "运行中"
+
+msgid "每 %d 秒一轮"
+msgstr "每 %d 秒一轮"
+
+msgid "不自动轮询（仅手动触发）"
+msgstr "不自动轮询（仅手动触发）"
+
+msgid "上次探测"
+msgstr "上次探测"
+
+msgid "%d 秒前"
+msgstr "%d 秒前"
+
+msgid "尚未探测过"
+msgstr "尚未探测过"

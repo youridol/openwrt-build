@@ -283,15 +283,38 @@ _G.__exec["netstat -lntup 2>/dev/null"] =
     check_eq("转义单引号", M.shell_quote("a'b"), "'a'\\''b'")
     check_contains("转义带空格", M.shell_quote("a b"), "'a b'")
 
-    # serversfile_ready：UCI 有、进程参数有 → ready
+    # serversfile_ready 的三条判据（v0.13.0 修正）
+    #
+    # ⚠️ 判据从「argv 里有 --servers-file」改成「生效配置里有 servers-file」：
+    #   OpenWrt 的 dnsmasq init 是 append_parm，把它写进配置文件而不是
+    #   命令行。按 argv 判定会永远报「未就绪」，页面于是显示一个
+    #   不存在的故障。
     L.execute(r"""
 _G.__exec["netstat -lntup 2>/dev/null"] =
 	"udp        0      0 192.168.3.254:53   0.0.0.0:*           16800/dnsmasq\n"
 """)
     M.invalidate("listen_table")
-    # 没有 /proc 文件 → 应报 no-cmdline 而不是崩
+
+    # 文件不存在 → file-missing（不能崩）
     r = M.serversfile_ready()
-    check_eq("缺 cmdline 时不崩", r.reason, "no-cmdline")
+    check_eq("serversfile 文件缺失时给 file-missing", r.reason, "file-missing")
+    check_eq("serversfile 缺失时 ready=false", str(r.ready), "False")
+
+    # 补上 /proc 与配置文件后应就绪
+    L.execute(r"""
+if not _G.__fs_access then _G.__fs_access = {} end
+_G.__fs_access["/var/run/dnsmasq/watch.servers"] = true
+""")
+    M.invalidate("serversfile_ready")
+
+    # 新增：health_daemon 必须在无守护进程时如实报 running=false
+    L.execute(r"""
+_G.__exec["ls -d /proc/[0-9]* 2>/dev/null"] = "/proc/1\n/proc/2\n"
+""")
+    M.invalidate("health_daemon")
+    hd = M.health_daemon()
+    check_eq("health_daemon 无进程时报 running=false", str(hd.running), "False")
+    check_eq("health_daemon 读取 enabled 开关", str(hd.enabled), "True")
 
 
 CBI_STUB = r"""

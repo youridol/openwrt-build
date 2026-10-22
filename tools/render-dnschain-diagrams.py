@@ -245,6 +245,35 @@ def check_text_fits_boxes(name, svg, layout, lines=3):
             "节点高 %d，%d 行字下沿约 %d，只剩 %dpx" % (nh, lines, text_bottom, gap))
 
 
+def check_intrinsic_size(name, svg):
+    """SVG 必须带 width/height 固有尺寸。
+
+    为什么需要这条（v0.13.0 用户反馈「导图看不到」后补的）：
+      只写 viewBox 时 SVG **没有固有尺寸**，CSS 的 `width:auto`
+      会回落到 `100%` —— 图被拉伸到容器宽度 1246px，高度等比放大到
+      900px（520 × 1246/720），字号从 11px 涨到 19px。
+      一张 720×520 的图占满整屏还多，用户滚动时只看到几个放大的框，
+      反馈「没有导图」。
+
+      DOM 里 SVG 在、内容完整、所有几何断言全绿 ——
+      因为问题不在几何，在「矢量图被当位图拉伸」。
+      这条断言就是补上那个缺口。
+    """
+    m = re.search(r'<svg[^>]*>', svg)
+    if not m:
+        bad("%s SVG 开标签可读" % name)
+        return
+    tag = m.group(0)
+    has_w = re.search(r'\bwidth="(\d+)"', tag)
+    has_h = re.search(r'\bheight="(\d+)"', tag)
+    if has_w and has_h:
+        ok("%s SVG 有固有尺寸 %s×%s（不会被 CSS 拉伸放大）"
+           % (name, has_w.group(1), has_h.group(1)))
+    else:
+        bad("%s SVG 缺 width/height 固有尺寸" % name,
+            "CSS width:auto 会回落到 100%，图被放大到容器宽度")
+
+
 def check_escaped(D):
     """动态文本必须转义 —— 否则域名里的 & < > 会让整个 SVG 解析失败。"""
     cases = [
@@ -315,6 +344,7 @@ def main():
         check_no_rect_overlap("判定链路图", g)
         check_bezier("判定链路图", g)
         check_markers("判定链路图", g, "dcrt")
+    check_intrinsic_size("判定链路图", route)
 
     layout = D.route_layout()
     check_note_clearance("判定链路图", route, layout)
@@ -331,6 +361,7 @@ def main():
         check_no_rect_overlap("改道状态图", g2)
         check_bezier("改道状态图", g2)
         check_markers("改道状态图", g2, "dcst")
+    check_intrinsic_size("改道状态图", status)
 
     # 状态图的档位数随数据变，用实际渲染出的行数算布局
     n_status_rows = 6   # sample_rows 覆盖 ok/degraded/rerouted/both-bad/fixed/unknown
