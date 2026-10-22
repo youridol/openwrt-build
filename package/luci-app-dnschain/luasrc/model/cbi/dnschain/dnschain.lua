@@ -197,7 +197,26 @@ function M.upstream_port(url)
 		return nil
 	end
 	local hostport = url:gsub("^[%w+]+://", ""):gsub("/.*$", "")
-	local port = hostport:match(":%[?([0-9]+)%]?$")
+
+	-- ⚠️ 方括号 IPv6 必须单独判（v0.14.4 修）。
+	--
+	--   原写法 `:%[?([0-9]+)%]?$` 想同时兼容 `host:853` 与 `[v6]:853`，
+	--   但对**不带端口**的 IPv6 字面量，末尾 `::1111` 会被当成端口：
+	--     https://[2606:4700::1111]/dns-query  → port = "1111"（应为 443）
+	--     tls://[2400:3200::1]                 → port = "1"   （应为 853）
+	--
+	--   后果：validate_upstreams 拿这个假端口去比对 ss_spec_output 的
+	--   端口集。不在集合里 → 保存被拒且提示「端口 1111 不在…」，
+	--   用户看不出问题在哪；恰好在集合里 → 该上游被误判合规，
+	--   实际出向不走代理，国外解析静默失败。
+	--
+	--   IPv6 的端口只可能出现在 `]:` 之后，故先看是否以 `[` 开头。
+	local port
+	if hostport:match("^%[") then
+		port = hostport:match("^%[[^%]]+%]:(%d+)$")
+	else
+		port = hostport:match(":(%d+)$")
+	end
 	if not port then
 		if scheme == "https" then
 			port = "443"
@@ -268,11 +287,35 @@ function M.list_stats()
 			return n
 		end
 
+		-- 数「以某前缀开头的行」的条数（用于 server= / nftset= 这类指令行）
+		local function count_prefix(path, prefix)
+			local f = io.open(path, "r")
+			if not f then
+				return 0
+			end
+			local n = 0
+			for line in f:lines() do
+				if line:sub(1, #prefix) == prefix then n = n + 1 end
+			end
+			f:close()
+			return n
+		end
+
 		stats.gfw_lines = count("/etc/ssrplus/gfw_list.conf")
 		stats.base_lines = count("/etc/ssrplus/gfw_base.conf")
-		-- v0.10.0：分流规则由 dnsmasq 承担，文件名为 foreign-split.conf
+
+		-- 数据库覆盖的国外域名条数（纯域名清单，一行一个）
+		--
+		-- ⚠️ 这不是「分流规则条数」（v0.14.4 修 S5）。
+		--    `foreign-split.conf` 是「数据库国外 − 自定义国内 − 观测域名」
+		--    的**纯域名清单**（dnschain.sh 里明确写了「从 v0.13.0 起不再是
+		--    dnsmasq 片段」）。真正的 `server=/域名/` 条数在
+		--    dnschain-split.conf，其内容还包含用户自定义的两份列表。
 		stats.domains = count("/var/etc/dnschain/foreign-split.conf")
 
+		-- 真正的分流规则条数：数 dnschain-split.conf 的 server= 行
+		stats.split_server_lines = count_prefix(
+			"/tmp/dnsmasq.d/dnschain-split.conf", "server=")
 		-- 修改时间：BusyBox 的 stat 不支持 -c（实测报错），改用 date -r。
 		-- 这一次保留外部命令（Lua 无 stat mtime 接口），但只在缓存未命中时跑一次。
 		local mt = sys.exec("date -r /etc/ssrplus/gfw_list.conf '+%Y-%m-%d %H:%M' 2>/dev/null") or ""
@@ -324,8 +367,13 @@ function M.chain_snapshot()
 			return M.port_owner(port, proto or "udp") ~= ""
 		end
 
-		-- 分流条数复用 list_stats 的结果（它已缓存，且用的是纯 Lua 数行）
-		local split_lines = M.list_stats().domains or 0
+		-- 分流条数：取**真正的** server=/域名/ 行数（v0.14.4 修 S5）
+		--
+		-- 原实现用 list_stats().domains，那是 foreign-split.conf 的
+		-- 纯域名条数 —— 不含用户自定义的两份列表，页面标签
+		-- 「条 server=/域名/」名不副实，数字偏小。
+		local ls = M.list_stats()
+		local split_lines = ls.split_server_lines or 0
 
 		return {
 			-- 组件存活
@@ -386,9 +434,23 @@ function M.flush_cache()
 end
 
 --- 手动导入名单
+-- 判定一段脚本输出是否代表失败。
+--
+-- ⚠️ 不能无条件 return true（v0.14.4 修 M6）。
+--    dnschain-reconcile 的 main() 有 rc 传播（失败时非 0），但 Lua 侧
+--    既不看退出码也不看输出里的 ERROR，恒返回 true —— 页面据此无条件
+--    打 ✓。reconcile 因 preflight 失败、名单缺失、uci commit 失败而
+--    整体失败时，页面仍显示「✓ 已归一」，只在正文里混着 ERROR 行。
+--    这是 AGENTS 红线 3「禁止静默失败」在页面侧的缺口。
+local function exec_ok(out)
+	if not out then return false end
+	if out:find("ERROR") or out:find("失败") then return false end
+	return true
+end
+
 function M.import_lists()
-	local out = sys.exec("/usr/bin/dnschain-reconcile 2>&1")
-	return true, out
+	local out = sys.exec("/usr/bin/dnschain-reconcile 2>&1") or ""
+	return exec_ok(out), out
 end
 
 --- 触发 SSR-Plus 更新 GFW 名单
@@ -402,8 +464,8 @@ end
 
 --- 一键归一（写回 SSR-Plus 的键）
 function M.reconcile_now()
-	local out = sys.exec("/usr/bin/dnschain-reconcile 2>&1")
-	return true, out
+	local out = sys.exec("/usr/bin/dnschain-reconcile 2>&1") or ""
+	return exec_ok(out), out
 end
 
 --- 运行自检
@@ -415,6 +477,32 @@ end
 -- 加请求级缓存后只跑一次。**注意**：不能用长 TTL 缓存 ——
 -- 自检结果要反映「此刻」的状态，用户点「一键自检」按钮必须看到新结果，
 -- 所以按钮回调里会显式 invalidate("selftest")。
+-- 把自检输出的一行「名称 — 证据」切成两段。
+--
+-- ⚠️ 不能写 `rest:match("^([^—]+)—%s*(.*)$")`（v0.14.4 修）。
+--
+--   Lua 的字符类按**字节**工作，不按码位。`—` 是 U+2014，
+--   UTF-8 编码 E2 80 94。写进 `[^—]` 后实际是「排除 0xE2、0x80、0x94
+--   这三个字节」。于是凡名称里含 `一`(E4 B8 80)、`上`(E4 B8 8A)、
+--   `下`(E4 B8 8B) 这类第三字节为 0x80 的常用汉字，匹配直接失败。
+--
+--   实测：20 个 emit 名称里 **7 个失败**（整行都进 name、detail 为空），
+--   另有 10 个「半失败」（name 尾随一个空格）。失败的 7 项恰好包括
+--   「缓存层唯一」「端口所有权无冲突」「改道通道已就绪」—— 诊断页最该
+--   看清的几项，而 #items 仍是 20、total 正确，看起来一切正常。
+--
+--   改用 `find(..., true)` 做**字节精确**匹配：分隔符是 5 字节的
+--   " — "（空格 + 三字节破折号 + 空格），找到后按字节位置切。
+local SELFTEST_SEP = " \226\128\148 "
+
+local function split_selftest_name(rest)
+	local p = rest:find(SELFTEST_SEP, 1, true)
+	if not p then
+		return nil, nil
+	end
+	return rest:sub(1, p - 1), rest:sub(p + #SELFTEST_SEP)
+end
+
 function M.selftest()
 	return cached("selftest", function()
 		local out = sys.exec("/usr/bin/dnschain-selftest 2>&1") or ""
@@ -422,7 +510,7 @@ function M.selftest()
 		for line in out:gmatch("[^\n]+") do
 			local no, status, rest = line:match("^(%d+)%s+(%u+)%s+(.+)$")
 			if no then
-				local name, detail = rest:match("^([^—]+)—%s*(.*)$")
+				local name, detail = split_selftest_name(rest)
 				items[#items + 1] = {
 					no = tonumber(no),
 					status = status,
@@ -558,12 +646,34 @@ function M.sync_dnsmasq_filter_aaaa()
 		return true, nil
 	end
 
-	sys.exec("uci -q set dhcp.@dnsmasq[0].filter_aaaa='" .. target .. "' && uci -q commit dhcp")
+	-- ⚠️ 必须检查每一步的结果（v0.14.4 修 M8）。
+	--
+	--   原实现两条 sys.exec 的返回值都丢弃、`&&` 串联的 uci commit
+	--   失败也无从得知，最后无条件 return true。
+	--
+	--   后果：uci 写失败或 dnsmasq 重启失败时，用户勾了「抑制国外 AAAA」、
+	--   页面刷新后开关显示已切换（读的是 shadowsocksr.filter_aaaa，确实
+	--   已写），但 dnsmasq.filter_aaaa 没变 → **实际行为未变**。
+	--   这正是 AGENTS §5 反复强调的「读偏好值会得出错误结论」的现场。
+	local out1 = sys.exec(
+		"uci -q set dhcp.@dnsmasq[0].filter_aaaa='" .. target .. "' && uci -q commit dhcp 2>&1") or ""
+	if out1:find("%S") then
+		-- 数据层只返回错误码与原始输出，不拼 UI 文案
+		-- （AGENTS：dnschain.lua 不得出现 translate，文案在视图层）
+		return false, { code = "uci_write_failed", detail = out1, target = target }
+	end
+
 	-- 必须 restart 而非 reload：实测 reload（SIGHUP）不重读 conf-dir，
 	-- 而 filter_aaaa 是写进 /var/etc/dnsmasq.conf.* 的
 	sys.exec("/etc/init.d/dnsmasq restart >/dev/null 2>&1")
 	-- 写后失效相关缓存，让同请求内后续读取看到新值
 	M.invalidate()
+
+	-- 用「读回实际值」做最终判定：restart 的退出码不可靠（procd 异步）
+	local after = M.dnsmasq_filter_aaaa()
+	if after ~= target then
+		return false, { code = "verify_failed", actual = after, target = target }
+	end
 	return true, target
 end
 
@@ -707,7 +817,11 @@ function M.health_summary()
 		local out = health_status_raw()
 		local line = out:match("SUM%s+([^\n]+)") or ""
 		local s = {}
-		for k, v in line:gmatch("(%w+)=(%d+)") do
+		-- ⚠️ `%w` 不含下划线（v0.14.4 修 M5）：`both_bad=1` 会被解析成
+		-- `bad = 1`，丢掉 `both_` 前缀（实测确认）。汇总键目前没人读，
+		-- 但这是一个「看起来有、实际没有」的通道，谁哪天用
+		-- summary.both_bad 就会拿到 nil。
+		for k, v in line:gmatch("([%w_]+)=(%d+)") do
 			s[k] = tonumber(v)
 		end
 		return s
@@ -760,12 +874,6 @@ function M.reset_health()
 	return out
 end
 
---- 自定义列表校验（返回 ok, 明细文本）
-function M.check_domains()
-	local out = sys.exec("/usr/bin/dnschain-health check 2>&1") or ""
-	local ok = out:match("^OK") ~= nil or out:match("\nOK$") ~= nil
-	return ok, out
-end
 
 --- dnsmasq 是否已带 --servers-file（改道通道是否就绪）
 --
@@ -881,7 +989,7 @@ function M.health_daemon()
 		local interval = uci_get("dnschain.health.interval") or "60"
 
 		-- 找 procd 实例：遍历 /proc 找 `dnschain-health daemon`
-		local pid, uptime = "", ""
+		local pid = ""
 		local d = io.popen("ls -d /proc/[0-9]* 2>/dev/null")
 		if d then
 			for p in d:lines() do
@@ -893,13 +1001,17 @@ function M.health_daemon()
 						f:close()
 						if cmd:find("dnschain%-health") and cmd:find("daemon") then
 							pid = n
-							local sf = io.open(p .. "/stat", "r")
-							if sf then
-								local line = sf:read("*l") or ""
-								sf:close()
-								local start = line:match("^%d+ %S+ %S+ %d+ %d+ %d+ %d+ %d+ %S+ %S+ %S+ %S+ %S+ %S+ %S+ %S+ %S+ %S+ %S+ %S+ (%d+)")
-								if start then uptime = start end
-							end
+							-- ⚠️ 不再解析 /proc/<pid>/stat 取启动时间（v0.14.4 删 L5）。
+							--
+							--   原 pattern 有 21 个占位符，捕获的是第 21 个字段，
+							--   而 starttime 是 /proc/<pid>/stat 的第 22 个
+							--   （第 1 是 pid、第 2 是 comm、第 3 是 state…），
+							--   实际取到的是 itrealvalue。而且 uptime 在返回表里
+							--   **没有出现**，是纯死变量。
+							--
+							--   这是一处「看起来在算进程运行时长」的假实现：
+							--   谁把 uptime 加进返回表就会显示错误时长。
+							--   真要运行时长应从 /proc/uptime 减去 starttime/HZ。
 							break
 						end
 					end
@@ -938,22 +1050,5 @@ end
 
 --- watch.servers 的实际内容（用于「当前改道生效情况」核对）
 
---- 静态分流片段的条数（不含注释）
---
--- 为什么要 pcall 包一层：io.lines 在文件不存在时**抛错**而不是返回 nil，
--- 而这里的调用点位于页面渲染路径上 —— 未装框架、文件尚未生成时
--- 会直接 500，用户看到的是「页面打不开」而不是「还没有数据」。
-function M.split_rule_count()
-	return cached("split_rule_count", function()
-		local n = 0
-		local ok = pcall(function()
-			for _ in io.lines("/tmp/dnsmasq.d/dnschain-split.conf") do
-				n = n + 1
-			end
-		end)
-		if not ok then return 0 end
-		return n
-	end) or 0
-end
 
 return M

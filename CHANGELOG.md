@@ -575,6 +575,167 @@ FANCY_SLEEP），实测 `sleep 0.05` / `sleep 0.1` **都失败**；
 `...|0|0|1` → 缓存自动失效并重跑 → 准确报出用户描述的那三项 FAIL。
 恢复后回到 20/20。
 
+#### 二十、Lua 层深审：6 项严重 + 9 项中等 + 9 项轻微缺陷修复（v0.14.4）
+
+对 4 个 Lua 文件（3595 行）做第三轮审查，逐条用 lupa（真实 Lua）实测验证。
+**24 项报告里 3 项经实测不成立**，未作改动（见末节）。
+
+##### S1 [严重] selftest 名称解析用 `[^—]`，20 项里 7 项失败
+
+```lua
+local name, detail = rest:match("^([^—]+)—%s*(.*)$")
+```
+
+Lua 的字符类按**字节**工作。`—`(U+2014) 的 UTF-8 是 `E2 80 94`，
+写进 `[^—]` 后实际是「排除 E2、80、94 三个字节」。凡名称含
+`一`(E4 B8 80)、`上`(E4 B8 8A)、`下`(E4 B8 8B) 等第三字节为 0x80 的
+常用汉字，匹配**直接失败**。
+
+实测 10 个真实 emit 名称：**7 个失败**（整行进 name、detail 为空），
+3 个「半失败」（name 尾随一个空格）。失败的包括「缓存层唯一」
+「端口所有权无冲突」「改道通道已就绪」—— 诊断页最该看清的几项，
+而 `#items` 仍是 20、`total` 正确，看起来一切正常，只是内容错位。
+
+修法：改用 `find(sep, 1, true)` 做**字节精确**匹配（分隔符是 5 字节的
+`" — "`），找到后按字节位置切。实测 10/10 正确、无尾随空格。
+
+##### S2 [严重] `upstream_port` 把 IPv6 末段当端口
+
+```lua
+local port = hostport:match(":%[?([0-9]+)%]?$")
+```
+
+实测：
+```
+https://[2606:4700::1111]/dns-query  → 1111（应 443）
+tls://[2400:3200::1]                 → 1   （应 853）
+```
+
+后果：`validate_upstreams` 拿这个假端口比对 `ss_spec_output` 端口集。
+不在集合里 → 保存被拒且提示「端口 1111 不在…」，用户看不出问题在哪；
+恰好在集合里 → 该上游被误判合规，实际出向不走代理，国外解析静默失败。
+
+修法：IPv6 的端口只可能出现在 `]:` 之后，先判 `^%[` 再分别取。
+实测 7/7 正确。
+
+##### S3 [严重] `status_map` 静默丢弃未知 state，行数不守恒
+
+`local st = r.state or "unknown"` 只兜 nil。空串与任何未知值
+（如脚本将来新增 `probing`）会落进 `groups` 里一个**不在 `STATUS_ORDER`
+中**的键，而 `present` 只遍历 `STATUS_ORDER`、`n_all` 也只累加那些组
+—— 这些行被**静默丢弃**。
+
+实测：3 行（`ok` / `""` / `weird-state`）只画出 1 个域名，
+根节点也写「观测 1 个」。看起来像「只有 1 个域名需要关注」，无任何提示。
+
+修法：`normalize_state()` 把未知/空值统一归入 `unknown` 档，保证
+「画出的行数 == 输入行数」。实测 3 行全部进图、计数 3。
+
+##### S4 [严重] `status_layout` 与 `status_map` 口径不同 → CI 验错布局
+
+两处不一致：
+1. `status_layout` 用 `pairs(rows)` 数**数据行数**，`status_map` 画
+   **状态档位数**（最多 5 档，`both-bad` 恒占一档）
+2. `NH` 一个硬编码 60，一个 `math.max(60, 21+16+max_hint_lines*14+8)`
+
+实测（5 档各 1 个域名）：`status_map` 实际 viewBox 高 **386**，
+`status_layout` 报 **406** —— 差 20px。`check_note_clearance` 与
+`check_text_fits_boxes` 的断言全部基于这份错值。
+
+修法：抽出 `layout_plan(rows)`，由两者共用。实测三种数据形态
+（5 档/1 档/6 行 3 档）下高度完全一致（471/216/301）。
+
+##### S5 [严重] 「分流规则条数」取错文件
+
+`stats.domains` 读 `foreign-split.conf`，而那是
+「数据库国外 − 自定义国内 − 观测域名」的**纯域名清单**
+（`dnschain.sh` 里明确写了「从 v0.13.0 起不再是 dnsmasq 片段」）。
+真正的 `server=/域名/` 条数在 `dnschain-split.conf`。
+
+实测加 1 个自定义国外域名后：`foreign-split.conf` 仍 23714，
+`dnschain-split.conf` 的 `server=` 变 23715 —— 页面数字偏小，
+标签「条 server=/域名/」名不副实。
+
+另有 `M.split_rule_count()` 读的正是对的文件，但**全仓库零调用点**，
+且它数的是所有行（含注释与 `nftset=`），口径也不对。
+
+修法：`list_stats` 增加 `split_server_lines`（数 `server=` 前缀行），
+`chain_snapshot` 改用它；删掉死函数 `split_rule_count`。
+
+##### S6 [严重] 「保存并应用」4 条分支无反馈，按钮无条件打 ✓
+
+`cmd_apply` 有 5 条正常出口 + 2 条失败出口：
+```
+DNSMASQ=restarted（静态片段已变）
+DNSMASQ=skipped（框架未启用）
+DNSMASQ=skipped（无 init.d/dnsmasq）
+DNSMASQ=sighup（仅观测域名变化）
+DNSMASQ=unchanged（无变化，未动 dnsmasq）
+ERROR=生成分流片段失败 / ERROR=生成自定义列表失败
+```
+而 `apply_on_parse` 只处理 `restarted`，其余 4 条**不设置任何 message**。
+最常见的 `unchanged`（只改阈值、片段未变）用户点保存后看不到任何提示，
+会反复点；框架未启用时更是什么都不显示。
+
+按钮路径反过来，无条件拼 `✓` —— `ERROR` 时显示「✓ 已应用」+ 错误正文。
+
+修法：`apply_message()` 统一解析，按出口给 `✓`/`!`/`✗` 与对应文案，
+`skipped` 还带上具体原因。实测 8/8 分支正确。
+
+##### 中等缺陷（9 项）
+
+| # | 问题 | 处置 |
+|---|---|---|
+| M1 | `validate_domain` 比 `dc_domain_valid` 少 4 条（总长≤253、label≤63、label 首尾非 `-`、TLD 非 `xn--` 须纯字母）→ 页面放行、脚本 `dc_domain_valid \|\| continue` 静默跳过 → 「已录入」却不生效 | 补齐 4 条，保证「页面拒绝集 ⊆ 脚本拒绝集」。实测 10/10 |
+| M2 | 空值分支返回**原始** `value`（可能是 `"  "`）而非归一值 → `rmempty` 不认它为空，空格串被写进 UCI | 改为返回 `v`（空串） |
+| M3 | `validate_upstream` 把「该 section 全部已有值」与本次输入合并后整体判定 → 一行坏就整段报错，包括用户想用来替换坏行的那一行，形成死锁 | 只校验本次 `value` |
+| M4 | 「待应用」徽标比的是 UCI 原始 token 数与生效条数 → 有一个非法域名就永久显示「待应用」 | 改用「合法条数」比较，非法项单独红徽标列出 |
+| M5 | `%w` 不含下划线 → `both_bad=1` 被解析成 `bad = 1`，丢 `both_` 前缀 | 改 `[%w_]+` |
+| M6 | `import_lists` / `reconcile_now` 恒返回 `true` → reconcile 失败时页面仍打 ✓（违反红线 3） | 加 `exec_ok()` 扫描 ERROR/失败 |
+| M7 | `box_lines` 的 `w` 形参从未使用；单个超宽域名（AWS/CloudFront 风格）直接溢出 viewBox 被裁 | 按宽硬切并补 `…`。实测零溢出 |
+| M8 | `sync_dnsmasq_filter_aaaa` 丢弃所有 `sys.exec` 返回值，恒 `return true` → 写失败时开关显示已切换但行为未变 | 返回结构化错误码（数据层不放 UI 文案）+ 写后读回校验 |
+| M9 | 5 个配置项（`cache.enabled`/`filter_https_rr`/`import_interval`/`selftest.interval`/`intercept_doh`）无消费者却无标注；`dnschain-reconcile` 根本没有调度者 | 补「仅作记录」标注；`selftest.interval` 明说「仓库里没有定时调度」 |
+
+##### 轻微缺陷（9 项）
+
+| # | 问题 | 处置 |
+|---|---|---|
+| L1 | `_conclusion` 按**译文子串**判色（`concl:find("未监听")`）→ 非中文界面恒绿，英文界面上「国内 dnsproxy 未监听」显示成绿色 | 改按语义分支给 tone；保留关键字兜底 |
+| L2 | selftest 表格的 `name`/`detail` 未转义（同文件 `r.result`/`r.domain` 都用了 `dg.esc`），而 detail 是脚本 stdout 直通 | 套 `dg.esc` |
+| L3 | `os.date("%H:%M:%S", r.last or 0)` 对 `last=0` 渲染成 `08:00:00`，看起来像真实探测时刻 | `> 0` 才格式化，否则 `—` |
+| L4 | `STATUS_H` 恒 0 且从未被读取（死常量） | 删除 |
+| L5 | `/proc/<pid>/stat` 的 pattern 捕获第 21 字段（应第 22 = starttime），实际取到 `itrealvalue`；`uptime` 还是死变量 | 整段删除并写明理由 |
+| L6 | `M.check_domains` 注释称「自检会调用它」，实际零调用点 | 删除函数 |
+| L7 | 同一页出现「16 项检查」与「20 项检查」两个数字 | 改为 20 |
+| L8 | SVG `aria-label` 未转义（其余动态文本都过了 `esc`） | 套 `esc` |
+| L9 | controller 直接用 `nixio.fs` 而未 `require`，脱离 dispatcher 的环境会抛 nil 索引 | 显式 `require "nixio.fs"` |
+
+##### 实测排除的 3 项（不改）
+
+| 怀疑 | 实测结论 |
+|---|---|
+| S4 的 `render-dnschain-diagrams.py` 传 6 键表报 `h=478` | 那是**测试脚本传错数据**（`{ [1]=true, ... }` 占位表）。改传真实 `sample_rows()` 后与 `status_map` 完全一致 |
+| L1 英文 locale 下判色失效 | 逻辑成立但需真机切 locale 才能观察；已按语义重构，不再依赖译文 |
+| L8 翻译里是否真有双引号 | 当前中文文案无 `"`，属预防性加固 |
+
+##### 验证
+
+```
+本地：dash 8/8、shell 90+23、lua 121（新增 33 条）、图示 44（新增 6 条）、
+      契约 121、i18n 426、CI 模拟通过
+路由器：页面 HTTP 200、160KB、SVG 4、marker 0 重复、Lua 报错 0、
+        「16 项检查」已改 20、响应 1.86s
+```
+
+> **环境说明**：本轮验收时该路由器上的 SSR-Plus 处于
+> `global_server=nil` 状态（配置文件里没有任何 `servers` 节点，
+> `/etc/config/shadowsocksr` 仅 72 行、9 个 section，无订阅 URL），
+> 因此自检第 13 项「代理与分流在位」FAIL。这是**环境既有状态**
+> （AGENTS §4.2 记录的已知故障模式），与本次 Lua 改动无关 ——
+> 本轮改动只涉及页面渲染与数据读取，不可能删除 UCI 节点。
+> dnschain 框架本身正常：`:5353` 国内 OK、`:53` 国内外均 OK、
+> `nftset=23714`、cycle 自动把 4 个国外域名改道到直连（正确行为）。
+
 #### 十九、运行时 shell 层深审：6 项严重 + 9 项中等缺陷修复（v0.14.3）
 
 对 `files/` 下 6 个运行时脚本（共 3887 行）做第二轮只读审查，

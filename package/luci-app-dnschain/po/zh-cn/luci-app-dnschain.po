@@ -1351,3 +1351,57 @@ msgstr "国外上游的连接走 SSR-Plus 的 OUTPUT 链。要求 router_proxy=1
 
 msgid "自检失败时自动回滚到上一次通过的配置快照。<br/><b>注意：此项目前仅作记录，回滚逻辑尚未实现</b>（失败时只记日志，不会自动回滚配置）。"
 msgstr "自检失败时自动回滚到上一次通过的配置快照。<br/><b>注意：此项目前仅作记录，回滚逻辑尚未实现</b>（失败时只记日志，不会自动回滚配置）。"
+
+msgid "总长不能超过 253 个字符："
+msgstr "总长不能超过 253 个字符："
+
+msgid "每段不能超过 63 个字符："
+msgstr "每段不能超过 63 个字符："
+
+msgid "每段首尾不能是连字符："
+msgstr "每段首尾不能是连字符："
+
+msgid "顶级域只能是字母（IDNA 用 xn-- 前缀）："
+msgstr "顶级域只能是字母（IDNA 用 xn-- 前缀）："
+
+msgid "%d 条格式非法，已跳过"
+msgstr "%d 条格式非法，已跳过"
+
+msgid "写入 dnsmasq.filter_aaaa 失败："
+msgstr "写入 dnsmasq.filter_aaaa 失败："
+
+msgid "dnsmasq 重启后 filter_aaaa 仍为 "
+msgstr "dnsmasq 重启后 filter_aaaa 仍为 "
+
+msgid "（期望 "
+msgstr "（期望 "
+
+msgid "同步 dnsmasq.filter_aaaa 失败"
+msgstr "同步 dnsmasq.filter_aaaa 失败"
+
+msgid "qtype 64（SVCB）与 65（HTTPS）可携带 <code>ipv6hint</code>，客户端能绕过 AAAA 抑制拿到 IPv6 地址。<br/>v0.10.0 起<b>默认关闭</b>：IPv6 流量代理已把国外 IPv6 送进代理，不再需要防止 ipv6hint 泄漏。<br/><b>注意：此项目前仅作记录，没有运行时消费者</b>（改了不会生效）。"
+msgstr "qtype 64（SVCB）与 65（HTTPS）可携带 <code>ipv6hint</code>，客户端能绕过 AAAA 抑制拿到 IPv6 地址。<br/>v0.10.0 起<b>默认关闭</b>：IPv6 流量代理已把国外 IPv6 送进代理，不再需要防止 ipv6hint 泄漏。<br/><b>注意：此项目前仅作记录，没有运行时消费者</b>（改了不会生效）。"
+
+msgid "缓存由 dnsmasq 承担，实际始终启用 —— 框架不读这个开关。<br/><b>注意：此项目前仅作记录，没有运行时消费者</b>（改了不会生效）。"
+msgstr "缓存由 dnsmasq 承担，实际始终启用 —— 框架不读这个开关。<br/><b>注意：此项目前仅作记录，没有运行时消费者</b>（改了不会生效）。"
+
+msgid "导入只在点「立即归一」时发生，没有定时调度。<br/><b>注意：此项目前仅作记录，没有运行时消费者</b>（改了不会生效）。"
+msgstr "导入只在点「立即归一」时发生，没有定时调度。<br/><b>注意：此项目前仅作记录，没有运行时消费者</b>（改了不会生效）。"
+
+msgid "20 项检查覆盖链路可达性、分流正确性、上游加密、双栈策略、fw4 可加载性与明文旁路。失败自动回滚见下方开关。"
+msgstr "20 项检查覆盖链路可达性、分流正确性、上游加密、双栈策略、fw4 可加载性与明文旁路。失败自动回滚见下方开关。"
+
+msgid "<br/><b>注意：仓库里没有定时调度</b>（无 cron、无 procd 实例），自检只在打开本页或点「一键自检」时运行。"
+msgstr "<br/><b>注意：仓库里没有定时调度</b>（无 cron、无 procd 实例），自检只在打开本页或点「一键自检」时运行。"
+
+msgid "已应用（仅观测域名变化，SIGHUP 已生效，无中断）"
+msgstr "已应用（仅观测域名变化，SIGHUP 已生效，无中断）"
+
+msgid "配置已保存（分流片段无变化，未重启 dnsmasq）"
+msgstr "配置已保存（分流片段无变化，未重启 dnsmasq）"
+
+msgid "已保存，但未应用（详见下方说明）"
+msgstr "已保存，但未应用（详见下方说明）"
+
+msgid "应用结果不明（脚本无输出）"
+msgstr "应用结果不明（脚本无输出）"

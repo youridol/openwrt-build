@@ -498,11 +498,76 @@ def main():
     check_text_inside_boxes("改道状态图", status)
     check_hint_wrapped("改道状态图", status)
 
-    # 状态图的档位数随数据变，用实际渲染出的行数算布局
-    n_status_rows = 5   # sample_rows 覆盖 ok/degraded/rerouted/both-bad/unknown
-    slayout = D.status_layout(L.eval("{ [1] = true, [2] = true, [3] = true, [4] = true, [5] = true, [6] = true }"))
+    # 状态图的档位数随数据变，用**真实行数据**算布局
+    #
+    # ⚠️ 原来传的是 `{ [1]=true, ... }` 占位表（值全是布尔）。v0.14.4 起
+    #    status_layout 与 status_map 共用 layout_plan，后者要读 r.state，
+    #    传布尔会在 `groups[st][#groups[st]+1] = r` 处索引布尔值报错。
+    #    改传 sample_rows()（已覆盖全部 5 个档位），这样两个函数算的是
+    #    同一份数据，断言才有意义。
+    slayout = D.status_layout(rows)
     check_note_clearance("改道状态图", status, slayout)
     check_text_fits_boxes("改道状态图", status, slayout)
+
+    # ── v0.14.4：未知 state 必须进图（行数守恒）─────────────────────
+    weird = lua_table(L, [
+        {"domain": "a.example.com", "state": "ok"},
+        {"domain": "b.example.com", "state": ""},
+        {"domain": "c.example.com", "state": "weird-state"},
+    ])
+    wsvg = str(D.status_map(weird, L.eval("{}")))
+    drawn = sum(1 for d in ("a.example.com", "b.example.com", "c.example.com")
+                if d in wsvg)
+    if drawn == 3:
+        ok("未知/空 state 不丢弃（3 行进 3 个域名）")
+    else:
+        bad("未知/空 state 不丢弃", "只画出 %d / 3 个域名" % drawn)
+    if "观测 3 个" in wsvg:
+        ok("根节点计数含未知 state（观测 3 个）")
+    else:
+        bad("根节点计数含未知 state", "未出现「观测 3 个」")
+
+    # ── v0.14.4：status_layout 与 status_map 必须一致 ────────────────
+    import re as _re
+    _m = _re.search(r'viewBox="0 0 (\d+) (\d+)"', status)
+    if _m:
+        map_h = int(_m.group(2))
+        if map_h == slayout["h"]:
+            ok("status_layout 与 status_map 高度一致（%d）" % map_h)
+        else:
+            bad("status_layout 与 status_map 高度一致",
+                "map=%d layout=%s" % (map_h, slayout["h"]))
+    # lupa 的 Lua table 没有 .get()，直接索引（缺键返回 None）
+    tiers = slayout["tiers"]
+    nrows = slayout["rows"]
+    if tiers:
+        ok("status_layout 报告档位数（%d 档 / %d 行）" % (tiers, nrows or 0))
+    else:
+        bad("status_layout 报告档位数", "缺 tiers 字段")
+
+    # ── v0.14.4：单个超宽域名必须截断，不溢出 viewBox ────────────────
+    longdom = lua_table(L, [
+        {"domain": "cdn.static-resources-for-some-service.eu-central-1.amazonaws.com",
+         "state": "ok"},
+    ])
+    lsvg = str(D.status_map(longdom, L.eval("{}")))
+    _m2 = _re.search(r'viewBox="0 0 (\d+) (\d+)"', lsvg)
+    if _m2:
+        W2 = int(_m2.group(1))
+        worst = 0
+        for _x, _fs, _t in _re.findall(
+                r'<text x="(\d+)" y="\d+" font-size="(\d+)"[^>]*>([^<]*)</text>', lsvg):
+            if _t.strip():
+                r = int(_x) + sum(int(_fs) * (1.0 if ord(c) > 0x2E80 else 0.55) for c in _t)
+                worst = max(worst, r - W2)
+        if worst <= 0:
+            ok("超长域名不溢出 viewBox（已截断补 …）")
+        else:
+            bad("超长域名不溢出 viewBox", "溢出 %dpx" % worst)
+        if "…" in lsvg:
+            ok("超长域名带省略号")
+        else:
+            bad("超长域名带省略号", "未出现 …")
 
     # ── 跨调用 marker id 唯一性（v0.14.2）────────────────────────────
     #

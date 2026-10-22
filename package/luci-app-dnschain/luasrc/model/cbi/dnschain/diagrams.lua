@@ -409,7 +409,7 @@ function D.route_map(opts)
 		'<div class="dc-chain dc-chain--map"><svg viewBox="0 0 %d %d" ' ..
 		'width="%d" height="%d" role="img" ' ..
 		'aria-label="%s">', ROUTE_W, ROUTE_H, ROUTE_W, ROUTE_H,
-		translate("域名判定链路图"))
+		esc(translate("域名判定链路图")))
 	o[#o + 1] = defs(p)
 
 	--------------------------------------------------------------------
@@ -588,17 +588,48 @@ local STATUS_META = {
 	},
 }
 
-local STATUS_W, STATUS_H = 760, 0
+-- 高度由 status_map 内的 layout_plan 算出，不存在固定高度常量
+-- （原 STATUS_H 恒为 0 且从未被读取，v0.14.4 删）
+local STATUS_W = 760
 
-function D.status_map(rows, summary, id_prefix)
+-- 把一行的 state 归一到「可画」的档位。
+--
+-- ⚠️ 未知/空 state 必须归入 unknown（v0.14.4 修）。
+--
+--   原实现 `local st = r.state or "unknown"` 只兜 nil，空串与任何
+--   未知值（如脚本将来新增 `probing`）会落进 groups 里一个**不在
+--   STATUS_ORDER 中**的键。而 `present` 只遍历 STATUS_ORDER、
+--   `n_all` 也只累加 STATUS_ORDER 的组 —— 这些行被**静默丢弃**。
+--
+--   实测：3 行（state 分别为 ok / "" / weird-state）只画出 1 个域名，
+--   根节点也写「观测 1 个」。看起来像「只有 1 个域名需要关注」，
+--   没有任何提示。状态文件被手工改坏、或脚本新增状态值时会踩到。
+--
+--   现在统一归入 unknown 档，保证「画出的行数 == 输入行数」。
+local function normalize_state(st)
+	if type(st) ~= "string" then return "unknown" end
+	for _, known in ipairs(STATUS_ORDER) do
+		if st == known then return st end
+	end
+	return "unknown"
+end
+
+-- 状态图的分组与布局计算（status_map 与 status_layout 共用）。
+--
+-- ⚠️ 抽出来的理由（v0.14.4）：原来 status_map 与 status_layout 各算一遍，
+-- 口径不同 —— status_layout 用 `pairs(rows)` 数**数据行数**，而
+-- status_map 画的是**状态档位数**（最多 5 档，both-bad 恒占一档）；
+-- status_layout 还把 NH 硬编码成 60，而 status_map 的 NH 随 hint
+-- 折行数增长。实测 5 档各 1 个域名时：status_map 实际高 386，
+-- status_layout 报 406 —— CI 的几何断言一直在验一个不存在的布局。
+local function layout_plan(rows)
 	rows = rows or {}
-	summary = summary or {}
 
-	-- 按状态分组
+	-- 按状态分组（未知 state 归入 unknown，不丢弃）
 	local groups = {}
 	for _, st in ipairs(STATUS_ORDER) do groups[st] = {} end
 	for _, r in ipairs(rows) do
-		local st = r.state or "unknown"
+		local st = normalize_state(r.state)
 		if not groups[st] then groups[st] = {} end
 		groups[st][#groups[st] + 1] = r
 	end
@@ -612,6 +643,9 @@ function D.status_map(rows, summary, id_prefix)
 		end
 	end
 	if #present == 0 then present = { "unknown" } end
+
+	local n_all = 0
+	for _, st in ipairs(STATUS_ORDER) do n_all = n_all + #groups[st] end
 
 	-- ── 布局参数 ──────────────────────────────────────────────────────
 	--
@@ -684,6 +718,26 @@ function D.status_map(rows, summary, id_prefix)
 	local H = top + total_h + 34
 	local root_y = top + math.floor(total_h / 2) - math.floor(NH / 2)
 
+	return {
+		groups = groups, present = present, plan = plan, n_all = n_all,
+		NW2 = NW2, NH = NH, X3 = X3, NW3 = NW3,
+		total_h = total_h, top = top, H = H, root_y = root_y,
+		X1 = X1, X2 = X2, ROOT_W = ROOT_W, GAP = GAP,
+		PAD_L = PAD_L, PAD_R = PAD_R,
+	}
+end
+
+function D.status_map(rows, summary, id_prefix)
+	rows = rows or {}
+	summary = summary or {}
+
+	local LP = layout_plan(rows)
+	local groups, present, plan = LP.groups, LP.present, LP.plan
+	local n_all, NW2, NH, X3, NW3 = LP.n_all, LP.NW2, LP.NH, LP.X3, LP.NW3
+	local total_h, top, H, root_y = LP.total_h, LP.top, LP.H, LP.root_y
+	local X1, X2, ROOT_W, GAP = LP.X1, LP.X2, LP.ROOT_W, LP.GAP
+	local PAD_L, PAD_R = LP.PAD_L, LP.PAD_R
+
 	-- marker id 前缀：与判定链路图用不同前缀（dcst vs dcrt）。
 	--
 	-- 这张图目前只渲染一次，但接口保持一致（第三个参数 id_prefix），
@@ -696,7 +750,7 @@ function D.status_map(rows, summary, id_prefix)
 		'<div class="dc-chain dc-chain--map"><svg viewBox="0 0 %d %d" ' ..
 		'width="%d" height="%d" role="img" ' ..
 		'aria-label="%s">', STATUS_W, H, STATUS_W, H,
-		translate("改道状态思维导图"))
+		esc(translate("改道状态思维导图")))
 	o[#o + 1] = defs(p)
 
 	local x_root_r = X1 + ROOT_W
@@ -760,9 +814,27 @@ function D.status_map(rows, summary, id_prefix)
 		-- 与真实框宽无关 —— 框变宽后仍按旧值折，白白浪费空间）
 		local lines = {}
 		local cur = ""
+		local avail = NW3 - 6
 		for _, nm in ipairs(names) do
+			-- ⚠️ 单个域名本身就超宽时必须硬切（v0.14.4 修 M7）。
+			--
+			--   原实现只在 `cur ~= ""` 时折行，单个 token 超宽时
+			--   无条件接受 → 文字画到 viewBox 外被裁掉。实测：
+			--   cdn.static-resources-for-some-service.eu-central-1.amazonaws.com
+			--   右边界 799 > 760，右侧被裁。而这一列正是导图里唯一的
+			--   「哪些域名出问题」信息，裁掉就看不全。
+			local nm_w = text_w(nm, 11)
+			if nm_w > avail then
+				-- 按字符逐步截断，留出省略号宽度
+				local ell_w = text_w("…", 11)
+				local keep = nm
+				while #keep > 1 and text_w(keep, 11) + ell_w > avail do
+					keep = keep:sub(1, #keep - 1)
+				end
+				nm = keep .. "…"
+			end
 			local cand = (cur == "") and nm or (cur .. "、" .. nm)
-			if text_w(cand, 11) > NW3 - 6 and cur ~= "" then
+			if text_w(cand, 11) > avail and cur ~= "" then
 				lines[#lines + 1] = cur
 				cur = nm
 			else
@@ -801,25 +873,32 @@ end
 
 --- 供几何校验读取的状态图布局
 --
--- ⚠️ 这里的常量必须与 status_map() 的算法一致。
--- 由于框宽/框高现在**按内容计算**，本函数只能给出「给定档位数时的
--- 下界」（假设每档 hint 一行、内容不超 180 宽）。
--- 精确值由 status_map 自己决定；校验脚本用实际渲染出的 SVG 量。
+-- ⚠️ 必须与 status_map() 用**同一套档位与框高算法**（v0.14.4 修）。
+--
+--   原实现有两处口径不一致，导致 CI 的几何断言验的是一个不存在的布局：
+--     ① `for _ in pairs(rows)` 数的是**数据行数**，而 status_map 画的是
+--        **状态档位数**（最多 5 档，且 both-bad 恒占一档）。行数 ≠ 档位数
+--        时必然不等。
+--     ② `NH` 硬编码 60，而 status_map 的 NH 会随 hint 折行数增长
+--        （math.max(NH_MIN, 21+16+max_hint_lines*14+8)）。
+--
+--   实测（5 档各 1 个域名）：status_map 实际 viewBox 高 386，
+--   本函数报 406 —— 差 20px。断言「说明文字不压节点」用的是错值，
+--   即使真把文字压进节点也未必能发现。
+--
+--   现在抽出 layout_plan(rows)，由 status_map 与 status_layout 共用。
 function D.status_layout(rows)
 	rows = rows or {}
-	local present = 0
-	for _ in pairs(rows) do present = present + 1 end
-	if present == 0 then present = 1 end
-
-	local NH, GAP = 60, 12
-	local top = 24
-	local total_h = present * NH + (present - 1) * GAP
+	local plan = layout_plan(rows)
 	return {
 		w = STATUS_W,
-		h = top + total_h + 34,
-		node_h = NH,
-		last_node_bottom = top + total_h,
-		note = top + total_h + 34 - 12,
+		h = plan.H,
+		node_h = plan.NH,
+		last_node_bottom = plan.top + plan.total_h,
+		note = plan.H - 12,
+		-- 供断言核对「档位数」而不是「行数」
+		tiers = #plan.present,
+		rows = plan.n_all,
 	}
 end
 

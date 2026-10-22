@@ -1,7 +1,13 @@
 module("luci.controller.dnschain", package.seeall)
 
+-- 显式 require 而不是依赖 dispatcher 注入的全局 nixio（v0.14.4 修 L9）。
+-- 正常请求路径下 nixio 全局可用，但脱离 dispatcher 的单元测试 /
+-- CLI 环境会抛 attempt to index global 'nixio' (a nil value)，
+-- 而 index() 里没有 pcall，异常会冒到 dispatcher。
+local fs = require "nixio.fs"
+
 function index()
-	if not nixio.fs.access("/etc/config/dnschain") then
+	if not fs.access("/etc/config/dnschain") then
 		return
 	end
 

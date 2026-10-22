@@ -689,12 +689,215 @@ def test_module_translate_import():
                    src3, "translate(")
 
 
+
+def strip_lua_comments(src):
+    """剥掉 Lua 的 -- 行注释与 --[[ ]] 块注释。
+
+    ⚠️ 断言必须基于**真实代码**而非注释（AGENTS §6 第 6 条）。
+    本仓库多次因为「解释错误写法的注释」让断言永久误报。
+    """
+    out = []
+    in_block = False
+    for line in src.splitlines():
+        if in_block:
+            if "]]" in line:
+                in_block = False
+            continue
+        st = line.lstrip()
+        if st.startswith("--[["):
+            if "]]" not in line:
+                in_block = True
+            continue
+        if st.startswith("--"):
+            continue
+        out.append(line)
+    return "\n".join(out)
+
+
+def test_v0144_fixes():
+    """v0.14.4：Lua 层深审修复的回归断言。
+
+    这些断言锁住「已经踩过的坑」，防止后续改动回退。
+    """
+    base = os.path.join(REPO, "package/luci-app-dnschain/luasrc")
+
+    with open(os.path.join(base, "model/cbi/dnschain/dnschain.lua"),
+              encoding="utf-8") as f:
+        d = f.read()
+    with open(os.path.join(base, "model/cbi/dnschain/diagrams.lua"),
+              encoding="utf-8") as f:
+        dg = f.read()
+    with open(os.path.join(base, "model/cbi/dnschain/general.lua"),
+              encoding="utf-8") as f:
+        g = f.read()
+    with open(os.path.join(base, "controller/dnschain.lua"),
+              encoding="utf-8") as f:
+        ctl = f.read()
+
+    # ── S1：selftest 名称切分不能再用 [^—] ──
+    #    Lua 字符类按字节工作，[^—] 会排除 E2/80/94 三个字节，
+    #    导致含「一/上/下」等字的名称解析失败（实测 7/20 失败）。
+    if "split_selftest_name" in d:
+        ok("selftest 名称用字节安全的 split_selftest_name")
+    else:
+        bad("selftest 名称切分", "未找到 split_selftest_name")
+    d_code = strip_lua_comments(d)
+    dg_code = strip_lua_comments(dg)
+    g_code = strip_lua_comments(g)
+
+    if '[^—]' in d_code:
+        bad("selftest 名称切分不再用 [^—]", "仍有 [^—] 字节类")
+    else:
+        ok("selftest 名称切分不再用 [^—]（字节类陷阱）")
+
+    # ── S2：IPv6 端口解析 ──
+    if 'hostport:match("^%[")' in d:
+        ok("upstream_port 单独处理方括号 IPv6")
+    else:
+        bad("upstream_port 单独处理方括号 IPv6", "缺 ^%[ 判断")
+
+    # ── S3：未知 state 归入 unknown ──
+    if "normalize_state" in dg:
+        ok("status_map 用 normalize_state 归一未知状态")
+    else:
+        bad("status_map 归一未知状态", "未找到 normalize_state")
+    if 'r.state or "unknown"' in dg_code:
+        bad("status_map 不再只兜 nil", "仍有 r.state or \"unknown\"")
+    else:
+        ok("status_map 不只兜 nil（空串/未知值也归 unknown）")
+
+    # ── S4：status_layout 与 status_map 共用 layout_plan ──
+    if "local function layout_plan" in dg and "layout_plan(rows)" in dg:
+        ok("status_layout 与 status_map 共用 layout_plan")
+    else:
+        bad("status_layout 共用 layout_plan", "未找到 layout_plan 抽取")
+    if "for _ in pairs(rows) do present" in dg_code:
+        bad("status_layout 不再按行数算档位", "仍有 pairs(rows) 计数")
+    else:
+        ok("status_layout 不按行数算档位（改按档位数）")
+
+    # ── S5：分流条数用 split_server_lines ──
+    if "split_server_lines" in d:
+        ok("list_stats 提供 split_server_lines（真正的 server= 条数）")
+    else:
+        bad("list_stats 提供 split_server_lines", "未找到")
+    if "split_rule_count" in d_code:
+        bad("死函数 split_rule_count 已删除", "仍有定义")
+    else:
+        ok("死函数 split_rule_count 已删除")
+
+    # ── S6：apply 输出全出口解析 ──
+    if "apply_message" in g:
+        ok("apply 结果用 apply_message 统一解析")
+    else:
+        bad("apply 结果统一解析", "未找到 apply_message")
+    for state in ("restarted", "sighup", "unchanged", "skipped"):
+        if '"%s"' % state in g:
+            ok("apply_message 覆盖 %s 出口" % state)
+        else:
+            bad("apply_message 覆盖 %s 出口" % state, "缺该键")
+    if '"✓ " .. translate("已应用")' in g_code:
+        bad("应用按钮不再无条件打 ✓", "仍有硬编码 ✓")
+    else:
+        ok("应用按钮不再无条件打 ✓")
+
+    # ── M1：页面校验与 shell 对齐 ──
+    for marker, name in [
+        ("253", "总长 ≤253"),
+        ("63", "每段 ≤63"),
+        ("每段首尾不能是连字符", "label 首尾非连字符"),
+        ("xn%-%-", "TLD 支持 xn--"),
+    ]:
+        if marker in g:
+            ok("validate_domain 覆盖 %s" % name)
+        else:
+            bad("validate_domain 覆盖 %s" % name, "缺该判据")
+
+    # ── M5：%w 不含下划线 ──
+    if "([%w_]+)=(%d+)" in d:
+        ok("health_summary 用 [%w_] 解析（含下划线键）")
+    else:
+        bad("health_summary 解析含下划线", "仍用 %w+")
+
+    # ── M6：reconcile 结果不再恒 true ──
+    if "local function exec_ok" in d:
+        ok("reconcile/import 结果用 exec_ok 判定")
+    else:
+        bad("reconcile 结果判定", "未找到 exec_ok")
+
+    # ── M7：长域名截断 ──
+    if "text_w(keep, 11) + ell_w > avail" in dg:
+        ok("超长域名按宽硬切并补省略号")
+    else:
+        bad("超长域名硬切", "未找到截断逻辑")
+
+    # ── M8：filter_aaaa 同步检查结果 ──
+    if 'code = "uci_write_failed"' in d:
+        ok("sync_dnsmasq_filter_aaaa 返回结构化错误")
+    else:
+        bad("sync_dnsmasq_filter_aaaa 检查结果", "仍无条件 return true")
+    if 'code = "verify_failed"' in d:
+        ok("filter_aaaa 写后读回校验")
+    else:
+        bad("filter_aaaa 写后读回校验", "未找到 verify_failed")
+
+    # ── L1：判色不再回读译文 ──
+    if 'tone = "bad"' in g_code and 'concl:find("未监听")' not in g_code:
+        ok("链路结论按语义分支判色（不回读译文）")
+    else:
+        bad("链路结论按语义判色", "仍按中文子串判色")
+
+    # ── L2：selftest 表格转义 ──
+    if "dg.esc(it.name" in g and "dg.esc(it.detail" in g:
+        ok("selftest 表格 name/detail 已转义")
+    else:
+        bad("selftest 表格转义", "未套 dg.esc")
+
+    # ── L3：last=0 显示 — ──
+    if 'os.date("%H:%M:%S", r.last)' in g:
+        ok("last=0 不渲染成 08:00:00（显示 —）")
+    else:
+        bad("last=0 处理", "仍用 r.last or 0")
+
+    # ── L4：STATUS_H 死常量已删 ──
+    if "STATUS_H" in dg_code:
+        bad("STATUS_H 死常量已删", "仍有 STATUS_H")
+    else:
+        ok("STATUS_H 死常量已删")
+
+    # ── L5：uptime 假实现已删 ──
+    if "itrealvalue" in d:
+        ok("注释说明为何不再解析 starttime")
+    if "local pid, uptime" in d_code:
+        bad("uptime 死变量已删", "仍有 local pid, uptime")
+    else:
+        ok("uptime 死变量已删")
+
+    # ── L6：check_domains 死函数已删 ──
+    if "function M.check_domains" in d_code:
+        bad("check_domains 死函数已删", "仍有定义")
+    else:
+        ok("check_domains 死函数已删")
+
+    # ── L7：16 项 → 20 项 ──
+    if "16 项检查" in g_code:
+        bad("检查项数文案已更新", "仍有「16 项检查」")
+    else:
+        ok("检查项数文案已更新（16 → 20）")
+
+    # ── L9：controller 显式 require nixio.fs ──
+    if 'require "nixio.fs"' in ctl:
+        ok("controller 显式 require nixio.fs")
+    else:
+        bad("controller 显式 require nixio.fs", "仍依赖全局 nixio")
+
 def main():
     syntax_check()
     test_controller()
     test_model()
     test_general()
     test_module_translate_import()
+    test_v0144_fixes()
 
     print("")
     print("PASS=%d FAIL=%d" % (PASS, FAIL))

@@ -461,6 +461,12 @@ dnsmasq:53（唯一缓存 + 唯一分流层）
 | 43 | **`uci-defaults` 里的 `serversfile` 必须引用库常量 `DNSCHAIN_WATCH_SERVERS`**，不得硬编码 | 原写死 `/var/etc/dnschain/watch.servers`，而库与 init 用 `/var/run/dnsmasq/`。平时 init 会纠正，但服务未启用/`preflight` 失败/首刷后先看页面时 UCI 里就是错路径 → dnsmasq（uid 453）读不到该目录，**既不报错也不生效** | 有（契约 1 条） |
 | 44 | **`dc_run_timeout` 成功路径必须删 `.done` 标记文件** | 原只在入口 `rm -f`，而 `mktemp` 每次新路径 → 入口删不到别人的；成功返回两处又只 `wait`+`echo 0`+`return`。实测每次成功探测泄漏 1 个文件；健康 cycle 一轮约 48 次 × 每 60 秒 → **每天约 7 万个空文件**堆进 tmpfs，最终 `mktemp` 失败 → 探测全 FAIL → 误判双链都挂 | 有 |
 | 45 | **页面配置项必须有 shell 消费者，否则明示「仅作记录」** | 实测 11 个键（`cache.enabled`/`cache.size`/`lists.black_source`/`lists.import_interval`/`selftest.auto_rollback`/`selftest.interval`/`main.intercept_doh`/`foreign.via_proxy`/`foreign.cert_verify`/`aaaa.*`/`ssr.mode`）有 Lua 定义但零消费者 —— 用户改了不生效，且无从察觉。`cache.size` 与 `lists.black_source` 已接上消费者；其余在页面明示「仅作记录」 | 有（契约 1 条） |
+| 46 | **Lua 里禁止用 `[^—]` 这类「排除多字节字符」的字符类**。Lua 字符类按**字节**工作，`[^—]` 实际排除 `E2 80 94` 三个字节 | `—`(U+2014) 的 UTF-8 是 E2 80 94。凡名称含 `一`(E4 B8 80)、`上`、`下` 等第三字节为 0x80 的常用汉字，匹配**直接失败**。实测自检 20 项里 **7 项**解析失败（整行进 name、detail 为空），另有 10 项 name 尾随空格。改用 `find(sep, 1, true)` 字节精确匹配 | 有（lua 断言） |
+| 47 | **URL 端口解析必须先判方括号 IPv6** | `:%[?([0-9]+)%]?$` 对不带端口的 IPv6 字面量会把末段当端口：`https://[2606:4700::1111]/` → `1111`（应 443）、`tls://[2400:3200::1]` → `1`（应 853）。后果：端口校验误拒或误判合规，国外解析静默失败 | 有（lua 断言） |
+| 48 | **图示的未知/空 `state` 必须归入 `unknown` 档，保证行数守恒** | 原 `r.state or "unknown"` 只兜 nil，空串与未知值会落进不在 `STATUS_ORDER` 的键 → `present` 与 `n_all` 都不遍历它 → **域名在导图里凭空消失**，根节点还写「观测 1 个」。实测 3 行进 1 个 | 有（图示断言） |
+| 49 | **`status_layout` 与 `status_map` 必须共用同一套布局计算**（`layout_plan`） | 原两者口径不同：`status_layout` 用 `pairs(rows)` 数**行数**，`status_map` 画**档位数**（最多 5 档，both-bad 恒占一档）；`NH` 也一个硬编码 60、一个随 hint 折行增长。实测 5 档各 1 个域名：实际高 386，报告 406 —— CI 几何断言验的是不存在的布局 | 有（图示断言） |
+| 50 | **「分流规则条数」必须数 `dnschain-split.conf` 的 `server=` 行**，不是 `foreign-split.conf` 的行数 | 后者是「数据库国外 − 自定义国内 − 观测域名」的**纯域名清单**（不含 `server=` 前缀），页面标签「条 server=/域名/」名不副实。实测加 1 个自定义国外域名后：前者 23714、后者 23715，页面数字偏小 | 有（lua 断言） |
+| 51 | **`apply` 的输出必须解析全部 5 条正常出口 + `ERROR=` 失败出口** | `cmd_apply` 出口：`DNSMASQ=restarted/skipped×2/sighup/unchanged` + `ERROR=`。原实现只处理 `restarted`，最常见的 `unchanged`（只改阈值、片段未变）用户点保存后**看不到任何提示**；按钮侧反过来无条件拼 `✓`，`ERROR` 时显示「✓ 已应用」+ 错误正文 | 有（lua 断言） |
 
 **改道判定的一句话规则**：首选链不通、且另一条链通 → 切到另一条。
 两条需求规则（国外不通改直连 / 国内不通改代理）是这同一判定的两个实例，
@@ -471,8 +477,8 @@ dnsmasq:53（唯一缓存 + 唯一分流层）
 
 ```sh
 sh tools/verify-dnschain-domains.sh          # 121 条契约断言
-python3 tools/check-dnschain-lua.py          # 88 条：语法 + 模型 + 真实渲染页面
-python3 tools/render-dnschain-diagrams.py    # 38 条：图示纯几何
+python3 tools/check-dnschain-lua.py          # 121 条：语法 + 模型 + 真实渲染页面
+python3 tools/render-dnschain-diagrams.py    # 44 条：图示纯几何
 python3 tools/extract-dnschain-i18n.py       # 中文文案完整性（缺译会中英混排）
 sh tools/verify-dnschain-ci-sim.sh           # 复现 CI 的目录场景
 ```

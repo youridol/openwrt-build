@@ -207,35 +207,53 @@ function o.cfgvalue()
 	local result = ds.selftest()
 	local concl = result.conclusion
 
+	-- tone 由**语义分支**直接给出，不再回读译文判色（v0.14.4 修 L1）。
+	--
+	-- ⚠️ 原实现用 `concl:find("未监听")` 这类中文子串判色，而 concl 是
+	--    translate() 后的字符串。任何非中文界面下所有分支都不命中 →
+	--    永远绿色徽标。英文界面上「国内 dnsproxy 未监听 —— 客户机全部
+	--    无法解析」会显示成绿色。中文文案微调也会让判色静默失效。
+	local tone
 	if concl == "" then
 		local entry = ds.entry_port()
 		local fport = ds.foreign_port()
 		local fowner = ds.port_owner(fport, "udp")
 		if not ds.port_listening(entry, "udp") then
 			concl = translate("国内 dnsproxy 未监听 —— 客户机全部无法解析")
+			tone = "bad"
 		elseif fowner == "" then
 			concl = translate("国外 dnsproxy 未监听 —— gfw 域名将 SERVFAIL，国内不受影响")
+			tone = "bad"
 		elseif not ds.is_dnsproxy(fowner) then
 			concl = translate("国外端口被其他进程占用 —— gfw 域名会走错解析器")
+			tone = "bad"
 		elseif not ds.port_listening("1234", "tcp") then
 			concl = translate("代理未运行 —— 国外域名将失败（国内不受影响）")
+			tone = "bad"
 		elseif ds.ssr_ipv6() ~= "1" then
 			concl = translate("IPv6 流量代理未开 —— 国外 IPv6 会直连被 RST")
+			tone = "warn"
 		else
 			concl = translate("链路正常")
+			tone = "ok"
 		end
 	end
 
-	-- 结论用徽标表达状态，不再靠颜色语义猜测
-	local cls = "dc-badge--ok"
-	local low = concl:lower()
-	if concl:find("未监听") or concl:find("失败") or concl:find("占用") then
-		cls = "dc-badge--bad"
-	elseif concl:find("未开") or concl:find("SERVFAIL") then
-		cls = "dc-badge--warn"
+	-- concl 来自自检（已翻译好的整句），tone 未知时按关键字兜底一次，
+	-- 但只在拿不到语义分支时才会走到这里。
+	if not tone then
+		local low = concl:lower()
+		if low:find("servfail") or low:find("失败") or low:find("未监听")
+			or low:find("占用") or low:find("failed") or low:find("not listening") then
+			tone = "bad"
+		elseif low:find("未开") or low:find("warn") or low:find("disabled") then
+			tone = "warn"
+		else
+			tone = "ok"
+		end
 	end
 
-	return string.format('<span class="dc-badge %s">%s</span>', cls, concl)
+	return string.format('<span class="dc-badge dc-badge--%s">%s</span>', tone, concl)
 end
 
 -- ── 链路图 ────────────────────────────────────────────────────────
@@ -626,7 +644,11 @@ local function validate_domain(value)
 	-- 空值放行：DynamicList 的「最后一行空输入」是正常的，
 	-- 由 rmempty 负责把它丢掉。这里返回 nil 会被当成「校验失败」，
 	-- 用户就会看到「保存成功但配置没变」这种更难查的现象。
-	if v == "" then return value end
+	-- 空值返回**归一化后**的空串（v0.14.4 修 M2）。
+	-- 原实现 `return value` 返回的是原始输入，若用户输入纯空格，
+	-- 得到 "  " 而非 ""，rmempty 判据不认它为空 → 一个空格串被写进
+	-- UCI list，随后靠 dc_domain_valid 才拦住（页面无提示）。
+	if v == "" then return v end
 
 	if v:find("%s") then
 		return nil, translate("不能含空格：") .. v
@@ -649,6 +671,42 @@ local function validate_domain(value)
 	end
 	if tld:match("^%d+$") then
 		return nil, translate("顶级域不能是纯数字：") .. v
+	end
+
+	-- ── 以下四条与 shell 的 dc_domain_valid 对齐（v0.14.4 修 M1）──
+	--
+	-- ⚠️ 原实现只校验前 5 条，比 dc_domain_valid 少了这 4 条。
+	--    后果：页面放行、写进 UCI，随后 dc_list_normalize 里
+	--    `dc_domain_valid || continue` **静默跳过** —— 该域名不生成分流
+	--    规则、不参与健康检测，而「已录入清单」表格仍显示它（读的是 UCI
+	--    原值）。用户看到「已录入」却完全不生效，且无任何错误。
+	--
+	--    判据必须保证「页面拒绝集合 ⊆ 脚本拒绝集合」，否则必然漂移。
+
+	-- 总长 ≤ 253（DNS 协议上限）
+	if #v > 253 then
+		return nil, translate("总长不能超过 253 个字符：") .. v
+	end
+
+	-- 每个 label ≤ 63，且首尾不能是连字符
+	local label_bad
+	for label in v:gmatch("[^%.]+") do
+		if #label > 63 then
+			label_bad = translate("每段不能超过 63 个字符：") .. label
+			break
+		end
+		if label:sub(1, 1) == "-" or label:sub(-1) == "-" then
+			label_bad = translate("每段首尾不能是连字符：") .. label
+			break
+		end
+	end
+	if label_bad then
+		return nil, label_bad
+	end
+
+	-- 顶级域：xn-- 除外，必须纯字母（shell 侧同此判据）
+	if not tld:match("^xn%-%-") and tld:match("[^a-z]") then
+		return nil, translate("顶级域只能是字母（IDNA 用 xn-- 前缀）：") .. v
 	end
 
 	return v
@@ -713,12 +771,41 @@ function o.cfgvalue()
 	local dom_run = ds.custom_domestic()
 	local for_run = ds.custom_foreign()
 
-	local function badge(n_uci, n_run)
-		if n_uci == n_run then
+	-- 「已生效 / 待应用」徽标
+	--
+	-- ⚠️ 必须比「合法条数」，不能比 UCI 原始 token 数（v0.14.4 修 M4）。
+	--
+	--   原实现左边用 `#list`（`uci -q get` 的原始 token 数），右边用
+	--   `n_run`（规范化 + 校验后的生效条数）。只要列表里有一个非法域名，
+	--   两者**永久不等** —— 用户点了「重建分流规则并生效」、
+	--   custom-domestic.txt 已正确重建，徽标仍显示「待应用（生效 2 条）」，
+	--   反复点应用也永远等不到「已生效」。
+	--
+	--   现在左侧改用与 n_run 同源的「合法条数」，非法项单独用红徽标列出。
+	local function count_valid(list)
+		local n = 0
+		for _, raw in ipairs(list) do
+			if validate_domain(raw) then n = n + 1 end
+		end
+		return n
+	end
+
+	local function badge(list, n_run)
+		local n_valid = count_valid(list)
+		local n_bad = #list - n_valid
+		if n_valid == n_run and n_bad == 0 then
 			return '<span class="dc-badge dc-badge--ok">' .. translate("已生效") .. '</span>'
 		end
-		return '<span class="dc-badge dc-badge--warn">' ..
-			string.format(translate("待应用（生效 %d 条）"), n_run) .. '</span>'
+		local parts = {}
+		if n_valid ~= n_run then
+			parts[#parts + 1] = string.format(translate("待应用（生效 %d 条）"), n_run)
+		end
+		if n_bad > 0 then
+			parts[#parts + 1] = string.format(translate("%d 条格式非法，已跳过"), n_bad)
+		end
+		local tone = (n_bad > 0) and "dc-badge--bad" or "dc-badge--warn"
+		return '<span class="dc-badge ' .. tone .. '">' ..
+			table.concat(parts, " · ") .. '</span>'
 	end
 
 	local function chips(list, tone)
@@ -737,7 +824,7 @@ function o.cfgvalue()
 		return string.format(
 			'<tr><td>%s</td><td class="dc-table__num">%d</td>' ..
 			'<td>%s</td><td>%s</td></tr>',
-			title, #list, badge(#list, n_run), chips(list, tone))
+			title, #list, badge(list, n_run), chips(list, tone))
 	end
 
 	return '<div class="dc-table-wrap"><table class="dc-table"><thead><tr>' ..
@@ -1059,7 +1146,8 @@ function o.cfgvalue()
 			ds_class_label(r["class"]),
 			chain_cell,
 			r.fail or 0,
-			os.date("%H:%M:%S", r.last or 0),
+			-- last=0 表示「从未探测」，不能渲染成 08:00:00（v0.14.4 修 L3）
+			((r.last or 0) > 0 and os.date("%H:%M:%S", r.last) or "—"),
 			STATE_TONE[r.state] or "mute",
 			dg.esc(STATE_LABEL[r.state] or r.state or "—"),
 			dg.esc(r.result or "—"))
@@ -1156,9 +1244,10 @@ o = s:option(Button, "_apply_domains", translate("重建分流规则并生效"),
 		"<br/>与底部「保存」的区别：保存只写配置，本按钮才让改动真正生效。"))
 o.inputstyle = "apply"
 function o.write(self, section)
-	local out = ds.apply_domains()
+	-- 不再无条件拼 ✓（v0.14.4 修 S6）：按实际出口决定符号与文案
+	local ok, out = pcall(ds.apply_domains)
 	ds.invalidate()
-	setmsg("✓ " .. translate("已应用") .. "\n" .. (out or ""))
+	setmsg(apply_message(ok, out) .. "\n" .. tostring(out or ""))
 end
 
 o = s:option(Button, "_cycle_now", translate("立即探测一轮"),
@@ -1214,11 +1303,14 @@ end
 local function validate_upstream(self, value, section)
 	local urls = {}
 	local uci = require "luci.model.uci".cursor()
-	uci:foreach("dnschain", "upstream", function(sec)
-		if sec[".name"] == section then
-			collect_strings(sec.server, urls)
-		end
-	end)
+	-- ⚠️ 只校验**本次输入**，不再合并该 section 的历史值（v0.14.4 修 M3）。
+	--
+	--   原实现把「该 section 已有的全部 server」和「当前这一行的新值」
+	--   合并后整体判定，任一条不合规就整体返回 nil。于是某个上游被判
+	--   端口越界后，该 section 里**每一行**的编辑都会被拒 —— 包括用户
+	--   正想用来替换坏行的那一行，形成死锁，只能绕过页面改 UCI。
+	--
+	--   历史值由「一键归一」与自检负责提示。
 	collect_strings(value, urls)
 
 	local ok, bad = ds.validate_upstreams(urls)
@@ -1333,7 +1425,20 @@ function o.write(self, section, value)
 	-- 会把字面 "%s" 写进 UCI。
 	luci.sys.call("uci -q set shadowsocksr.@global[0].filter_aaaa='" .. v ..
 		"' && uci -q commit shadowsocksr")
-	ds.sync_dnsmasq_filter_aaaa()
+	-- 检查结果并把错误码翻成中文（v0.14.4 修 M8）
+	local ok, info = ds.sync_dnsmasq_filter_aaaa()
+	if not ok and type(info) == "table" then
+		if info.code == "uci_write_failed" then
+			setmsg("✗ " .. translate("写入 dnsmasq.filter_aaaa 失败：") ..
+				tostring(info.detail or ""))
+		elseif info.code == "verify_failed" then
+			setmsg("✗ " .. translate("dnsmasq 重启后 filter_aaaa 仍为 ") ..
+				tostring(info.actual) .. translate("（期望 ") ..
+				tostring(info.target) .. "）")
+		else
+			setmsg("✗ " .. translate("同步 dnsmasq.filter_aaaa 失败"))
+		end
+	end
 end
 
 o = s:option(DummyValue, "_aaaa_why", translate("实际生效值"))
@@ -1352,7 +1457,7 @@ o = s:option(Flag, "filter_https_rr", translate("抑制 HTTPS/SVCB 记录"),
 	translate("qtype 64（SVCB）与 65（HTTPS）可携带 <code>ipv6hint</code>，" ..
 		"客户端能绕过 AAAA 抑制拿到 IPv6 地址。" ..
 		"<br/>v0.10.0 起<b>默认关闭</b>：IPv6 流量代理已把国外 IPv6 送进代理，" ..
-		"不再需要防止 ipv6hint 泄漏。"))
+		"不再需要防止 ipv6hint 泄漏。" .. "<br/><b>注意：此项目前仅作记录，没有运行时消费者</b>（改了不会生效）。"))
 o.rmempty = false
 o.default = "0"
 
@@ -1397,7 +1502,9 @@ s = m:section(TypedSection, "cache", translate("缓存"),
 s.anonymous = true
 s.addremove = false
 
-o = s:option(Flag, "enabled", translate("启用缓存"))
+o = s:option(Flag, "enabled", translate("启用缓存"),
+	translate("缓存由 dnsmasq 承担，实际始终启用 —— 框架不读这个开关。" ..
+		"<br/><b>注意：此项目前仅作记录，没有运行时消费者</b>（改了不会生效）。"))
 o.rmempty = false
 o.default = "1"
 
@@ -1495,7 +1602,9 @@ o = s:option(Flag, "auto_import", translate("自动导入"),
 o.rmempty = false
 o.default = "1"
 
-o = s:option(Value, "import_interval", translate("轮询间隔（秒）"))
+o = s:option(Value, "import_interval", translate("轮询间隔（秒）"),
+	translate("导入只在点「立即归一」时发生，没有定时调度。" ..
+		"<br/><b>注意：此项目前仅作记录，没有运行时消费者</b>（改了不会生效）。"))
 o.datatype = "range(10, 3600)"
 o.default = "60"
 o:depends("auto_import", "1")
@@ -1654,7 +1763,7 @@ end
 ------------------------------------------------------------------------
 
 s = m:section(TypedSection, "selftest", translate("自检"),
-	translate("16 项检查覆盖链路可达性、分流正确性、上游加密、双栈策略、" ..
+	translate("20 项检查覆盖链路可达性、分流正确性、上游加密、双栈策略、" ..
 		"fw4 可加载性与明文旁路。失败自动回滚见下方开关。"))
 s.anonymous = true
 s.addremove = false
@@ -1672,7 +1781,10 @@ function o.cfgvalue()
 			'<tr><td class="dc-table__num">%d</td>' ..
 			'<td><span class="dc-badge %s">%s</span></td>' ..
 			'<td>%s</td><td>%s</td></tr>',
-			it.no or 0, cls, it.status, it.name or "", it.detail or "")
+			-- name/detail 来自脚本 stdout，必须转义（v0.14.4 修 L2）：
+			-- 证据串里可能出现 & 或 <（如 ss_spec&blacklist），
+			-- 不转义会被当实体起始、或吞掉后续文本。
+			it.no or 0, cls, it.status, dg.esc(it.name or ""), dg.esc(it.detail or ""))
 	end
 
 	local fail_n = (result.total or 0) - (result.pass or 0) - (result.skip or 0)
@@ -1709,7 +1821,9 @@ o.rmempty = false
 o.default = "1"
 
 o = s:option(Value, "interval", translate("定时自检间隔（秒）"),
-	translate("0 表示关闭定时自检。"))
+	translate("0 表示关闭定时自检。") ..
+	translate("<br/><b>注意：仓库里没有定时调度</b>（无 cron、无 procd 实例），" ..
+		"自检只在打开本页或点「一键自检」时运行。"))
 o.datatype = "range(0, 86400)"
 o.default = "300"
 
@@ -1805,12 +1919,62 @@ function m.apply_on_parse(...)
 	end
 	local ok, out = pcall(ds.apply_domains)
 	ds.invalidate()
-	if not ok then
-		m.message = translate("应用失败：") .. tostring(out)
-	elseif out and out:find("DNSMASQ=restarted") then
-		m.message = translate("已应用（dnsmasq 已重启，静态片段生效）")
-	end
+	m.message = apply_message(ok, out)
 	return rv
+end
+
+-- 把 dnschain-health apply 的输出翻成一句给用户看的话。
+--
+-- ⚠️ 必须覆盖全部出口（v0.14.4 修 S6）。
+--
+--   `dnschain-health apply` 有 5 条正常出口 + 2 条失败出口：
+--     正常：DNSMASQ=restarted / skipped（框架未启用）/
+--           skipped（无 init.d/dnsmasq）/ sighup（仅观测域名变化）/
+--           unchanged（无变化）
+--     失败：ERROR=生成分流片段失败 / ERROR=生成自定义列表失败
+--
+--   原实现只处理 `restarted` 一条，其余 4 条**不设置任何 message** ——
+--   最常见的场景（只改了阈值、片段未变 → unchanged）用户点「保存并应用」
+--   后看不到任何提示，会反复点。反过来按钮路径无条件拼 `✓`，
+--   ERROR 时显示「✓ 已应用」+ 错误正文，符号与结论矛盾。
+local APPLY_TEXT = {
+	["restarted"] = translate("已应用（dnsmasq 已重启，静态片段生效）"),
+	["sighup"]    = translate("已应用（仅观测域名变化，SIGHUP 已生效，无中断）"),
+	["unchanged"] = translate("配置已保存（分流片段无变化，未重启 dnsmasq）"),
+	["skipped"]   = translate("已保存，但未应用（详见下方说明）"),
+}
+
+function apply_message(ok, out)
+	if not ok then
+		return "✗ " .. translate("应用失败：") .. tostring(out)
+	end
+	out = out or ""
+
+	-- 失败出口优先：输出里出现 ERROR= 就是失败，不管 DNSMASQ= 是什么
+	local err = out:match("ERROR=([^\n]+)")
+	if err then
+		return "✗ " .. translate("应用失败：") .. err
+	end
+
+	-- ⚠️ 不能写 `DNSMASQ=(%S+)`：全角括号不是空白字符，`%S+` 会把
+	--    「skipped（框架未启用）」整段吃掉，导致 state 永远匹配不上
+	--    APPLY_TEXT 的键（实测 skipped 分支返回「✓ 已应用」而不是「!」）。
+	--    这里只取 ASCII 状态词。
+	local state = out:match("DNSMASQ=([%a%-]+)")
+	if not state then
+		-- 没有 DNSMASQ= 也没 ERROR=：脚本输出异常，如实回报
+		return "✗ " .. translate("应用结果不明（脚本无输出）")
+	end
+
+	local base = APPLY_TEXT[state] or translate("已应用")
+	-- skipped 的括号原因要带上，用户才知道为什么没应用
+	if state == "skipped" then
+		local why = out:match("DNSMASQ=skipped（([^）]+)）")
+		if why then
+			return "! " .. base .. "：" .. why
+		end
+	end
+	return "✓ " .. base
 end
 
 return m
