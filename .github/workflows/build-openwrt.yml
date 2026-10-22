@@ -362,6 +362,44 @@ jobs:
             exit 1
           fi
 
+          # 断言链路图是「思维导图」形态（v0.12.5）
+          #
+          # 用户要求：连线要有弧度、不能断链。三个判据：
+          #  ① 必须用贝塞尔 C 指令画分叉（直角折线 H/V 会形成硬拐角，像断链）
+          #  ② 箭头必须按状态色分别定义 —— 只定义一个固定灰色时，
+          #     红/绿连线配灰箭头，看起来像没连上
+          #  ③ 曲线控制点必须满足 c1x <= c2x —— 否则曲线在中间兜回来、
+          #     出现自交扭结（实测踩过：C 415 169, 373 85, 424 85）
+          if grep -q 'd="M %d %d C %d %d, %d %d, %d %d"' "$GEN"; then
+            echo "OK   链路图用贝塞尔 C 指令画分叉"
+          else
+            echo "FAIL 链路图缺少贝塞尔曲线（H/V 直角折线会像断链）" >&2
+            exit 1
+          fi
+
+          nmark=$(grep -c 'marker("dc-a-' "$GEN" || true)
+          if [ "$nmark" -ge 3 ]; then
+            echo "OK   箭头按状态色定义 $nmark 个"
+          else
+            echo "FAIL 箭头只有 $nmark 个（应 >= 3：ok/warn/bad）" >&2
+            exit 1
+          fi
+
+          if grep -q 'local cap = math.floor((x2 - x1) / 2)' "$GEN"; then
+            echo "OK   曲线控制点有交叉保护（dx <= 跨度/2）"
+          else
+            echo "FAIL 曲线缺少控制点交叉保护（会出现自交扭结）" >&2
+            exit 1
+          fi
+
+          # 节点必须有填充 —— fill="none" 时连线会从节点内部透出，看起来像断链
+          if grep -q 'fill="var(--dc-surface)" stroke="%s"' "$GEN"; then
+            echo "OK   节点有填充（连线不会透出）"
+          else
+            echo "FAIL 节点 fill 不是 --dc-surface（连线会透出，像断链）" >&2
+            exit 1
+          fi
+
       - name: Fetch luci-theme-shadcn (默认 LuCI 主题)
         working-directory: lede
         run: |

@@ -235,57 +235,114 @@ function o.cfgvalue()
 		return alive and "var(--dc-ok)" or "var(--dc-bad)"
 	end
 
-	-- ── 画布与节点几何 ────────────────────────────────────────────
+	-- ── 思维导图布局 ──────────────────────────────────────────────
 	--
-	-- 坐标系是固定的 viewBox（SVG 会自动缩放适应容器），所以这里的
-	-- 数字只需保证「所有节点完整落在 viewBox 内」，不必跟随容器宽度。
+	-- 结构：左起单主干，在 dnsmasq 处一分为二（国内 / 国外两支），
+	-- 之后各支再向右延伸。这正是实际的解析路径。
 	--
-	-- ⚠️ 最右一列的右边缘必须留出边距（v0.12.3 修）：
+	--        ┌─ dnsproxy国内 ── 国内上游
+	-- LAN ─ dnsmasq ─┤
+	--        └─ dnsproxy国外 ── SSR-Plus ── 国外上游
 	--
-	--   最右节点 x = X4 + NW + GAP = 700 + 128 + 88 = 916
-	--   右边缘     = 916 + NW = 916 + 128 = 1044
-	--   viewBox 宽 = W = 1060，留 16px 边距
+	-- 连线全部用三次贝塞尔（C 指令）：
+	--   v0.12.5 之前用直角折线（H V H），分叉处是硬拐角，视觉上像
+	--   「断链」；改成贝塞尔后曲率连续，从节点边缘平滑出发。
 	--
-	-- v0.12.2 及之前是 X4 + NW + 96 = 924，右边缘 1052 > W(1040) ——
-	-- 「国外上游」节点被 viewBox 裁掉 12px，在窄视口下实测超出卡片
-	-- 内容区 8px（卡片 padding 16px，SVG 被 max-width 撑满时按比例放大）。
-	-- 改坐标后必须同步 W，二者是绑定的。
-	local W, H = 1060, 356
+	-- ⚠️ 几何约束（改坐标必须同步改 W，CI 有断言）：
+	--   最右节点 x = X5 = X4 + NW + GAP
+	--   右边缘     = X5 + NW
+	--   viewBox 宽 = W 必须 > 右边缘，留出边距
+	--
+	-- 列间距的取舍（v0.12.5）：
+	--   dnsmasq 到 dnsproxy 那一列必须留出足够水平空间，否则分叉曲线
+	--   的控制点无处安放（dx 上限 = 跨度/2），只能画成近乎垂直的折线。
+	--   实测 X2→X3 从 188 拉到 216 后，曲线才有明显弧度。
+	local W, H = 1120, 372
 	local NW, NH = 128, 54
-	local X1, X2, X3, X4 = 12, 236, 424, 700
-	local GAP = 88              -- 第 4 列到最右节点的水平间距
-	local X5 = X4 + NW + GAP    -- 最右节点（国外上游）
-	local YT, YB = 52, 216
+	local X1, X2, X3, X4 = 12, 228, 444, 720
+	local GAP = 88
+	local X5 = X4 + NW + GAP
+	local YT, YB = 58, 226
+
+	-- 各节点的垂直中心
+	local YC = (YT + YB) / 2 + NH / 2   -- 主干中线
+	local YTC = YT + NH / 2
+	local YBC = YB + NH / 2
 
 	local p = {}
 	p[#p + 1] = string.format(
 		'<div class="dc-chain"><svg viewBox="0 0 %d %d" role="img" aria-label="%s">',
 		W, H, translate("DNS 解析链路图"))
 
-	p[#p + 1] = string.format(
-		'<defs><marker id="dca" viewBox="0 0 10 10" refX="9" refY="5" ' ..
-		'markerWidth="7" markerHeight="7" orient="auto-start-reverse">' ..
-		'<path d="M 0 0 L 10 5 L 0 10 z" fill="%s"/></marker></defs>',
-		"var(--dc-border)")
-
-	local function line(x1, y1, x2, y2, color)
+	-- 箭头标记：按状态色各定义一个。
+	-- 不能只定义一个固定灰色 —— 那样红/绿连线配灰箭头，看起来像没连上。
+	local function marker(id, color)
 		return string.format(
-			'<path d="M %d %d L %d %d" stroke="%s" stroke-width="2" fill="none" ' ..
-			'marker-end="url(#dca)"/>', x1, y1, x2, y2, color)
+			'<marker id="%s" viewBox="0 0 10 10" refX="9" refY="5" ' ..
+			'markerWidth="7" markerHeight="7" orient="auto-start-reverse">' ..
+			'<path d="M 0 0 L 10 5 L 0 10 z" fill="%s"/></marker>', id, color)
+	end
+	p[#p + 1] = '<defs>' ..
+		marker("dc-a-ok", "var(--dc-ok)") ..
+		marker("dc-a-warn", "var(--dc-warn)") ..
+		marker("dc-a-bad", "var(--dc-bad)") ..
+		'</defs>'
+
+	--- 按状态色选箭头 id
+	local function arrow(color)
+		if color == "var(--dc-warn)" then return "url(#dc-a-warn)" end
+		if color == "var(--dc-bad)" then return "url(#dc-a-bad)" end
+		return "url(#dc-a-ok)"
 	end
 
-	local function elbow(x1, y1, xm, x2, y2, color)
+	--- 水平连线（两端节点垂直对齐时用）
+	--
+	-- 思维导图风格：轻微下沉的弧线，比直线更有「生长感」，
+	-- 同时保持两端水平相接（起止切线水平，不会在节点边缘留缝）。
+	local function hline(x1, x2, y, color)
+		local mid = math.floor((x1 + x2) / 2)
+		local dip = 3   -- 中点下沉像素
 		return string.format(
-			'<path d="M %d %d H %d V %d H %d" stroke="%s" stroke-width="2" ' ..
-			'fill="none" marker-end="url(#dca)"/>', x1, y1, xm, y2, x2, color)
+			'<path d="M %d %d Q %d %d, %d %d" stroke="%s" stroke-width="2.5" ' ..
+			'fill="none" stroke-linecap="round" marker-end="%s"/>',
+			x1, y, mid, y + dip, x2, y, color, arrow(color))
+	end
+
+	--- 贝塞尔连线：从 (x1,y1) 平滑过渡到 (x2,y2)
+	--
+	-- 控制点取「水平各伸出 dx」的位置，形成 S 形。
+	--
+	-- ⚠️ dx 有硬上限 (x2-x1)/2（v0.12.5 修）：
+	--   控制点必须满足 x1+dx <= x2-dx，否则第二控制点跑到第一控制点
+	--   左边，曲线在中间兜回来、出现自交的 S 扭结 —— 看起来就是「断链」。
+	--   实测踩过：dx=51 而 (x2-x1)/2=30，生成
+	--     C 415 169, 373 85, 424 85    ← 415 > 373，扭结
+	--
+	-- 取值优先级：
+	--   理想值 = 垂直落差 × 0.62（让起点切线约 30°，弧度明显且平滑）
+	--   上限   = (x2-x1)/2（保证控制点不交叉）
+	local function curve(x1, y1, x2, y2, color)
+		local dy = math.abs(y2 - y1)
+		local dx = math.floor(dy * 0.62)
+		local cap = math.floor((x2 - x1) / 2)
+		if dx > cap then dx = cap end
+		if dx < 6 then dx = 6 end
+		return string.format(
+			'<path d="M %d %d C %d %d, %d %d, %d %d" stroke="%s" ' ..
+			'stroke-width="2.5" fill="none" stroke-linecap="round" ' ..
+			'marker-end="%s"/>',
+			x1, y1, x1 + dx, y1, x2 - dx, y2, x2, y2, color, arrow(color))
 	end
 
 	-- 节点：状态点 + 标题 + 副标题 + 说明
+	--
+	-- 填充用 --dc-surface 而不是 none：连线画在节点下层，
+	-- 无填充时线会从节点内部透出来，看起来像「断链」。
 	local function node(x, y, title, sub, alive, note)
 		local col = c(alive)
 		local s2 = string.format(
-			'<g><rect x="%d" y="%d" width="%d" height="%d" rx="8" fill="none" ' ..
-			'stroke="%s" stroke-width="2"/>' ..
+			'<g><rect x="%d" y="%d" width="%d" height="%d" rx="9" ' ..
+			'fill="var(--dc-surface)" stroke="%s" stroke-width="2"/>' ..
 			'<circle cx="%d" cy="%d" r="4" fill="%s"/>' ..
 			'<text x="%d" y="%d" font-size="13" font-weight="600" fill="%s">%s</text>' ..
 			'<text x="%d" y="%d" font-size="11" fill="%s" opacity="0.72">%s</text>',
@@ -307,23 +364,37 @@ function o.cfgvalue()
 			x, y, "currentColor", anchor and (' text-anchor="' .. anchor .. '"') or "", txt)
 	end
 
-	-- 连线（先画，节点压在上层）
-	p[#p + 1] = line(X1 + NW, (YT + YB) / 2 + NH / 2, X2, (YT + YB) / 2 + NH / 2,
-		c(sn.dnsmasq))
-	p[#p + 1] = elbow(X2 + NW, YT + NH / 2, X2 + NW + 26, X3, YT + NH / 2,
-		c(sn.dnsproxy_cn))
-	p[#p + 1] = elbow(X2 + NW, YB + NH / 2, X2 + NW + 26, X3, YB + NH / 2,
-		c(sn.dnsproxy_fg))
-	p[#p + 1] = line(X3 + NW, YT + NH / 2, X4, YT + NH / 2, c(sn.dnsproxy_cn))
-	p[#p + 1] = line(X3 + NW, YB + NH / 2, X4, YB + NH / 2,
-		c(sn.dnsproxy_fg and sn.proxy_1234))
-	p[#p + 1] = line(X4 + NW, YB + NH / 2, X5, YB + NH / 2,
-		c(sn.proxy_1234 and sn.dnsproxy_fg))
+	-- ── 连线（先画，节点压在上层）──────────────────────────────────
+	--
+	-- 每条线都从「上一节点的右边缘」到「下一节点的左边缘」，
+	-- 不留缝隙 —— 这是「不能断链」的关键。
+	local cn_col = c(sn.dnsproxy_cn)
+	local fg_col = c(sn.dnsproxy_fg)
+	local proxy_col = c(sn.proxy_1234)
+	local main_col = c(sn.dnsmasq)
 
-	-- 节点
-	p[#p + 1] = node(X1, (YT + YB) / 2, translate("LAN 客户机"),
+	-- 主干：LAN → dnsmasq
+	p[#p + 1] = hline(X1 + NW, X2, YC, main_col)
+
+	-- 分叉：dnsmasq → 两个 dnsproxy
+	--
+	-- 两条曲线都从 dnsmasq 右缘**同一点**（YC）出发 —— 这是思维导图的
+	-- 关键：从主干上一点放射出多条支线，而不是从两个错开的点各发一条
+	-- （错开会在节点边缘形成一个小尖角，看起来像没接上）。
+	p[#p + 1] = curve(X2 + NW, YC, X3, YTC, cn_col)
+	p[#p + 1] = curve(X2 + NW, YC, X3, YBC, fg_col)
+
+	-- 上支：dnsproxy国内 → 国内上游
+	p[#p + 1] = hline(X3 + NW, X4, YTC, cn_col)
+
+	-- 下支：dnsproxy国外 → SSR-Plus → 国外上游
+	p[#p + 1] = hline(X3 + NW, X4, YBC, fg_col)
+	p[#p + 1] = hline(X4 + NW, X5, YBC, proxy_col)
+
+	-- ── 节点 ──────────────────────────────────────────────────────
+	p[#p + 1] = node(X1, YC - NH / 2, translate("LAN 客户机"),
 		translate("DHCP 下发"), true, nil)
-	p[#p + 1] = node(X2, (YT + YB) / 2, "dnsmasq", ":53",
+	p[#p + 1] = node(X2, YC - NH / 2, "dnsmasq", ":53",
 		sn.dnsmasq, sn.dnsmasq and translate("缓存 + 分流") or translate("未监听"))
 	p[#p + 1] = node(X3, YT, translate("dnsproxy 国内"), ":" .. sn.entry_port,
 		sn.dnsproxy_cn, translate("阿里 DoT/DoH"))
@@ -336,12 +407,25 @@ function o.cfgvalue()
 	p[#p + 1] = node(X5, YB, translate("国外上游"), translate("经代理"),
 		sn.proxy_1234 and sn.dnsproxy_fg, translate("dns.google"))
 
-	-- 分流标注（放在折线旁，不压线）
-	p[#p + 1] = label(X2 + NW + 6, YT + NH / 2 - 8, translate("默认"))
-	p[#p + 1] = label(X2 + NW + 6, YB + NH / 2 + 16, translate("gfw 域名"))
+	-- 分叉标注
+	--
+	-- 分叉处水平只有 60px（X2+NW=364 到 X3=424）、垂直落差 84px，
+	-- 空间很窄 —— 标签放进去必然压线（实测「默认」直接盖在曲线上）。
+	--
+	-- 改放在两个 dnsproxy 节点的**上方/下方空白区**，用短引线指到曲线，
+	-- 既清晰又不遮挡连线。
+	local function forkLabel(x, y, txt, anchor)
+		return string.format(
+			'<text x="%d" y="%d" font-size="10" fill="%s" opacity="0.7"%s>%s</text>',
+			x, y, "currentColor", anchor and (' text-anchor="' .. anchor .. '"') or "", txt)
+	end
+	-- 「默认」在 dnsproxy 国内 上方
+	p[#p + 1] = forkLabel(X3, YT - 10, translate("默认 → 国内上游"), "start")
+	-- 「gfw 域名」在 dnsproxy 国外 下方
+	p[#p + 1] = forkLabel(X3, YB + NH + 18, translate("gfw 域名 → 经代理出站"), "start")
 
-	-- 底部：nftset 入集说明
-	p[#p + 1] = label(X1 + 4, H - 22,
+	-- 底部说明
+	p[#p + 1] = label(X1 + 2, H - 16,
 		translate("国外域名解析结果经 nftset 写入 blacklist → 流量进 :1234"))
 
 	p[#p + 1] = '</svg></div>'

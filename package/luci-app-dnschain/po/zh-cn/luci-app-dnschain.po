@@ -832,3 +832,9 @@ msgstr "更新 GFW 名单"
 
 msgid "发送 SIGHUP 清空 dnsmasq 缓存：进程不重启、客户机无感知。「清空指定域名」做不到 —— dnsmasq 与 dnsproxy 都没有按域名淘汰单条缓存的接口。"
 msgstr "发送 SIGHUP 清空 dnsmasq 缓存：进程不重启、客户机无感知。「清空指定域名」做不到 —— dnsmasq 与 dnsproxy 都没有按域名淘汰单条缓存的接口。"
+
+msgid "默认 → 国内上游"
+msgstr "默认 → 国内上游"
+
+msgid "gfw 域名 → 经代理出站"
+msgstr "gfw 域名 → 经代理出站"
