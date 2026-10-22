@@ -139,6 +139,143 @@ end
 -- 三行文字：标题 / 副标题 / 说明（说明可选，需要 h >= 54）。
 -- 左侧一个小圆点表状态色 —— 扫一眼就能看出哪一段是红的。
 -----------------------------------------------------------------------
+-----------------------------------------------------------------------
+-- 文本宽度估算
+--
+-- 为什么必须自己算：SVG 的 <text> 不会自动换行，也不会把框撑大 ——
+-- 文字超宽就直接画到框外（视觉上「内容超出边界」），
+-- 或被后续节点盖住（视觉上「内容显示不全」）。
+-- 而 Lua 侧拿不到真实字体度量（无 Canvas），只能按字符宽度估。
+--
+-- 估算规则：
+--   · CJK（含全角标点、中文）按 1.0 em
+--   · ASCII 按 0.55 em（13px 字号下实测 Helvetica/系统无衬线约 0.5~0.6）
+--   · 其余（西里尔、希腊等）按 0.6 em
+-- 偏保守（宁大不小）：估小了会溢出，估大了只是多留白。
+-----------------------------------------------------------------------
+-----------------------------------------------------------------------
+-- UTF-8 迭代兼容层
+--
+-- ⚠️ LuCI 在 OpenWrt 上跑的是 **Lua 5.1**，没有 `utf8` 库
+-- （`utf8.codes` / `utf8.codepoint` 是 5.3+ 才有）。
+-- 本地 lupa 测试环境可能是 5.4，于是「本地过、路由器炸」。
+-- 这里自带实现，不依赖标准库版本。
+-----------------------------------------------------------------------
+local function utf8_iter(s)
+	local i = 1
+	local n = #s
+	return function()
+		if i > n then return nil end
+		local b = s:byte(i)
+		local len = 1
+		if b >= 0xF0 then len = 4
+		elseif b >= 0xE0 then len = 3
+		elseif b >= 0xC0 then len = 2 end
+		if i + len - 1 > n then len = 1 end
+		local bytes = { s:byte(i, i + len - 1) }
+		local cp
+		if len == 1 then
+			cp = bytes[1]
+		elseif len == 2 then
+			cp = (bytes[1] - 0xC0) * 0x40 + (bytes[2] - 0x80)
+		elseif len == 3 then
+			cp = (bytes[1] - 0xE0) * 0x1000 + (bytes[2] - 0x80) * 0x40 + (bytes[3] - 0x80)
+		else
+			cp = (bytes[1] - 0xF0) * 0x40000 + (bytes[2] - 0x80) * 0x1000
+				+ (bytes[3] - 0x80) * 0x40 + (bytes[4] - 0x80)
+		end
+		local start = i
+		i = i + len
+		return cp, s:sub(start, start + len - 1), len
+	end
+end
+
+local function char_em(cp)
+	if cp >= 0x1100 and (
+		cp <= 0x115F or            -- Hangul Jamo
+		cp == 0x2329 or cp == 0x232A or
+		(cp >= 0x2E80 and cp <= 0xA4CF) or   -- CJK Radicals … Yi
+		(cp >= 0xAC00 and cp <= 0xD7A3) or   -- Hangul Syllables
+		(cp >= 0xF900 and cp <= 0xFAFF) or   -- CJK Compatibility Ideographs
+		(cp >= 0xFE30 and cp <= 0xFE6F) or   -- CJK Compatibility Forms
+		(cp >= 0xFF00 and cp <= 0xFF60) or   -- Fullwidth Forms
+		(cp >= 0xFFE0 and cp <= 0xFFE6) or
+		(cp >= 0x20000 and cp <= 0x3FFFD)    -- CJK Ext
+	) then
+		return 1.0
+	elseif cp < 0x80 then
+		return 0.55
+	end
+	return 0.6
+end
+
+--- 估算字符串在给定字号下的像素宽度
+local function text_w(s, size)
+	local total = 0
+	for cp in utf8_iter(s) do
+		total = total + char_em(cp)
+	end
+	return math.ceil(total * size)
+end
+
+--- 按像素宽度折行（SVG <text> 不会自动换行，只能自己切）
+--
+-- 返回若干行。优先在「、」「，」「 」「→」后断开，避免把词切碎。
+--
+-- 实现要点（踩过的坑）：
+--   · 不能边累加边在「超宽」时回退 —— 若断点位置在行首，回退会产出
+--     空行。故这里改成**两阶段**：先累积到超宽，再在累积串里找
+--     最后一个断点切分；找不到断点才硬切。
+--   · `cur_w` 必须与 `cur` 严格同步。早期版本用 while 循环残留了
+--     `i = i + len`（for 循环里 i 未定义），导致 len 恒为 nil、
+--     断点判断失效 → 永不折行。
+local function wrap_text(s, size, max_w)
+	if s == nil or s == "" then return {} end
+	if max_w <= 0 then return { s } end
+	if text_w(s, size) <= max_w then return { s } end
+
+	-- 断点字符：在这些字符**之后**可以断行
+	local function is_break(ch)
+		return ch == "、" or ch == "，" or ch == " " or ch == "→"
+			or ch == "；" or ch == "·" or ch == "/" or ch == "," 
+	end
+
+	local lines = {}
+	local cur = ""
+	local cur_w = 0
+
+	for cp, ch, len in utf8_iter(s) do
+		local w = char_em(cp) * size
+
+		-- 加进来会超宽 → 先把 cur 断行
+		if cur ~= "" and cur_w + w > max_w then
+			-- 在 cur 里找最后一个断点
+			local cut = nil
+			local acc_w = 0
+			local pos = 0
+			for ccp, cch, clen in utf8_iter(cur) do
+				acc_w = acc_w + char_em(ccp) * size
+				pos = pos + clen
+				if is_break(cch) then cut = pos end
+			end
+			if cut and cut > 0 and cut < #cur then
+				lines[#lines + 1] = cur:sub(1, cut)
+				cur = cur:sub(cut + 1)
+			else
+				lines[#lines + 1] = cur
+				cur = ""
+			end
+			cur_w = text_w(cur, size)
+		end
+
+		cur = cur .. ch
+		cur_w = cur_w + w
+	end
+
+	if cur ~= "" then lines[#lines + 1] = cur end
+	return lines
+end
+
 local function box(x, y, w, h, title, sub, note, tone)
 	local col = C[tone or "ok"]
 	local out = {
@@ -162,6 +299,22 @@ local function box(x, y, w, h, title, sub, note, tone)
 			x + 24, y + 51, esc(note))
 	end
 	out[#out + 1] = "</g>"
+	return table.concat(out)
+end
+
+--- 多行文本节点（框内用，自动折行）
+--
+-- 与 box() 的区别：box 的三行是「标题/副标题/提示」固定结构，
+-- 这里是把**一段长文本**折成多行，用于 hint 这类会超宽的说明。
+local function box_lines(x, y, w, lines, size, opacity, color, weight)
+	local out = {}
+	for i, ln in ipairs(lines) do
+		out[#out + 1] = string.format(
+			'<text x="%d" y="%d" font-size="%d"%s fill="%s" opacity="%s">%s</text>',
+			x, y + (i - 1) * math.floor(size * 1.35), size,
+			weight and (' font-weight="' .. weight .. '"') or "",
+			color or "currentColor", opacity or "0.72", esc(ln))
+	end
 	return table.concat(out)
 end
 
@@ -437,14 +590,71 @@ function D.status_map(rows, summary)
 	end
 	if #present == 0 then present = { "unknown" } end
 
-	-- NH 取 60 而不是 56：状态节点是三行文字（标题 13px / 计数 11px /
-	-- 提示 10px），基线分别在 y+21 / y+37 / y+51，三行字的下沿约在 y+53。
-	-- 56 高的框只剩 3px —— 浏览器实测贴得很紧，视觉上像溢出。
-	-- 60 给到 7px，与左右内边距（12px）比例协调。
-	local NH, GAP = 60, 12
-	local X1, X2, X3 = 14, 190, 400
-	local NW2 = 180
-	local NW3 = 336
+	-- ── 布局参数 ──────────────────────────────────────────────────────
+	--
+	-- ⚠️ 框宽不能写死（v0.13.1 实测修正）。
+	--
+	-- 原实现 NW2=180 硬编码，而 hint 最长的是
+	-- 「自动切到另一条链，恢复后会自动回切」（19 个全角字符 ≈ 190px），
+	-- 框内容区只有 180-24-12 = 144px → 文字画到框外 20px。
+	-- 浏览器实测：`两条链都不通 → 先查 dnsproxy 与代理` right=390，
+	-- 而框右缘 370 —— 溢出 20px，看起来就是「内容超出边界」。
+	--
+	-- 现在改成：先按**最长一行文本**算出需要的框宽，再取整。
+	-- hint 仍然会折行（三行结构不能无限加宽），
+	-- 但框宽保证容得下折行后的每一行。
+	local NH_MIN = 60
+	local GAP = 12
+	local X1 = 14
+	local ROOT_W = 150
+	local X2 = X1 + ROOT_W + 26
+
+	-- 折行宽度上限：hint 在 10px 字号下最多占这么宽
+	--
+	-- 取 168 而不是 210 的理由：
+	--   210 时最长的 hint（「自动切到另一条链，恢复后会自动回切」≈190px）
+	--   仍能一行放下 → 框被撑到 219px 宽，而右侧域名清单只剩
+	--   760-219-40 = 501px。清单里最长的一行（两个长域名 + 箭头）
+	--   反而更挤。**把宽度预算留给清单**：hint 是说明性文字，
+	--   折成两行不损失信息；清单是主数据，挤了就得截断。
+	local HINT_MAX_W = 168
+	-- 框内容区左右内边距：左 24（避让圆点）、右 12
+	local PAD_L, PAD_R = 24, 12
+
+	-- 预计算每个状态的 hint 折行结果与所需宽度
+	local plan = {}
+	local max_inner = 0
+	for _, st in ipairs(present) do
+		local meta = STATUS_META[st] or STATUS_META["unknown"]
+		local hint_lines = wrap_text(meta.hint, 10, HINT_MAX_W)
+		local need = 0
+		-- 标题（13px 粗体）
+		need = math.max(need, text_w(meta.title, 13))
+		-- 计数（11px）
+		need = math.max(need, text_w(string.format(translate("%d 个域名"),
+			#groups[st]), 11))
+		-- hint 每行（10px）
+		for _, ln in ipairs(hint_lines) do
+			need = math.max(need, text_w(ln, 10))
+		end
+		if need > max_inner then max_inner = need end
+		plan[st] = { meta = meta, hint_lines = hint_lines, need = need }
+	end
+
+	-- 框宽 = 内边距 + 最长内容；下限 180 保持视觉均衡
+	local NW2 = math.max(180, max_inner + PAD_L + PAD_R)
+
+	-- 框高随 hint 行数增长（三行结构：标题 / 计数 / hint…）
+	local max_hint_lines = 1
+	for _, st in ipairs(present) do
+		local n = #plan[st].hint_lines
+		if n > max_hint_lines then max_hint_lines = n end
+	end
+	-- 21(标题基线) + 16(计数) + 行数*14 + 底部留白
+	local NH = math.max(NH_MIN, 21 + 16 + max_hint_lines * 14 + 8)
+
+	local X3 = X2 + NW2 + 26
+	local NW3 = STATUS_W - X3 - 14
 
 	local total_h = #present * NH + (#present - 1) * GAP
 	local top = 24
@@ -462,23 +672,21 @@ function D.status_map(rows, summary)
 		translate("改道状态思维导图"))
 	o[#o + 1] = defs(p)
 
-	local x_root_r = X1 + 150
+	local x_root_r = X1 + ROOT_W
 	local x2_r = X2 + NW2
 
 	-- 根 → 各状态
 	for i, st in ipairs(present) do
 		local y = top + (i - 1) * (NH + GAP)
-		local meta = STATUS_META[st] or STATUS_META["unknown"]
 		o[#o + 1] = curve(x_root_r, root_y + math.floor(NH / 2),
-			X2, y + math.floor(NH / 2), meta.tone, p)
+			X2, y + math.floor(NH / 2), plan[st].meta.tone, p)
 	end
 
 	-- 状态 → 域名清单
 	for i, st in ipairs(present) do
 		local y = top + (i - 1) * (NH + GAP)
-		local meta = STATUS_META[st] or STATUS_META["unknown"]
 		o[#o + 1] = curve(x2_r, y + math.floor(NH / 2),
-			X3, y + math.floor(NH / 2), meta.tone, p)
+			X3, y + math.floor(NH / 2), plan[st].meta.tone, p)
 	end
 
 	-- 根节点
@@ -491,18 +699,24 @@ function D.status_map(rows, summary)
 		root_tone = "warn"
 	end
 
-	o[#o + 1] = box(X1, root_y, 150, NH, translate("改道状态"),
+	o[#o + 1] = box(X1, root_y, ROOT_W, NH, translate("改道状态"),
 		string.format(translate("观测 %d 个"), n_all), nil, root_tone)
 
 	-- 状态节点 + 域名清单
 	for i, st in ipairs(present) do
 		local y = top + (i - 1) * (NH + GAP)
-		local meta = STATUS_META[st] or STATUS_META["unknown"]
+		local pl = plan[st]
+		local meta = pl.meta
 		local list = groups[st]
 		local n = #list
 
+		-- 标题 + 计数（用 box 的两行结构，hint 单独折行画）
 		o[#o + 1] = box(X2, y, NW2, NH, meta.title,
-			string.format(translate("%d 个域名"), n), meta.hint, meta.tone)
+			string.format(translate("%d 个域名"), n), nil, meta.tone)
+
+		-- hint：折行后画在第三行位置起
+		o[#o + 1] = box_lines(X2 + PAD_L, y + 51, NW2 - PAD_L - PAD_R,
+			pl.hint_lines, 10, "0.55", nil, nil)
 
 		-- 域名清单：每行最多 2 个（等宽计算不了，用长度估算），最多 3 行
 		local names = {}
@@ -515,16 +729,13 @@ function D.status_map(rows, summary)
 			names[#names + 1] = tag
 		end
 
+		-- 按 NW3 的实际像素宽度折行（原来是硬编码「52 个单位」，
+		-- 与真实框宽无关 —— 框变宽后仍按旧值折，白白浪费空间）
 		local lines = {}
 		local cur = ""
 		for _, nm in ipairs(names) do
 			local cand = (cur == "") and nm or (cur .. "、" .. nm)
-			-- 估算：中文按 2 个宽度单位，ASCII 按 1 个；一行 52 单位
-			local w = 0
-			for c in cand:gmatch("[%z\1-\127\194-\244][\128-\191]*") do
-				w = w + (#c > 1 and 2 or 1)
-			end
-			if w > 52 and cur ~= "" then
+			if text_w(cand, 11) > NW3 - 6 and cur ~= "" then
 				lines[#lines + 1] = cur
 				cur = nm
 			else
@@ -534,19 +745,16 @@ function D.status_map(rows, summary)
 		if cur ~= "" then lines[#lines + 1] = cur end
 
 		local shown = {}
-		for k = 1, math.min(#lines, 3) do shown[#shown + 1] = lines[k] end
-		if #lines > 3 then
-			shown[#shown + 1] = string.format(translate("…等 %d 个"), n)
+		local max_lines = math.max(1, math.floor((NH - 8) / 14))
+		for k = 1, math.min(#lines, max_lines) do shown[#shown + 1] = lines[k] end
+		if #lines > max_lines then
+			shown[#shown] = string.format(translate("…等 %d 个"), n)
 		end
 
-		local ty = y + 20
 		if #shown == 0 then
 			o[#o + 1] = label(X3 + 6, y + 30, translate("（无）"), "mute", 11, "0.5")
 		else
-			for _, ln in ipairs(shown) do
-				o[#o + 1] = label(X3 + 6, ty, ln, nil, 11, "0.8")
-				ty = ty + 14
-			end
+			o[#o + 1] = box_lines(X3 + 6, y + 20, NW3 - 6, shown, 11, "0.8", nil, nil)
 		end
 	end
 
@@ -566,15 +774,14 @@ end
 
 --- 供几何校验读取的状态图布局
 --
--- ⚠️ NH/GAP/top 必须与 status_map() 里的字面值一致。
--- 这是本模块唯一一处「两处写同一组常量」的地方，改成共享 local 会让
--- status_map 与它耦合（后者是纯渲染、不该被测试工具反向依赖）。
--- 故在 CI 断言里校验两处一致，而不是靠人记。
+-- ⚠️ 这里的常量必须与 status_map() 的算法一致。
+-- 由于框宽/框高现在**按内容计算**，本函数只能给出「给定档位数时的
+-- 下界」（假设每档 hint 一行、内容不超 180 宽）。
+-- 精确值由 status_map 自己决定；校验脚本用实际渲染出的 SVG 量。
 function D.status_layout(rows)
 	rows = rows or {}
 	local present = 0
 	for _ in pairs(rows) do present = present + 1 end
-	-- 至少一档（both-bad 恒在）
 	if present == 0 then present = 1 end
 
 	local NH, GAP = 60, 12

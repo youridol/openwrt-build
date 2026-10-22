@@ -274,6 +274,123 @@ def check_intrinsic_size(name, svg):
             "CSS width:auto 会回落到 100%，图被放大到容器宽度")
 
 
+def est_text_px(s, size):
+    """按与 diagrams.lua 相同的规则估算文本像素宽度。
+
+    规则必须两边一致，否则断言与真实渲染会各说各话：
+      CJK/全角 1.0em，ASCII 0.55em，其余 0.6em。
+    """
+    total = 0.0
+    for ch in s:
+        cp = ord(ch)
+        if (0x1100 <= cp <= 0x115F or cp in (0x2329, 0x232A)
+                or 0x2E80 <= cp <= 0xA4CF or 0xAC00 <= cp <= 0xD7A3
+                or 0xF900 <= cp <= 0xFAFF or 0xFE30 <= cp <= 0xFE6F
+                or 0xFF00 <= cp <= 0xFF60 or 0xFFE0 <= cp <= 0xFFE6
+                or 0x20000 <= cp <= 0x3FFFD):
+            total += 1.0
+        elif cp < 0x80:
+            total += 0.55
+        else:
+            total += 0.6
+    return total * size
+
+
+def check_text_inside_boxes(name, svg):
+    """框内每一行文字都必须落在框的可用宽度内。
+
+    为什么必须单独测这一条（v0.13.1 用户反馈「内容超出边界」）：
+      SVG 的 <text> 不会自动换行，也不会把框撑大 —— 文字超宽就直接
+      画到框外。原有的几何断言只检查「节点互不重叠」与「不超出
+      viewBox」，而文字溢出框但仍在 viewBox 内时，**全部通过**。
+      浏览器实测：`两条链都不通 → 先查 dnsproxy 与代理` 右缘 390，
+      而框右缘 370 —— 溢出 20px，看起来就是「内容超出边界」。
+
+    判据：每条 <text> 的估算右缘 ≤ 所属 <rect> 右缘 − 6px 内边距。
+    """
+    rects = []
+    for m in re.finditer(r'<rect x="(\d+)" y="(\d+)" width="(\d+)" height="(\d+)"', svg):
+        x, y, w, h = (int(g) for g in m.groups())
+        rects.append({"x": x, "y": y, "w": w, "h": h,
+                      "right": x + w, "bottom": y + h})
+
+    if not rects:
+        return
+
+    bad_count = 0
+    checked = 0
+    for m in re.finditer(
+        r'<text x="(\d+)" y="(\d+)" font-size="(\d+)"[^>]*>([^<]*)</text>', svg
+    ):
+        tx, ty, fs, raw = int(m.group(1)), int(m.group(2)), int(m.group(3)), m.group(4)
+        txt = (raw.replace("&amp;", "&").replace("&lt;", "<")
+                  .replace("&gt;", ">").replace("&quot;", '"').replace("&#39;", "'"))
+        top = ty - fs
+        host = None
+        for r in rects:
+            if r["x"] <= tx < r["right"] and r["y"] - 2 <= top < r["bottom"]:
+                host = r
+                break
+        if not host:
+            continue
+        checked += 1
+        right = tx + est_text_px(txt, fs)
+        limit = host["right"] - 6
+        if right > limit:
+            bad_count += 1
+            bad("%s 文字超出框右缘" % name,
+                "「%s」估算右缘 %d > 框内可用 %d（框 %dx%d，超出 %d px）"
+                % (txt[:28], right, limit, host["w"], host["h"], right - limit))
+
+    if bad_count == 0:
+        ok("%s 框内文字均在框宽内（%d 条已核对）" % (name, checked))
+
+
+def check_hint_wrapped(name, svg):
+    """状态图里带长 hint 的档必须真的折行。
+
+    为什么单独测「折行生效」而不只是测「没溢出」（v0.13.1）：
+      只测溢出的话，把框加宽到刚好容下长文本也能通过 —— 但那会把
+      宽度预算从右侧域名清单抢走，清单反而被截断。
+      所以还要断言：hint 超过折行上限时，同一框内确实出现了 ≥2 行
+      10px 文本。
+
+    这条断言能抓住 wrap_text 的静默失效：早期实现残留了
+      `i = i + len`（for 循环里 i 未定义）→ 断点判断永不触发 →
+      永不折行，而「没溢出」仍然成立（因为框被撑宽了）。
+    """
+    rects = []
+    for m in re.finditer(r'<rect x="(\d+)" y="(\d+)" width="(\d+)" height="(\d+)"', svg):
+        x, y, w, h = (int(g) for g in m.groups())
+        rects.append({"x": x, "y": y, "w": w, "h": h,
+                      "right": x + w, "bottom": y + h})
+
+    texts = []
+    for m in re.finditer(
+        r'<text x="(\d+)" y="(\d+)" font-size="(\d+)"[^>]*>([^<]*)</text>', svg
+    ):
+        tx, ty, fs, raw = int(m.group(1)), int(m.group(2)), int(m.group(3)), m.group(4)
+        txt = (raw.replace("&amp;", "&").replace("&lt;", "<")
+                  .replace("&gt;", ">").replace("&quot;", '"'))
+        texts.append({"x": tx, "top": ty - fs, "fs": fs, "txt": txt})
+
+    # 找出「某个框内有 ≥2 行 10px 文本」的框数
+    wrapped_boxes = 0
+    for r in rects:
+        small = [t for t in texts
+                 if t["fs"] == 10 and t["x"] >= r["x"] and t["x"] < r["right"]
+                 and r["y"] - 2 <= t["top"] < r["bottom"]]
+        if len(small) >= 2:
+            wrapped_boxes += 1
+
+    if wrapped_boxes >= 1:
+        ok("%s 长提示已折行（%d 个框内出现多行提示）" % (name, wrapped_boxes))
+    else:
+        bad("%s 长提示未折行" % name,
+            "所有框内 10px 文本都只有 1 行 —— wrap_text 可能未生效，"
+            "靠加宽框掩盖溢出会挤压右侧域名清单")
+
+
 def check_escaped(D):
     """动态文本必须转义 —— 否则域名里的 & < > 会让整个 SVG 解析失败。"""
     cases = [
@@ -345,6 +462,7 @@ def main():
         check_bezier("判定链路图", g)
         check_markers("判定链路图", g, "dcrt")
     check_intrinsic_size("判定链路图", route)
+    check_text_inside_boxes("判定链路图", route)
 
     layout = D.route_layout()
     check_note_clearance("判定链路图", route, layout)
@@ -362,6 +480,8 @@ def main():
         check_bezier("改道状态图", g2)
         check_markers("改道状态图", g2, "dcst")
     check_intrinsic_size("改道状态图", status)
+    check_text_inside_boxes("改道状态图", status)
+    check_hint_wrapped("改道状态图", status)
 
     # 状态图的档位数随数据变，用实际渲染出的行数算布局
     n_status_rows = 6   # sample_rows 覆盖 ok/degraded/rerouted/both-bad/fixed/unknown
