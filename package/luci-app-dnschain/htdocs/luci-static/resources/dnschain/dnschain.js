@@ -131,6 +131,26 @@
 
 	var sections = [];
 
+	/**
+	 * 切换到指定 tab。
+	 *
+	 * ⚠️ 必须处理滚动位置（v0.14.2 修）。
+	 *
+	 *   各 tab 的内容高度差别很大（「分流」约 3000px，「概览」约 900px）。
+	 *   原实现只切 `hidden`，不管滚动：用户把长 tab 滚到底部再切到短 tab，
+	 *   `window.scrollY` 仍停在旧值 —— 而新内容早已在视口上方，
+	 *   屏幕上只剩页脚，看起来像「页面空了」。
+	 *
+	 *   实测：从「分流」滚到底（scrollY≈2100）切到「概览」，
+	 *   概览总高约 900 + 页头，scrollY 2100 已超出可滚动范围，
+	 *   浏览器把它夹到 maxScroll，但内容主体仍在视口之上。
+	 *
+	 *   处理方式：
+	 *     · 新内容比视口高 → 滚到 tab 栏正下方（用户从头部开始读）
+	 *     · 新内容比视口矮 → 滚到顶部（避免整页空白）
+	 *   只在新内容顶部**已经跑到视口上方**时才动，否则会打断
+	 *   用户正在短 tab 里小幅滚动的阅读位置。
+	 */
 	function activate(id) {
 		sections.forEach(function (sec) {
 			/* 未归组的 section 始终显示 —— 避免新增 section 后莫名消失 */
@@ -146,6 +166,20 @@
 			tabs[i].setAttribute('aria-selected',
 				tabs[i].getAttribute('data-tab') === id ? 'true' : 'false');
 		}
+
+		/* 修正滚动：新内容顶部若已在视口之上，回到 tab 栏位置 */
+		try {
+			var bar = document.querySelector('.dc-tabs');
+			if (bar) {
+				var barTop = bar.getBoundingClientRect().top + window.scrollY;
+				/* 只在新内容顶部已跑到视口上方时才动 —— 否则会打断
+				   用户在同高度 tab 之间切换时的小幅滚动位置 */
+				if (window.scrollY > barTop + 8) {
+					/* 留 8px 上边距，避免 tab 栏贴住视口顶端 */
+					window.scrollTo(0, Math.max(0, barTop - 8));
+				}
+			}
+		} catch (e) { /* 滚动失败不影响功能 */ }
 
 		try { localStorage.setItem(STORAGE_KEY, id); } catch (e) { /* 忽略 */ }
 	}

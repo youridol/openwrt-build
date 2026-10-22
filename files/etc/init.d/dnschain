@@ -159,7 +159,7 @@ update_serversfile() {
 # 失败返回非 0，调用方须拒绝启动（禁止静默失败，AGENTS 红线 3）
 # ------------------------------------------------------------
 preflight() {
-	local cn_up foreign_up bad rc
+	local cn_up foreign_up bad rc fport _dot_bad
 
 	# 1. 上游端口必须落在 ss_spec_output 的 TCP 端口集内，
 	#    否则路由器自身出向不进代理、静默直连后被墙（ADR §10.8）
@@ -184,7 +184,6 @@ preflight() {
 	[ -x "$PROG_DP" ] || { dnschain_log "ERROR: 缺少 ${PROG_DP}"; return 1; }
 
 	# 3. 两个端口不能相同（否则两个实例抢同一端口，后起的静默失败）
-	local fport
 	fport=$(dc_get main foreign_port 5336)
 	if [ "$fport" = "$(dc_get main entry_port 5353)" ]; then
 		dnschain_log "ERROR: entry_port 与 foreign_port 相同（都是 ${fport}），两个实例会抢端口"
@@ -198,7 +197,7 @@ preflight() {
 		return 1
 	fi
 
-	# 4. 国外上游必须是 DoH（443）。DoT(853) 在本环境不可用，
+	# 5. 国外上游必须是 DoH（443）。DoT(853) 在本环境不可用，
 	#    配成 DoT 会让国外域名拿不到答案（实测 peer sent close notify）。
 	#    这是硬校验：宁可拒绝启动，也不让用户面对「能解析但全是污染值」。
 	_dot_bad=$(dc_get_list foreign server | grep -E '^tls://' || true)

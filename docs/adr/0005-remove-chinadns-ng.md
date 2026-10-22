@@ -393,7 +393,7 @@ nft list set inet ss_spec blacklist | grep -c 142.251
 
 # 8. 页面
 # 浏览器打开 /cgi-bin/luci/admin/network/dns_chain
-#   应看到「端口与实例」「当前 IPv6 流量代理」两段，且自检 16 项全绿
+#   应看到「端口与实例」「当前 IPv6 流量代理」两段，且自检 20 项全绿
 ```
 
 **判定国外解析是否正常，不要只看「有没有结果」** —— 污染 IP 也会返回结果。

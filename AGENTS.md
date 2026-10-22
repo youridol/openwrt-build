@@ -20,7 +20,7 @@
 | `patches/luci-app-trafficctl/*.patch` | trafficctl 相对上游的差分记录（**不参与构建**，供跟进上游 + CI 一致性校验） | 由 `tools/regen-trafficctl-patches.py` 生成，勿手改 |
 | `tools/sync-trafficctl.sh` | 升级 trafficctl 到指定上游 tag（覆盖包目录 + 重算 patch + 回放校验） | 直接用 |
 | `tools/check-trafficctl-i18n.py` | 校验中文翻译覆盖率；`--write-pot` 重生成 pot 模板 | 直接用 |
-| `tools/verify-dnschain-domains.sh` | 域名归属与自动改道的 99 条契约断言（CI 与本地同一份） | 直接用 |
+| `tools/verify-dnschain-domains.sh` | 域名归属与自动改道的 119 条契约断言（CI 与本地同一份） | 直接用 |
 | `tools/check-dnschain-lua.py` | 用 lupa（真实 Lua）跑语法 + 模型 + **真实渲染页面每个 `cfgvalue()`** | 直接用 |
 | `tools/render-dnschain-diagrams.py` | 两张思维导图的纯几何校验 + 输出可打开的 HTML 预览 | 直接用 |
 | `tools/extract-dnschain-i18n.py` | 提取 `translate()` 中文并比对 PO（`--write` 追加缺失） | 直接用 |
@@ -370,7 +370,7 @@ LAN 客户端
 > ```sh
 > netstat -lnup | grep -E ':(5335|5353)'        # :5335 应属 chinadns-ng
 > uci -q get shadowsocksr.@global[0].pdnsd_enable   # 0 = 交给框架；4 = MosDNS
-> /usr/bin/dnschain-selftest                     # 16 项
+> /usr/bin/dnschain-selftest                     # 20 项
 > ```
 >
 > 该 ADR 取代了两份已撤回的文档（`0003-dns-chain-architecture.md`、
@@ -416,7 +416,7 @@ dnsmasq:53（唯一缓存 + 唯一分流层）
 ### 4.0.1 ⚠️ 域名归属与自动改道的硬约束（v0.13.0）
 
 > 设计依据：[`docs/adr/0006-domain-routing-and-reroute.md`](docs/adr/0006-domain-routing-and-reroute.md)。
-> 落地校验：`sh tools/verify-dnschain-domains.sh`（99 条断言，CI 会跑）。
+> 落地校验：`sh tools/verify-dnschain-domains.sh`（119 条断言，CI 会跑）。
 
 先记住三个概念，混了就必然改错：
 
@@ -437,7 +437,7 @@ dnsmasq:53（唯一缓存 + 唯一分流层）
 | 19 | **超时必须用完成标记文件，不能只用 `kill -0` 判活** | 子进程退出成僵尸，`kill -0` 仍成功 → 白等满整个超时 | 有（dash 单测含超时用例） |
 | 20 | **`nftset` 目标集必须先 `nft list set` 探测再写** | SSR-Plus 未启用时 `ss_spec` 表不存在，dnsmasq 每解析一个域名都写集合失败、日志刷错 | 有 |
 | 21 | **页面不得嵌套 `<form>`**（CBI 已把整页包在 `<form method="post">` 里） | 浏览器丢掉内层标签 →「解释」按钮实际提交外层表单（= 触发保存） | 有 |
-| 22 | **两张图的 marker id 必须带不同前缀**（`dcrt` / `dcst`） | 同页两张 SVG，id 是文档级全局的，同名会全部解析到第一个定义（颜色串掉） | 有 |
+| 22 | **同一页每个 SVG 的 marker id 前缀必须唯一**。判定链路图由**同一函数渲染两次**（概览 tab + 域名 tab），必须由调用方传不同的 `id_prefix`（`dcrt-ov` / `dcrt-dm`），状态图默认 `dcst` | CBI 的 tab 是 CSS 隐藏、**不是懒加载**，两个 tab 都进同一份 HTML。id 是文档级全局的，同名则 `url(#dcrt-a-ok)` 全部解析到第一个定义 —— 实测修复前有 5 组重复 id，配色一变就静默串掉，浏览器不报错 | 有（契约 4 条 + 图示 3 条） |
 | 23 | **图示动态文本必须 HTML 转义** | 域名或原因含 `& < >` 时整张图解析失败（页面一片空白） | 有 |
 | 24 | **`[[:space:]]` 不是 `[[ ]]`**：CI 的 bash 语法断言必须写成「`[[` 后紧跟空白」 | 直接 `grep '\[\['` 会命中 POSIX 字符类 → CI 永远红（v0.13.0 实测踩过） | 有 |
 | 25 | **UCI section 名在文件内必须全局唯一**（与类型无关） | `config domains 'foreign'` 与 `config upstream 'foreign'` 同名 → uci 报 `section of different type overwrites`，**整个配置文件读不出来**，页面空白 + 服务起不来 | 有 |
@@ -448,6 +448,11 @@ dnsmasq:53（唯一缓存 + 唯一分流层）
 | 30 | **探测函数必须支持显式端口**，不能只认链路名 | 传 `127.0.0.1#59999` 会落到兜底分支探 `:5353`（活的）→ 死端口判为 `OK` → 「链路挂了却不改道」 | 有 |
 | 31 | **改道等待期间不得更新 `last`**（用 `dc_health_write_keep_last`） | 每轮刷 `last=now` → `now-last` 恒为 0 → `min_dwell` 永不满足 → **回切被永久阻塞**（实测 ok 计数涨到 12、阈值 3，状态一直 `recover-wait`） | 有 |
 | 32 | **被 `require` 的模块文件不得依赖全局 `translate`**，必须 `require "luci.i18n"` | 只有 CBI 模型文件享有 dispatcher 注入；模块里写裸 `translate` 会在 `cfgvalue()` 期间抛 nil value → **整页 500**。本地测试预置了 `translate` 桩，所以本地全绿、路由器 500 | 有 |
+| 33 | **清缓存必须用 `dc_dnsmasq_pid`（按 `:53` socket 反查），不得用 `pidof dnsmasq` 第一个**。Lua 侧只调 `dnschain-health flush`，不自己找 PID | `pidof dnsmasq` 返回 3 个 PID，**第一个是 ujail 辅助子进程**（实测 `wchan=anon_pipe_read`、5 个 fd、0 个 `socket:53`）。对它 SIGHUP 是**空操作**，按钮点了完全无效，页面却报「已清空」——静默失效 | 有（契约 3 条） |
+| 34 | **`dc_health_cycle` 必须有互斥锁**（`mkdir` 原子锁 + 死锁自动清理） | daemon 每 `interval` 秒跑一轮，页面「立即探测一轮」随时可触发。并发时 `dc_health_upsert` 的「读旧文件 → 过滤 → 写临时 → mv」不是原子的，后完成的进程会用少了对方新增行的副本覆盖 → **状态文件丢行** → 页面汇总对不上 | 有（契约 1 条） |
+| 35 | **状态文件写盘只能有一处实现**（`dc_health_upsert`） | `dc_health_write` 与 `dc_health_write_keep_last` 原先各复制一整段写盘逻辑，只差 `last` 取值。改一处忘另一处 → 两个入口写出**格式不同**的状态文件，而 `status`/页面都按 7 字段解析 | 有（契约 1 条） |
+| 36 | **selftest 缓存指纹必须覆盖所有影响结论的输入**（端口/进程/`ss_spec`/开关 + `filter_aaaa` + `ipv6_support` + gfw 行数 + 上游列表） | 漏项的症状是「改完配置看自检，60 秒内还是旧结论」，用户以为改动没生效。另：BusyBox **没有 `stat`**，取 mtime 必须用 `date -r <file> +%s` | 有（契约 2 条） |
+| 37 | **tab 切换必须修正滚动位置** | 各 tab 高度差数倍（分流约 3000px、概览约 900px）。只切 `hidden` 不管滚动时，从长 tab 滚到底再切短 tab，`scrollY` 仍停在旧值 → 屏幕只剩页脚，看起来像「页面空了」 | — |
 
 **改道判定的一句话规则**：首选链不通、且另一条链通 → 切到另一条。
 两条需求规则（国外不通改直连 / 国内不通改代理）是这同一判定的两个实例，
@@ -457,9 +462,9 @@ dnsmasq:53（唯一缓存 + 唯一分流层）
 **新增/修改这一块后必须跑**（CI 同一份逻辑）：
 
 ```sh
-sh tools/verify-dnschain-domains.sh          # 99 条契约断言
-python3 tools/check-dnschain-lua.py          # 83 条：语法 + 模型 + 真实渲染页面
-python3 tools/render-dnschain-diagrams.py    # 30 条：图示纯几何
+sh tools/verify-dnschain-domains.sh          # 119 条契约断言
+python3 tools/check-dnschain-lua.py          # 88 条：语法 + 模型 + 真实渲染页面
+python3 tools/render-dnschain-diagrams.py    # 38 条：图示纯几何
 python3 tools/extract-dnschain-i18n.py       # 中文文案完整性（缺译会中英混排）
 sh tools/verify-dnschain-ci-sim.sh           # 复现 CI 的目录场景
 ```

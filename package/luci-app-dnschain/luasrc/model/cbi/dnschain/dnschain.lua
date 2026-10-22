@@ -360,14 +360,29 @@ end
 ------------------------------------------------------------------------
 
 --- 清空缓存：SIGHUP，零中断
+-- 清空 dnsmasq 缓存
+--
+-- ⚠️ 必须委托给 `dnschain-health flush`，不要在 Lua 侧自己找 PID
+--    （v0.14.2 实测修正）。
+--
+--    原实现是 `pidof dnsmasq | awk '{print $1}'` —— 而 `pidof dnsmasq`
+--    返回 **3 个** PID，第一个是 **ujail 辅助子进程**：
+--        PID 21400  wchan=anon_pipe_read  fds=5   socket:53=0   ← 被选中
+--        PID 21368  wchan=poll_schedule…  fds=36  socket:53=25  ← 真正干活的
+--        PID 21331  wchan=do_epoll_wait   fds=7   socket:53=1
+--    对 21400 发 SIGHUP 是**空操作**，按钮点了完全无效，
+--    但页面照样报「已清空 dnsmasq 缓存（零中断）」—— 静默失效。
+--
+--    库里的 dc_flush_cache 用 dc_dnsmasq_pid 按 :53 socket inode 反查，
+--    是正确实现；此前它没有 CLI 入口，成了死代码。现在补了
+--    `dnschain-health flush` 子命令，Lua 只调它，两边不再各写一份。
 function M.flush_cache()
-	local pid = sys.exec("pidof dnsmasq 2>/dev/null | awk '{print $1}'") or ""
-	pid = pid:gsub("%s+", "")
-	if pid == "" then
-		return false, "dnsmasq 未运行"
+	local out = sys.exec("/usr/bin/dnschain-health flush 2>&1") or ""
+	if out:find("OK=") then
+		return true, out:gsub("^%s*OK=", ""):gsub("%s+$", "")
 	end
-	sys.exec("kill -HUP " .. pid .. " 2>/dev/null")
-	return true, "已清空 dnsmasq 缓存（零中断）"
+	local err = out:match("ERROR=([^\n]*)")
+	return false, err or "清空缓存失败（检查 dnsmasq 是否运行）"
 end
 
 --- 手动导入名单

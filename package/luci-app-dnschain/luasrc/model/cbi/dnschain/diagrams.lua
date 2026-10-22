@@ -342,13 +342,32 @@ end
 --   要跨过 代理 那一行），正是「看起来像断链」的典型形态。
 --
 -- opts 全部可选，缺省时显示静态说明（不依赖运行时数据）。
+--
+-- ⚠️ opts.id_prefix 必须由调用方区分（v0.14.2 修）。
+--
+--   这张图被渲染**两次**：概览 tab 的「分流决策」与域名 tab 的「走法」。
+--   CBI 的 tab 是 CSS 隐藏、**不是懒加载** —— 两个 tab 的内容都进同一份
+--   HTML。而 SVG 的 id 是**文档级全局**的，两处用同一个 "dcrt" 前缀
+--   就会出现 5 组重复 id（dcrt-a-ok/warn/bad/info/mute 各两份）。
+--
+--   后果：`url(#dcrt-a-ok)` 全部解析到**第一个**定义。当前两图配色恰好
+--   相同所以看不出异常，但一旦一处改了色（或将来只渲染一处），
+--   箭头颜色就会静默串掉。浏览器也不报错 —— 属最难发现的一类。
+--
+--   实测证据（v0.14.1 页面）：`grep -o 'id="dcrt[^"]*"'` 有 5 个重复。
 -----------------------------------------------------------------------
 local ROUTE_W, ROUTE_H = 720, 520
 
 function D.route_map(opts)
 	opts = opts or {}
 
-	local p = "dcrt"
+	-- marker id 前缀：调用方必须传不同的值，否则同页两图 id 冲突。
+	--
+	-- 用 rawget 而不是 opts.id_prefix：lupa（测试用的真实 Lua 解释器）
+	-- 把 Python dict 桥接成 Lua 表时，**缺失的键会抛 KeyError 而不是返回
+	-- nil**，因为 Lua 侧的 __index 落到了 Python 的 __getitem__。
+	-- 生产环境（原生 Lua 表）两种写法等价，但 rawget 在两种环境下都安全。
+	local p = rawget(opts, "id_prefix") or "dcrt"
 	local NW2, NW3 = 196, 208
 	local X1, X2, X3 = 14, 190, 440
 	local NH, GAP = 46, 14
@@ -571,7 +590,7 @@ local STATUS_META = {
 
 local STATUS_W, STATUS_H = 760, 0
 
-function D.status_map(rows, summary)
+function D.status_map(rows, summary, id_prefix)
 	rows = rows or {}
 	summary = summary or {}
 
@@ -665,7 +684,11 @@ function D.status_map(rows, summary)
 	local H = top + total_h + 34
 	local root_y = top + math.floor(total_h / 2) - math.floor(NH / 2)
 
-	local p = "dcst"
+	-- marker id 前缀：与判定链路图用不同前缀（dcst vs dcrt）。
+	--
+	-- 这张图目前只渲染一次，但接口保持一致（第三个参数 id_prefix），
+	-- 以免将来在别处再渲染一次时重犯「同页 id 冲突」的错。
+	local p = id_prefix or "dcst"
 	local o = {}
 	-- 同判定链路图：必须给 width/height 固有尺寸，
 	-- 否则 CSS `width:auto` 回落到 100%，图被拉伸放大（见上）。

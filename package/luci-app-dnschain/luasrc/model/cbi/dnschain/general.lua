@@ -460,12 +460,21 @@ end
 --
 -- 与「域名」tab 里那张是**同一个函数**（dg.route_map），
 -- 不是两份实现 —— 两份必然漂移。
+--
+-- ⚠️ 必须传 id_prefix（v0.14.2）：两处都渲染 → 同一份 HTML 里
+--    出现两套 marker。SVG id 是文档级全局的，前缀相同则
+--    `url(#dcrt-a-ok)` 全部解析到第一个定义，箭头颜色会静默串掉。
+--    实测：修复前有 5 组重复 id（dcrt-a-ok/warn/bad/info/mute 各 2 份）。
 o = s:option(DummyValue, "_route_map_overview", translate("分流决策"))
 o.rawhtml = true
 function o.cfgvalue()
 	local entry = ds.entry_port()
 	local fport = ds.foreign_port()
-	return dg.route_map({ entry_port = entry, foreign_port = fport })
+	return dg.route_map({
+		entry_port   = entry,
+		foreign_port = fport,
+		id_prefix    = "dcrt-ov",
+	})
 end
 
 -- ── 链路指标 ──────────────────────────────────────────────────────
@@ -756,6 +765,8 @@ function o.cfgvalue()
 	return dg.route_map({
 		entry_port   = ds.entry_port(),
 		foreign_port = ds.foreign_port(),
+		-- 与概览那张图区分（理由见概览里的注释）
+		id_prefix    = "dcrt-dm",
 	})
 end
 

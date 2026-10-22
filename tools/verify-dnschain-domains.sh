@@ -609,15 +609,89 @@ else
 fi
 
 # marker id 必须带前缀 —— 同一页两张图，同名 marker 会串色
-if body_of "$DIA" | grep -q 'local p = "dcrt"'; then
-	pass "判定链路图 marker 前缀 dcrt"
+#
+# ⚠️ v0.14.2：前缀改为**由调用方传入**（opts.id_prefix）。
+#
+#   原因：判定链路图被渲染**两次** —— 概览 tab 的「分流决策」与
+#   域名 tab 的「走法」。CBI 的 tab 是 CSS 隐藏、不是懒加载，
+#   两个 tab 的内容都进同一份 HTML，而 SVG id 是**文档级全局**的。
+#   原先两处都用硬编码的 "dcrt" → 页面里有 5 组重复 id
+#   （dcrt-a-ok/warn/bad/info/mute 各两份），
+#   `url(#dcrt-a-ok)` 全部解析到第一个定义，配色一变就静默串掉。
+#
+#   故现在断言分三层：
+#     ① 两个函数都支持 id_prefix（有 rawget 读取）
+#     ② 两处调用**传了不同**的前缀
+#     ③ 默认值仍带各自前缀（dcrt / dcst），保底不串
+if body_of "$DIA" | grep -q 'rawget(opts, "id_prefix")'; then
+	pass "判定链路图 marker 前缀可由调用方指定"
 else
-	fail "判定链路图 marker 没带前缀（与状态图串色）"
+	fail "判定链路图不支持 id_prefix（两处渲染会 id 冲突）"
 fi
-if body_of "$DIA" | grep -q 'local p = "dcst"'; then
-	pass "状态导图 marker 前缀 dcst"
+if body_of "$DIA" | grep -q 'id_prefix or "dcst"'; then
+	pass "状态导图 marker 前缀可指定且默认 dcst"
 else
-	fail "状态导图 marker 没带前缀"
+	fail "状态导图 marker 前缀默认值缺失"
+fi
+
+# 两处调用必须传不同前缀
+if grep -q 'id_prefix    = "dcrt-ov"' "$GEN" 2>/dev/null \
+   && grep -q 'id_prefix    = "dcrt-dm"' "$GEN" 2>/dev/null; then
+	pass "概览与域名 tab 的链路图用不同 id 前缀（ov / dm）"
+else
+	fail "两处链路图未传不同 id_prefix（同页 id 会重复）"
+fi
+
+# 前缀默认值仍须存在（防止 rawget 回落成空串导致 id="*-a-ok"）
+if body_of "$DIA" | grep -q 'or "dcrt"'; then
+	pass "判定链路图 marker 前缀默认 dcrt"
+else
+	fail "判定链路图 marker 前缀默认值缺失"
+fi
+
+# ── 清缓存必须走正确 PID（v0.14.2）──
+#
+# 实测 bug：Lua 侧原先用 `pidof dnsmasq | awk '{print $1}'` 取 PID。
+# 而 `pidof dnsmasq` 返回 3 个 PID，第一个是 **ujail 辅助子进程**
+# （实测 wchan=anon_pipe_read、5 个 fd、0 个 socket:53），
+# 对它 SIGHUP 是**空操作** —— 按钮点了完全无效，页面却报「已清空」。
+#
+# 修法：Lua 委托给 `dnschain-health flush`，后者用 dc_dnsmasq_pid
+# （按 :53 socket inode 反查）定位真正的进程。
+# ⚠️ 必须先剥注释行：修复说明的注释里本身含 `pidof dnsmasq`，
+#    直接 grep 会永久误报（AGENTS §6 第 6 条同类坑，本仓库踩过多次）。
+if sed 's/--.*//' "$MOD" 2>/dev/null | grep -q 'pidof dnsmasq'; then
+	fail "Lua 侧仍用 pidof dnsmasq 取 PID（第一个是 ujail 辅助进程，SIGHUP 无效）"
+else
+	pass "Lua 侧不用 pidof dnsmasq（避免选错 PID）"
+fi
+if grep -q 'dnschain-health flush' "$MOD" 2>/dev/null; then
+	pass "清缓存委托给 dnschain-health flush（复用 dc_dnsmasq_pid）"
+else
+	fail "清缓存没有走 dnschain-health flush（会各自实现、迟早漂移）"
+fi
+if grep -q 'cmd_flush' "$HEALTH" 2>/dev/null; then
+	pass "dnschain-health 有 flush 子命令"
+else
+	fail "dnschain-health 缺 flush 子命令（dc_flush_cache 会成死代码）"
+fi
+
+# ── health cycle 必须有互斥锁（v0.14.2）──
+#
+# daemon 每 interval 秒跑一轮，页面按钮随时可触发。并发时
+# dc_health_upsert 的「读-过滤-写- mv」不原子，会丢状态行。
+if body_of "$LIB" | grep -q '\.cycle\.lock'; then
+	pass "健康探测有互斥锁（并发 cycle 不会丢状态行）"
+else
+	fail "健康探测无互斥锁（daemon 与手动触发并发会丢行）"
+fi
+
+# ── 状态写入必须只有一处实现（v0.14.2 瘦身）──
+n_upsert=$(body_of "$LIB" | grep -c "awk -F'|' -v d=\"\$d\" '\$1 != d'")
+if [ "$n_upsert" -eq 1 ]; then
+	pass "状态文件写盘只有一处实现（dc_health_upsert）"
+else
+	fail "状态写盘有 $n_upsert 处重复实现（改一处忘另一处会写出不同格式）"
 fi
 
 # 动态文本必须转义（域名/原因含 & < > 会让整个 SVG 解析失败）

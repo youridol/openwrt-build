@@ -681,13 +681,40 @@ selftest_fingerprint() {
 	local e f
 	e=$(dc_get main entry_port 5353)
 	f=$(dc_get main foreign_port 5336)
-	printf '%s|%s|%s|%s|%s|%s|%s' \
+
+	# ⚠️ 指纹必须覆盖「会影响结论」的每一项（v0.14.2 补全）。
+	#
+	#   原先只含端口/进程/ss_spec/开关。实测漏了三类，症状都是
+	#   「改完配置看自检，60 秒内还是旧结论」，用户以为改动没生效：
+	#
+	#     · filter_aaaa / ipv6_support → 影响第 7/8/11 项
+	#     · gfw_list.conf 行数         → 影响第 2/12 项
+	#     · 上游 server 列表            → 影响第 10 项（污染值判定）
+	#
+	#   代价：每次多 3 个 uci get + 1 次 wc -l（约 15ms），
+	#   相对于缓存省下的 3.5 秒可以忽略。
+	local aaaa v6 n_gfw up
+	aaaa=$(uci -q get dhcp.@dnsmasq[0].filter_aaaa 2>/dev/null)
+	v6=$(uci -q get shadowsocksr.@global[0].ipv6_support 2>/dev/null)
+	n_gfw=$(wc -l < /etc/ssrplus/gfw_list.conf 2>/dev/null || echo 0)
+	# 上游列表只取「两条链的条数 + 各自首项」——
+	# 完整串太长，而条数/首项变化已能覆盖「换了一组上游」这类改动。
+	#
+	# ⚠️ UCI section 名是 cn / foreign，**不是** upstream（v0.14.2 实测）：
+	#    配置文件里是 `config upstream 'cn'` 与 `config upstream 'foreign'`，
+	#    即类型是 upstream、名字是 cn/foreign。写成 `dc_get_list upstream server`
+	#    会返回空（把它当 section 名查），指纹里那段就恒为 "0/"，
+	#    等于上游变化完全检测不到。
+	up="$(dc_get_list cn server 2>/dev/null | wc -l)/$(dc_get_list cn server 2>/dev/null | head -1)/$(dc_get_list foreign server 2>/dev/null | wc -l)/$(dc_get_list foreign server 2>/dev/null | head -1)"
+
+	printf '%s|%s|%s|%s|%s|%s|%s|%s|%s|%s' \
 		"$e" "$f" \
 		"$(dc_port_owner "$e" udp)" \
 		"$(dc_port_owner "$f" udp)" \
 		"$(dc_port_listening 1234 tcp && echo 1 || echo 0)" \
 		"$(dc_ss_spec_present && echo 1 || echo 0)" \
-		"$(dc_get main enabled 1)"
+		"$(dc_get main enabled 1)" \
+		"$aaaa" "$v6" "$n_gfw/$up"
 }
 
 main "$@"

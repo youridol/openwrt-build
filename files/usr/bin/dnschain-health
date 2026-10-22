@@ -291,6 +291,27 @@ cmd_reset() {
 # 只想从页面手动触发。此时进程直接退出，procd 不会 respawn
 # （因为进程正常返回 0，不是崩溃）。
 # ------------------------------------------------------------
+# ------------------------------------------------------------
+# 清空 dnsmasq 缓存（SIGHUP：只清缓存、不重读配置、进程不重启）
+#
+# 为什么要这个子命令（v0.14.2）：页面「清空全部缓存」按钮原先在
+# Lua 侧**重复实现**了一份，用的是 `pidof dnsmasq | awk '{print $1}'`。
+# 而 `pidof dnsmasq` 返回 3 个 PID，**第一个是 ujail 辅助子进程**
+# （实测 wchan=anon_pipe_read、只有 5 个 fd、0 个 socket:53），
+# 对它 SIGHUP 是**空操作** —— 按钮点了完全无效，页面却报「已清空」。
+#
+# 库里已有正确的 dc_flush_cache（用 dc_dnsmasq_pid 按 :53 socket 反查），
+# 但没有 CLI 入口，于是成了死代码。这里补上入口，让 Lua 只调它，
+# 不再各写一份。
+cmd_flush() {
+	dc_flush_cache || {
+		echo "ERROR=发送 SIGHUP 失败（dnsmasq 可能未运行）"
+		return 1
+	}
+	echo "OK=已清空 dnsmasq 缓存（零中断）"
+	return 0
+}
+
 cmd_daemon() {
 	local interval
 
@@ -331,8 +352,9 @@ main() {
 		check)   cmd_check ;;
 		apply)   cmd_apply ;;
 		reset)   cmd_reset ;;
+		flush)   cmd_flush ;;
 		*)
-			echo "用法: dnschain-health {cycle|daemon|status|explain <域名>|check|apply|reset}" >&2
+			echo "用法: dnschain-health {cycle|daemon|status|explain <域名>|check|apply|reset|flush}" >&2
 			return 1
 			;;
 	esac

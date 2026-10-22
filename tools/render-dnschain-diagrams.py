@@ -444,6 +444,21 @@ def lua_table(L, py):
     return t
 
 
+def lua_dict(L, py):
+    """把 Python dict 转成**真正的 Lua 表**。
+
+    ⚠️ 不能直接把 dict 传给 Lua 函数（v0.14.2 实测）：
+       lupa 桥接后 Lua 侧拿到的是 POBJECT 而不是 table，
+       `rawget(opts, "k")` 报 "table expected, got POBJECT"；
+       而 `opts.k` 在键缺失时抛 Python KeyError（不是返回 nil）。
+       两者都不是 Lua 的正常语义，故必须先转成真表。
+    """
+    t = L.eval("{}")
+    for k, v in py.items():
+        t[k] = v
+    return t
+
+
 def main():
     check_only = "--check" in sys.argv
 
@@ -453,7 +468,7 @@ def main():
         return 1
 
     print("=== 判定链路图 ===")
-    route = D.route_map({"entry_port": "5353", "foreign_port": "5336"})
+    route = D.route_map(lua_dict(L, {"entry_port": "5353", "foreign_port": "5336"}))
     route = str(route)
     g = svg_geom(route)
     check_bounds("判定链路图", g)
@@ -488,6 +503,38 @@ def main():
     slayout = D.status_layout(L.eval("{ [1] = true, [2] = true, [3] = true, [4] = true, [5] = true, [6] = true }"))
     check_note_clearance("改道状态图", status, slayout)
     check_text_fits_boxes("改道状态图", status, slayout)
+
+    # ── 跨调用 marker id 唯一性（v0.14.2）────────────────────────────
+    #
+    # 实测 bug：判定链路图被渲染**两次**（概览 tab 的「分流决策」+
+    # 域名 tab 的「走法」）。CBI 的 tab 是 CSS 隐藏、不是懒加载，
+    # 两个 tab 的内容都进同一份 HTML，而 SVG id 是**文档级全局**的。
+    # 修复前页面里有 5 组重复 id（dcrt-a-ok/warn/bad/info/mute 各两份），
+    # `url(#dcrt-a-ok)` 全部解析到第一个定义 —— 配色一变就静默串掉。
+    #
+    # 故这里用**不同的 id_prefix 渲染两次**，断言合并后 id 无重复。
+    print("=== marker id 跨调用唯一性 ===")
+    route_a = str(D.route_map(lua_dict(L, {"entry_port": "5353", "foreign_port": "5336",
+                                          "id_prefix": "dcrt-ov"})))
+    route_b = str(D.route_map(lua_dict(L, {"entry_port": "5353", "foreign_port": "5336",
+                                          "id_prefix": "dcrt-dm"})))
+    all_ids = re.findall(r'id="(dc[rs]t[^"]*)"', route_a + route_b + status)
+    dup = sorted({i for i in all_ids if all_ids.count(i) > 1})
+    if dup:
+        bad("marker id 跨图不重复", "重复: %s" % ", ".join(dup))
+    else:
+        ok("marker id 跨图不重复（%d 个，无冲突）" % len(all_ids))
+
+    if 'id="dcrt-ov-a-ok"' in route_a and 'id="dcrt-dm-a-ok"' in route_b:
+        ok("id_prefix 参数生效（两图前缀不同）")
+    else:
+        bad("id_prefix 参数生效", "route_a/b 里没找到各自前缀的 marker")
+
+    status_c = str(D.status_map(rows, L.eval("{}"), "dcst-x"))
+    if 'id="dcst-x-a-ok"' in status_c:
+        ok("status_map 支持 id_prefix 参数")
+    else:
+        bad("status_map 支持 id_prefix 参数", "未找到 dcst-x-a-ok")
 
     # 状态图必须覆盖全部六档（数据里六档都有）
     for st in ["正常", "降级中", "已改道", "双链故障", "未探测"]:

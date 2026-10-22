@@ -1203,51 +1203,18 @@ dc_reload_servers_file() {
 # 不能只用 kill -0 判活：子进程退出后会变成僵尸，kill -0 依然成功，
 # 会白等满整个超时（这是踩过的坑，标记文件是必需的）。
 # ------------------------------------------------------------
-# 短睡一拍的粒度：首次调用时探测可用的亚秒等待手段。
+# ------------------------------------------------------------
+# 为什么这里没有「亚秒 sleep」辅助函数（v0.14.2 清理）
 #
-# ⚠️ BusyBox 的 `sleep` **只支持整数秒**（v0.14.1 实测）：
-#   `sleep 0.05` / `sleep 0.1` 在 OpenWrt 24.10.5 上**直接失败**
-#   （返回非 0，根本不睡）。而 nslookup 一次只要几十毫秒，
-#   用 `sleep 1` 轮询 → 每次查询固定白等 1 秒。
-#
-#   实测代价：自检 4 处查询 + 健康探测 8 域名 × 2 链 = 20 次，
-#   每次白等 1 秒 → 页面 12 秒。用户感知就是「切换页面太慢」。
-#
-#   可用手段（按优先级探测）：
-#     ① `read -t 0.1` —— ash/dash 的 read 支持小数超时（实测可用）
-#     ② `usleep`     —— 多数 OpenWrt 固件没有这个命令
-#     ③ `sleep 1`    —— 兜底，最慢但一定可用
-#
-#   故首选 read -t：它不 fork 进程，比 sleep 更快，且支持亚秒。
-DNSCHAIN_SLEEP_TICK=""
-
-# 睡一拍（tick 由 DNSCHAIN_SLEEP_TICK 表示，单位秒，可为小数）
-dc_sleep_tick() {
-	if [ -z "$DNSCHAIN_SLEEP_TICK" ]; then
-		# 探测 read -t 是否支持小数（用一个不存在的 fd，超时即返回）
-		if read -t 0.05 _dc_x </dev/null 2>/dev/null; then
-			DNSCHAIN_SLEEP_TICK=0.05
-		elif sleep 0.05 2>/dev/null; then
-			DNSCHAIN_SLEEP_TICK=0.05
-		else
-			DNSCHAIN_SLEEP_TICK=1
-		fi
-	fi
-	case "$DNSCHAIN_SLEEP_TICK" in
-		0.05) read -t 0.05 _dc_x </dev/null 2>/dev/null || true ;;
-		*)    sleep "$DNSCHAIN_SLEEP_TICK" ;;
-	esac
-}
-
-# 每秒对应多少拍
-dc_ticks_per_sec() {
-	case "$DNSCHAIN_SLEEP_TICK" in
-		0.05) echo 20 ;;
-		0.1)  echo 10 ;;
-		*)    echo 1 ;;
-	esac
-}
-
+# 曾经有 dc_sleep_tick / dc_ticks_per_sec 两个函数，用于给
+# dc_run_timeout 提供轮询粒度。但实测查明 OpenWrt 的 BusyBox：
+#   · `sleep 0.05` / `sleep 0.1`  **直接失败**（只支持整数秒）
+#   · `read -t 0.1`              报 `invalid timeout`
+#   · `usleep`                   不存在
+# 即**拿不到亚秒粒度**。故 dc_run_timeout 改为「紧密轮询 + 每 2000 转
+# 才 sleep 1 秒」：快命令（nslookup 仅 0.02~0.4s）几乎零等待返回，
+# 慢命令也不会忙等烧 CPU。两个辅助函数随之成为死代码，已删除。
+# ------------------------------------------------------------
 dc_run_timeout() {
 	local secs out flag pid np i iters tps
 
@@ -1448,8 +1415,16 @@ dc_health_active() {
 	esac
 }
 
-# 写入/更新一行（整体重写，观测域名数量级是十位，成本可忽略）
-dc_health_write() {
+# 状态文件写入的唯一实现（dc_health_write / _keep_last 都走这里）
+#
+# 为什么要抽出来（v0.14.2）：原来两个函数各自复制了一整段
+# 「读旧文件 → awk 过滤同域名 → printf 追加 → mv」，只差 `last`
+# 的取值方式。两份同样的写盘逻辑，改一处忘另一处就会让两个入口
+# 写出格式不同的状态文件（而 status/页面都按 7 字段解析）。
+#
+# 参数：域名 首选 当前 失败数 成功数 last 结果
+# 观测域名数量级是十位，整体重写成本可忽略。
+dc_health_upsert() {
 	local d pref active fail ok last res tmp
 
 	d="$1"; pref="$2"; active="$3"; fail="$4"; ok="$5"; last="$6"; res="$7"
@@ -1467,6 +1442,11 @@ dc_health_write() {
 	mv -f "$tmp" "$DNSCHAIN_HEALTH_STATE" || return 1
 }
 
+# 写入/更新一行，last 由调用方给定（改道/首次探测时用 now）
+dc_health_write() {
+	dc_health_upsert "$1" "$2" "$3" "$4" "$5" "$6" "$7"
+}
+
 # 更新一行但**保留原来的 last**
 #
 # 用途：改道后的「等回切」阶段。
@@ -1479,7 +1459,7 @@ dc_health_write() {
 # `recover-wait:OK`，watch.servers 一直指向 :5336，
 # 首选链早已恢复却不回切。这条正是「只测改道不测回切」会漏掉的。
 dc_health_write_keep_last() {
-	local d pref active fail ok res last tmp
+	local d pref active fail ok res last
 
 	d="$1"; pref="$2"; active="$3"; fail="$4"; ok="$5"; res="$6"
 
@@ -1487,17 +1467,7 @@ dc_health_write_keep_last() {
 	last=$(dc_health_field "$d" 6 2>/dev/null)
 	[ -n "$last" ] || last=$(date +%s 2>/dev/null || echo 0)
 
-	mkdir -p "$DNSCHAIN_STATE_DIR" || return 1
-	tmp=$(mktemp) || return 1
-
-	if [ -r "$DNSCHAIN_HEALTH_STATE" ]; then
-		awk -F'|' -v d="$d" '$1 != d' "$DNSCHAIN_HEALTH_STATE" > "$tmp" 2>/dev/null
-	fi
-
-	printf '%s|%s|%s|%s|%s|%s|%s\n' \
-		"$d" "$pref" "$active" "$fail" "$ok" "$last" "$res" >> "$tmp"
-
-	mv -f "$tmp" "$DNSCHAIN_HEALTH_STATE" || return 1
+	dc_health_upsert "$d" "$pref" "$active" "$fail" "$ok" "$last" "$res"
 }
 
 # 状态表（供页面与 status 子命令读取）
@@ -1557,6 +1527,35 @@ dc_health_cycle() {
 	enabled=$(dc_get main enabled 1)
 	[ "$enabled" = "1" ] || { echo "SKIP 框架未启用"; return 0; }
 	[ "$(dc_get health enabled 1)" = "1" ] || { echo "SKIP 健康检测未启用"; return 0; }
+
+	# ── 互斥：同一时刻只允许一轮 cycle（v0.14.2）─────────────────
+	#
+	# 为什么需要：daemon 每 interval 秒跑一轮，而页面「立即探测一轮」
+	# 按钮随时可触发。两轮并发时 dc_health_upsert 的
+	# 「读旧文件 → 过滤 → 写临时文件 → mv」不是原子的 ——
+	# 后完成的进程会用自己那份（少了对方新增行）覆盖前者，导致
+	# 状态文件丢行。丢行后 status 少算域名，页面汇总对不上。
+	#
+	# 用 mkdir 做锁（POSIX 里 mkdir 是原子的，且 BusyBox 一定有）。
+	# 不加 `flock`：BusyBox 未必编译该命令。
+	#
+	# 拿不到锁就直接放弃本轮 —— 下一轮 interval 会再来，
+	# 比排队等待更合适（排队会让 daemon 的周期逐渐漂移）。
+	local lockd
+	lockd="$DNSCHAIN_STATE_DIR/.cycle.lock"
+	if ! mkdir "$lockd" 2>/dev/null; then
+		# 锁目录存在：检查持有者是否还活着（防上次异常退出留死锁）
+		local holder
+		holder=$(cat "$lockd/pid" 2>/dev/null)
+		if [ -n "$holder" ] && [ -d "/proc/$holder" ]; then
+			echo "SKIP 已有一轮探测在跑（pid=$holder）"
+			return 0
+		fi
+		# 死锁：清掉重来（此时仍没拿到锁，直接返回即可）
+		rm -rf "$lockd" 2>/dev/null
+		mkdir "$lockd" 2>/dev/null || { echo "SKIP 取锁失败"; return 0; }
+	fi
+	echo $$ > "$lockd/pid" 2>/dev/null
 
 	eport=$(dc_get main entry_port 5353)
 	fport=$(dc_get main foreign_port 5336)
@@ -1685,6 +1684,9 @@ dc_health_cycle() {
 	# wait = 回切等待中（首选链已恢复但未满足 recover_threshold）
 	printf 'CYCLE ok=%s switch=%s bad=%s wait=%s\n' \
 		"$n_ok" "$n_switch" "$n_bad" "$n_wait"
+
+	# 释放互斥锁（正常路径）
+	rm -rf "$lockd" 2>/dev/null
 	return 0
 }
 
