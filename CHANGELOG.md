@@ -2,6 +2,264 @@
 
 本仓库所有功能/配置改动均记录于此。版本判型遵循全局规范（PATCH / MINOR / MAJOR）。
 
+
+## [v0.13.0] - 2026-10-22
+
+### 新增 — 域名归属控制与链路健康自动改道
+
+用户需求（五条）：UI 新增国内外两个自定义域名输入框（可录入/查看/编辑/清除、
+格式校验）；数据库未覆盖域名在当前链路探测不可达时自动改道；明确默认策略
+（国外不通改直连、国内不通改代理）；改道示例要体现在实现里；匹配/探测/切换
+必须可靠且有超时重试判定，不影响现有解析与稳定性。
+
+设计依据：[`docs/adr/0006-domain-routing-and-reroute.md`](docs/adr/0006-domain-routing-and-reroute.md)。
+
+#### 一、三个概念分清（这是整套设计的地基）
+
+| 概念 | 含义 | 谁决定 | 存哪 |
+|---|---|---|---|
+| **归属** | 域名「应该」走哪条链 | 配置 + 名单（静态） | UCI + `db-domains.txt` |
+| **首选** | 由归属推导出的链路 | 归属（确定性映射） | 计算得出 |
+| **当前** | 实际生效的链路 | 健康探测（动态） | `/var/run/dnschain/health.state` |
+
+不分开的后果是「配置」与「运行时」互相污染。分开之后，
+配置文件只描述意图、状态文件只描述事实，两者不一致 = 正在改道中。
+
+#### 二、自定义列表（需求 1）
+
+```
+config domains 'domestic'   list domain 'www.baidu.com'
+config domains 'foreign'    list domain 'www.google.com'
+```
+
+- **两个独立 UCI 段**，不是同一段两个 list（同一段的两个 list 会被
+  CBI 的 `NamedSection` 写回时互相覆盖）
+- 归属优先级：**自定义 > 数据库 > 未覆盖**。自定义优先是刻意的 ——
+  否则用户会遇到「我明明写了走直连，它还是走代理」这种无解困惑
+- 三道校验闸：页面 `validate_domain()`（手误立刻可见）→
+  脚本 `dc_domain_valid()`（兜住直接 `uci set` / 备份恢复）→
+  selftest 第 17 项（事后可查）
+- **页面那道刻意不比脚本更严**：写得过于复杂会误拒合法域名，
+  典型是 `xn--` 形式的 IDNA（`--` 在 punycode 里是正常字符）
+- 不接受通配符：`server=/域名/` 是标签后缀匹配，`*.example.com`
+  会得到一条永远匹配不到的规则，而页面上看不出任何异常
+
+分流结果：
+
+| 归属 | dnsmasq | nftset | 效果 |
+|---|---|---|---|
+| 自定义国内 | `server=/域名/#5353` | `china` | 解析直连，IP 入直连集 |
+| 自定义国外 / 数据库 | `server=/域名/#5336` | `blacklist` | 解析走代理，IP 入代理集 |
+| 未覆盖 | 不写 | — | 落到默认上游（直连） |
+
+`nftset` 目标集**先探测再写**：SSR-Plus 未启用时 `ss_spec` 表不存在，
+写 `nftset=` 会让 dnsmasq 每解析一个域名都尝试写集合失败、日志刷错。
+
+#### 三、自动改道（需求 2/3/4）
+
+**核心规则一句话：首选链不通，且另一条链通 → 切到另一条链。**
+
+两条需求规则是这同一个判定的两个实例（因为首选已由归属决定）：
+
+| 需求原文 | 场景 | 首选 | 另一条 | 结果 |
+|---|---|---|---|---|
+| 国外链失败改直连 | 数据库国外域名 | `foreign` | `domestic` | 切直连 |
+| 国内链失败改代理 | 未覆盖域名 | `domestic` | `foreign` | 切代理 |
+
+> 「未覆盖 → 直连」不是随便定的：dnsmasq 的默认上游就是
+> `127.0.0.1#<entry_port>`，所以未覆盖域名本来就走直连。
+> 改道逻辑必须与这个事实一致，否则「不配置」与「配置了」行为不同。
+
+判定状态机：
+
+```
+情形 A：当前 == 首选
+    r_pref 通     → fail=0，保持
+    r_pref 不通   → fail++；≥ fail_threshold 且 r_other 通 → 改道
+情形 B：当前 != 首选（已改道）
+    r_pref 通     → ok++；≥ recover_threshold 且 停留 ≥ min_dwell → 回切
+    r_pref 不通   → ok=0，保持现状
+双链都不通        → 不改道，标记 both-bad
+```
+
+**双链都不通时不改道**：那不是分流问题，是链路故障。改道只会把
+「两条链都坏」伪装成「一条链能用」，掩盖真正的问题。
+
+阈值默认值与理由：
+
+| 参数 | 默认 | 理由 |
+|---|---|---|
+| `timeout` | 2s | BusyBox `nslookup` 无 `-timeout`，框架自实现硬超时 |
+| `retries` | 2 | 单次 UDP 丢包常见；不重试会让改道变成随机行为 |
+| `fail_threshold` | 2 轮 | 避开单轮抖动（一轮里可能两个域名各丢一次包） |
+| `recover_threshold` | 3 轮 | 链路临界时反复横跳，每次横跳都改一次 servers-file |
+| `min_dwell` | 120s | 同上，另加时间维度下限 |
+| `interval` | 60s | <15s 会被抬到 15s（一轮探测本身 3~10s） |
+
+#### 四、改道只 SIGHUP，不重启 dnsmasq（需求 5 的关键）
+
+`dnschain-split.conf` 通过 `--conf-dir` 加载，而**实测 reload
+（SIGHUP）不重读 conf-dir**（AGENTS §4.4）→ 改它必须 restart，
+代价约 3 秒中断。改道可能每分钟发生，绝不能走 restart。
+
+采用的通道是 `--servers-file`：dnsmasq 收到 SIGHUP 会**重新读取**它
+（`dnsmasq.c` 的 `EVENT_RELOAD` 分支调用 `read_servers_file`）。
+
+```
+改道 → 重写 /var/etc/dnschain/watch.servers → kill -HUP dnsmasq
+```
+
+不重启、不清缓存、不影响未观测域名。UCI 侧通过
+`dhcp.@dnsmasq[0].serversfile` 下发（首刷即写 + 每次启动校验）。
+
+**硬约束：一个域名只能有一处 `server=` 声明。** 同一域名若同时出现在
+静态片段与 `watch.servers` 里，dnsmasq 会把两条 `server=` 当作**候选**
+（不是后者覆盖前者），改道退化成「随机走一条」，且两条链都能解析时
+完全看不出问题。故 `dc_gen_dnsmasq_split()` 必须排除观测域名，
+selftest 第 18 项专查这个重叠。
+
+#### 五、新增运行时组件
+
+| 文件 | 职责 |
+|---|---|
+| `files/usr/bin/dnschain-health` | 探测 / 改道 / 回切 / explain / status / check / apply / reset / daemon |
+| `files/usr/share/dnschain/dnschain.sh` | 新增域名校验、归属判定、分流生成、探测与判定（约 +700 行） |
+| `files/etc/init.d/dnschain` | 分流生成收口到库函数；新增 `update_serversfile`、`start_health_daemon` |
+| `files/etc/config/dnschain` | 新增 `domains`（两个段）与 `health` 段 |
+| `files/etc/uci-defaults/99-zz-dnschain` | 首刷生成派生文件 + 配 `serversfile` |
+| `files/usr/bin/dnschain-selftest` | 新增第 17~20 项（列表合法性 / 片段不重叠 / 通道就绪 / 状态自洽） |
+
+`dc_run_timeout` 的实现要点（踩过两个坑）：
+
+- **超时状态走 stdout，不走变量**。调用方几乎总是
+  `out=$(dc_run_timeout ...)`，而命令替换在**子 shell** 里执行 ——
+  函数内给变量赋值父 shell 看不到，超时会被静默当成「返回空」
+- **必须用完成标记文件，不能只用 `kill -0` 判活**。子进程退出后变成
+  僵尸，`kill -0` 依然成功，会白等满整个超时
+
+#### 六、页面（需求 1 的 UI 部分）
+
+新增第 2 个 tab「**域名**」（`TAB_ORDER` 里紧跟「概览」），三个问题一条链：
+
+1. **自定义域名** —— 两个 `DynamicList` 输入框 + 已录入清单
+   （同时显示「已保存」与「已生效」两份条数：只显示后者时用户保存后
+   看不到变化会反复点保存；只显示前者看不出 apply 是否真的成功）
+2. **判定链路** —— 思维链路图 + 单域名解释
+3. **改道状态** —— 状态思维导图 + 通道就绪性 + 明细表 + 阈值 + 四个操作按钮
+
+#### 七、两张思维导图（用户明确要求）
+
+**判定链路图**（`dcrt`，viewBox 720×486）—— 上下两段对应两个阶段：
+
+```
+上段：域名 → 归属（自定义国内/未覆盖/自定义国外/数据库）→ 首选（直连/代理）
+下段：链路探测 → 探测首选链 / 探测另一条链 → 保持 / 改道 / 双链故障
+```
+
+按**结果**分组而不是按来源分组：用户真正想知道「走直连还是走代理」，
+按结果分组时每两条线汇聚到同一节点，一眼看出归属与去向的对应；
+按来源分组则会出现两条长斜线跨越整张图（`uncovered → 直连` 要跨过
+「代理」那一行），正是「看起来像断链」的典型形态。
+
+**改道状态图**（`dcst`，viewBox 760×动态）—— 一个根分五档：
+
+| 档 | 色 | 含义 | 下一步 |
+|---|---|---|---|
+| 正常 | 绿 | 首选链可达 | 无需动作 |
+| 降级中 | 黄 | 首选开始失败，未达阈值 | 观察 |
+| 已改道 | 黄 | 已自动切到另一条 | 观察，恢复后自动回切 |
+| 双链故障 | 红 | 两条链都不通 | **动手查** dnsproxy 与代理 |
+| 固定归属 | 蓝 | 自定义指定 | 不参与改道 |
+
+**为什么分五档而不是「正常/异常」两档**：把「已自动改道并恢复可用」
+与「两条链都不通」混在一起是错的 —— 前者不需要人介入、后者必须人介入。
+分档之后红黄绿含义唯一，用户看到红色就知道要动手。
+
+图下都写明读图规则与需求原文，图能表达结构但规则要可核对。
+
+#### 八、验证
+
+新增三个本地校验工具（CI 与本地跑同一份逻辑）：
+
+| 工具 | 断言数 | 覆盖 |
+|---|---|---|
+| `tools/verify-dnschain-domains.sh` | 88 | 需求 1~5 的每条落地 + 图示约束 + 无嵌套 form |
+| `tools/check-dnschain-lua.py` | 77 | 语法 + controller + 模型 + **真实渲染页面全部 DummyValue** + HTML 标签配对 |
+| `tools/render-dnschain-diagrams.py` | 24 | 纯几何：越界 / 重叠 / 控制点交叉 / marker 前缀 / 转义 |
+
+外加 dash 单测 94 条（71 + 23，含需求第 4 条的两个改道示例）。
+
+`tools/check-dnschain-lua.py` 用 lupa（真实 Lua 解释器）而非 `luac -p`：
+不只查语法，还要**执行**每个 `cfgvalue()`，才能抓到拼错的方法名、
+nil 索引、未定义变量这类只在渲染时才暴露的错。
+
+#### 九、同时修掉的两个既有断言误报
+
+- **CI 的 `[[ ]]` 检查会命中 POSIX 字符类 `[[:space:]]`**。
+  本仓库 `dnschain.sh` 里有 `sed -e 's/^[[:space:]]*//'`，
+  旧断言把它判成 bash 语法 → CI 永远红。改为「`[[` 后紧跟空白」才算。
+- **`verify-dnschain-ci-sim.sh` 在 Windows 上崩于 GBK**。
+  workflow 注释里有 `⚠️`，Python 默认用 GBK 写 stdout 会
+  `UnicodeEncodeError`。CI 是 Linux（UTF-8）看不出，而本地复跑正是
+  这个脚本的用途，故显式指定 UTF-8。
+
+#### 十、已知取舍
+
+- **只探测观测列表，不做全量探测**（3.5 万域名一轮几小时，且会把
+  dnsmasq 与 dnsproxy 打满）。改道只对观测域名生效，其余按静态归属走。
+  理由：一个能说清楚「这 8 个域名现在走哪」的系统，比一个
+  「什么都在改但什么都看不见」的系统更可靠。
+- 观测列表目前靠手工 + 内置基准集，未做「按流量自动挑选」。
+- 改道只保留最后一次结果，没有时间序列。
+
+#### 十一、路由器实测发现并修掉的 8 个问题
+
+本地 8 层校验（dash 语法、shell 单测、lupa 真实 Lua、图示几何、
+契约断言、CI 模拟、i18n、JS/JSON）**全部通过之后**，部署到
+OpenWrt 24.10.5 实测才暴露出来的问题。记在这里是因为每一条都
+只能靠「在真机上跑一遍」发现，静态检查与单测都看不见。
+
+| # | 症状 | 根因 | 修法 |
+|---|---|---|---|
+| 1 | `uci` 报 `Parse error (section of different type overwrites prior section with same name)`，**整个配置文件读不出来** | `config domains 'foreign'` 与已有的 `config upstream 'foreign'` **同名**。UCI 的 section 名是**文件级唯一**，与类型无关 | 改名 `dom_domestic` / `dom_foreign`，并加「section 名全局唯一」断言 |
+| 2 | `dnschain restart` 报 `foreign-split.conf 为空`，链路起不来 | `custom-domestic.txt` 默认是**空文件**，而 BusyBox `grep -Fvxf <空文件>` 返回 rc=1 且**输出零行**（不是「一条都不排除」，而是把输入全吞掉） | 新增 `dc_exclude`：排除文件为空时走 `cat` 放行 |
+| 3 | 改道写进 `watch.servers` 后 SIGHUP 成功，但**改道完全没生效**，且日志干净 | `watch.servers` 在 `/var/etc/dnschain/` 下：既不在 ujail 挂载白名单、文件又是 `0600 root:root`，而 dnsmasq 降权到 **uid 453** 运行 | 移到 `/var/run/dnsmasq/`（ujail 已 `-rw` 挂载）+ `chmod 0644` |
+| 4 | 同一症状的另一半：`dc_dnsmasq_pid` 选中**辅助子进程** | `pidof dnsmasq` 返回 3 个 PID，第一个是 `wchan=anon_pipe_read` 的辅助进程，对它 SIGHUP 是空操作 | 改用「持有 :53 socket 的 PID」（`/proc/net/udp` inode 反查） |
+| 5 | `www.google.com` / `www.youtube.com` 拿到**污染答案**（`31.13.92.37` 是 Facebook 的 IP） | 归属判定用 `grep -Fqx` 精确匹配，而 gfw 名单只写了 `google.com`；dnsmasq 的 `server=/google.com/` 对子域名生效 → 子域名被判 `uncovered` → 首选 domestic → 改道拉去直连 | 归属判定改为**逐级剥标签的后缀匹配**，与 dnsmasq 语义对齐；自定义列表仍保持精确匹配（两种语义不能混） |
+| 6 | 死端口被探测判为 `OK`，于是「链路挂了却不改道」 | `dc_probe_chain` 只认 `foreign`/`domestic` 两个链路名，其它落到 `*)` 分支取 `entry_port` → 传 `127.0.0.1#59999` 会被**静默改成**探测 `:5353`（活的） | 支持显式端口形式（`host:port` / `host#port`） |
+| 7 | 改道后**永远不回切**，状态卡在 `recover-wait:OK`（ok 计数涨到 12，阈值 3） | 等待分支每轮都调 `dc_health_write`（写 `last=now`），`now - last` 恒为 0 → `min_dwell` 永不满足 | 新增 `dc_health_write_keep_last`：等待期间**不更新 last**，`last` 保持为「改道发生的那一刻」 |
+| 8 | 打开页面 **HTTP 500**：`attempt to call global 'translate' (a nil value)` | `diagrams.lua` 是被 `require` 的**普通模块**，没有 dispatcher 注入的全局 `translate`。本地测试预置了 `translate` 桩，所以本地全绿、路由器 500 | 显式 `local i18n = require "luci.i18n"`；测试同时提供 `luci.i18n` 模块并加「模块文件不得裸调 translate」断言 |
+
+第 8 条的教训最值得记：**测试桩比真实环境宽松，问题就会溜过去**。
+本地 lupa 测试给 `_G.translate` 注入了桩，于是 `diagrams.lua` 里写裸
+`translate` 也能跑通；而真实 LuCI 里只有 CBI 模型文件才享有注入。
+修法是同时补 `luci.i18n` 模块桩**并**加静态断言，
+让「本地通过」与「路由器可用」的判据一致。
+
+#### 十二、路由器端实测结论（2026-10-22）
+
+| 验证 | 结果 |
+|---|---|
+| `dnschain-selftest`（20 项） | PASS=20 FAIL=0 SKIP=0 |
+| 五条需求端到端验收 | PASS=54 FAIL=0 |
+| 改道 + 回切（nft 真实故障注入） | PASS=14 FAIL=0 |
+| LuCI 页面真实登录渲染（4 个 tab） | PASS=15 FAIL=0，HTTP 200 / 135 KB |
+
+改道与回切的实测轨迹（用 `nft` 阻断 `lo -> :5353` 制造真实故障）：
+
+```
+基线          端口=5353 状态=ok
+注入故障      探测=TIMEOUT
+轮 1          端口=5353 状态=degraded      ← 未达阈值
+轮 2          端口=5336 状态=rerouted      ← 改道成功
+撤销故障      探测=OK
+轮 1-2        端口=5336 状态=rerouted      ← 等 recover_threshold
+轮 3          端口=5353 状态=ok            ← 回切成功
+```
+
+`min_dwell=120s` 在测试窗口内是刻意回拨 `last` 才观察到的 ——
+它是防抖设计，不是缺陷。
+
 ## [v0.12.5] - 2026-10-22
 
 ### 变更 — 解析链路图改为思维导图形态（带弧度、不断链）

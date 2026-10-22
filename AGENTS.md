@@ -20,6 +20,10 @@
 | `patches/luci-app-trafficctl/*.patch` | trafficctl 相对上游的差分记录（**不参与构建**，供跟进上游 + CI 一致性校验） | 由 `tools/regen-trafficctl-patches.py` 生成，勿手改 |
 | `tools/sync-trafficctl.sh` | 升级 trafficctl 到指定上游 tag（覆盖包目录 + 重算 patch + 回放校验） | 直接用 |
 | `tools/check-trafficctl-i18n.py` | 校验中文翻译覆盖率；`--write-pot` 重生成 pot 模板 | 直接用 |
+| `tools/verify-dnschain-domains.sh` | 域名归属与自动改道的 99 条契约断言（CI 与本地同一份） | 直接用 |
+| `tools/check-dnschain-lua.py` | 用 lupa（真实 Lua）跑语法 + 模型 + **真实渲染页面每个 `cfgvalue()`** | 直接用 |
+| `tools/render-dnschain-diagrams.py` | 两张思维导图的纯几何校验 + 输出可打开的 HTML 预览 | 直接用 |
+| `tools/extract-dnschain-i18n.py` | 提取 `translate()` 中文并比对 PO（`--write` 追加缺失） | 直接用 |
 | `patches/luci-app-dnsproxy/*.patch` | 上游 `adm1n5ky/luci-app-dnsproxy` 的**改动以 patch 形式**维护 | **禁止**改上游；只改 patch |
 | `files/` | rootfs overlay（`files/etc/...` 合并进固件），**不是**上游源码 | 直接改 |
 | `CHANGELOG.md` | 变更的唯一权威记录；版本判型 PATCH/MINOR/MAJOR | 每次功能改动必须追加 |
@@ -408,6 +412,61 @@ dnsmasq:53（唯一缓存 + 唯一分流层）
 `dnschain-split.conf` 指向 `:5336`。实测 dnsmasq 对同一域名的多条 `server=`
 会全部作为候选，`:5335` 无监听时自动重试其它候选）；
 **所有脚本必须 POSIX sh（dash）兼容**（CI 用 `sh -n` + 禁 bash 语法双检）。
+
+### 4.0.1 ⚠️ 域名归属与自动改道的硬约束（v0.13.0）
+
+> 设计依据：[`docs/adr/0006-domain-routing-and-reroute.md`](docs/adr/0006-domain-routing-and-reroute.md)。
+> 落地校验：`sh tools/verify-dnschain-domains.sh`（99 条断言，CI 会跑）。
+
+先记住三个概念，混了就必然改错：
+
+| 概念 | 谁决定 | 存哪 |
+|---|---|---|
+| **归属**（class） | 配置 + 名单（静态） | UCI + `/var/etc/dnschain/db-domains.txt` |
+| **首选**（preferred） | 归属的确定性映射 | 计算得出 |
+| **当前**（active） | 健康探测（动态） | `/var/run/dnschain/health.state` |
+
+| # | 约束 | 违反的后果 | 断言 |
+|---|---|---|---|
+| 13 | **自定义列表优先于 gfw 名单**（`custom-*` 先于 `db-foreign` 判定） | 用户写了「走直连」却不生效，且无从解释 | 有 |
+| 14 | **未覆盖域名的首选链必须是 `domestic`** | 与 dnsmasq 默认上游不一致 →「不配置」与「配置了」行为不同 | 有 |
+| 15 | **同一个域名只能有一处 `server=` 声明**：观测域名必须从静态片段里排除 | dnsmasq 把两条当**候选**（不是覆盖）→ 改道退化成随机走一条，两条链都通时完全看不出来 | 有（selftest 第 18 项） |
+| 16 | **改道只走 `--servers-file` + SIGHUP，绝不 restart dnsmasq** | 改道可能每分钟发生，restart 每次约 3 秒解析中断 | 有（改道循环内禁 restart） |
+| 17 | **`dhcp.@dnsmasq[0].serversfile` 必须下发且进程真带 `--servers-file`** | 只写文件不生效：页面显示「已改道」，实际没生效 | 有（selftest 第 19 项 + 页面「改道通道」） |
+| 18 | **超时状态必须走 stdout，不能靠函数内变量** | `out=$(f)` 在子 shell 里跑，父 shell 读不到变量 → 超时被静默当成「返回空」 | 有 |
+| 19 | **超时必须用完成标记文件，不能只用 `kill -0` 判活** | 子进程退出成僵尸，`kill -0` 仍成功 → 白等满整个超时 | 有（dash 单测含超时用例） |
+| 20 | **`nftset` 目标集必须先 `nft list set` 探测再写** | SSR-Plus 未启用时 `ss_spec` 表不存在，dnsmasq 每解析一个域名都写集合失败、日志刷错 | 有 |
+| 21 | **页面不得嵌套 `<form>`**（CBI 已把整页包在 `<form method="post">` 里） | 浏览器丢掉内层标签 →「解释」按钮实际提交外层表单（= 触发保存） | 有 |
+| 22 | **两张图的 marker id 必须带不同前缀**（`dcrt` / `dcst`） | 同页两张 SVG，id 是文档级全局的，同名会全部解析到第一个定义（颜色串掉） | 有 |
+| 23 | **图示动态文本必须 HTML 转义** | 域名或原因含 `& < >` 时整张图解析失败（页面一片空白） | 有 |
+| 24 | **`[[:space:]]` 不是 `[[ ]]`**：CI 的 bash 语法断言必须写成「`[[` 后紧跟空白」 | 直接 `grep '\[\['` 会命中 POSIX 字符类 → CI 永远红（v0.13.0 实测踩过） | 有 |
+| 25 | **UCI section 名在文件内必须全局唯一**（与类型无关） | `config domains 'foreign'` 与 `config upstream 'foreign'` 同名 → uci 报 `section of different type overwrites`，**整个配置文件读不出来**，页面空白 + 服务起不来 | 有 |
+| 26 | **`servers-file` 必须放在 ujail 已挂载目录**（`/var/run/dnsmasq/`），且文件 `0644` | dnsmasq 降权到 uid 453 运行，白名单外的路径**既不报错也不生效** → SIGHUP 成功、日志干净，改道却完全没发生 | 有（selftest 第 19 项） |
+| 27 | **`dc_dnsmasq_pid` 必须选「持有 :53 socket」的进程**，不能取 `pidof` 第一个 | `pidof dnsmasq` 返回 3 个 PID，第一个是辅助子进程（`wchan=anon_pipe_read`、5 个 fd），对它 SIGHUP 是空操作 | 有 |
+| 28 | **排除文件为空时不得直接 `grep -Fvxf`** | BusyBox `grep -Fvxf <空文件>` 返回 rc=1 且**输出零行** → 把输入全吞掉 → 分流片段变 0 字节 → preflight 拒绝启动 | 有（`dc_exclude`） |
+| 29 | **归属判定必须做后缀匹配**（与 `server=/域名/` 语义一致）；自定义列表保持精确匹配 | 名单只写 `google.com` 时 `www.google.com` 被判 `uncovered` → 首选 domestic → 改道拉去直连 → **拿到污染答案**（实测 `31.13.92.37`，是 Facebook 的 IP） | 有 |
+| 30 | **探测函数必须支持显式端口**，不能只认链路名 | 传 `127.0.0.1#59999` 会落到兜底分支探 `:5353`（活的）→ 死端口判为 `OK` → 「链路挂了却不改道」 | 有 |
+| 31 | **改道等待期间不得更新 `last`**（用 `dc_health_write_keep_last`） | 每轮刷 `last=now` → `now-last` 恒为 0 → `min_dwell` 永不满足 → **回切被永久阻塞**（实测 ok 计数涨到 12、阈值 3，状态一直 `recover-wait`） | 有 |
+| 32 | **被 `require` 的模块文件不得依赖全局 `translate`**，必须 `require "luci.i18n"` | 只有 CBI 模型文件享有 dispatcher 注入；模块里写裸 `translate` 会在 `cfgvalue()` 期间抛 nil value → **整页 500**。本地测试预置了 `translate` 桩，所以本地全绿、路由器 500 | 有 |
+
+**改道判定的一句话规则**：首选链不通、且另一条链通 → 切到另一条。
+两条需求规则（国外不通改直连 / 国内不通改代理）是这同一判定的两个实例，
+因为首选已由归属决定。**双链都不通时不改道** —— 那是链路故障，
+改道只会掩盖问题，页面标 `both-bad` 红档。
+
+**新增/修改这一块后必须跑**（CI 同一份逻辑）：
+
+```sh
+sh tools/verify-dnschain-domains.sh          # 99 条契约断言
+python3 tools/check-dnschain-lua.py          # 83 条：语法 + 模型 + 真实渲染页面
+python3 tools/render-dnschain-diagrams.py    # 30 条：图示纯几何
+python3 tools/extract-dnschain-i18n.py       # 中文文案完整性（缺译会中英混排）
+sh tools/verify-dnschain-ci-sim.sh           # 复现 CI 的目录场景
+```
+
+`tools/check-dnschain-lua.py` 用 lupa（真实 Lua 解释器）**执行**每个
+`cfgvalue()`，而不只是 `luac -p` —— 拼错的方法名、nil 索引、未定义变量
+都只在渲染时才暴露，语法检查抓不到。
 
 **853 拒绝的优先级已实测**（2026-10-20，路由器上）：
 裸 chain + `priority -151` 单独 `nft -f` 会报语法错误（缺 table 上下文，属预期）；

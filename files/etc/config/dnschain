@@ -103,6 +103,93 @@ config cache 'cache'
 	option enabled '1'
 	option size '8192'
 
+# ============================================================
+# 自定义域名列表（v0.13.0）
+# ------------------------------------------------------------
+# 两个 list 的语义完全不同，不要混：
+#
+#   domestic  用户手工录入「必须走国内链路」的域名
+#             → dnsmasq: server=/域名/127.0.0.1#<entry_port>（直连出口）
+#             → 同时写入 nft china 集，保证后续 TCP/UDP 也直连
+#
+#   foreign   用户手工录入「必须走国外链路」的域名
+#             → dnsmasq: server=/域名/127.0.0.1#<foreign_port>（代理出口）
+#             → 同时写入 nft blacklist 集，保证后续流量进 :1234
+#
+# 优先级：自定义 > 数据库（gfw 名单）> 未覆盖。
+# 即「用户写的就是最终答案」，名单的自动判定不能覆盖它。
+#
+# 格式：必须是合法域名（含 xn-- 形式），不接受通配符、IP、URL。
+# 校验在页面（保存前）与脚本（生成前）各做一次 —— 页面拦住手误，
+# 脚本兜住直接改 UCI 的情形，两道都不放行非法条目。
+#
+# ⚠️ section 名**不能叫 'foreign'**（v0.13.0 实测踩过）：
+#   UCI 的 section 名在**同一个配置文件内必须唯一，与类型无关**。
+#   本文件上面已有 `config upstream 'foreign'`，再写
+#   `config domains 'foreign'` 会让 uci 直接报
+#       Parse error (section of different type overwrites prior section
+#       with same name)
+#   并且**整个 /etc/config/dnschain 都读不出来** —— 框架所有 uci 取值
+#   全部失败，症状是「页面空白 + 服务起不来」，而报错只提 section 重名。
+#   故这里统一用 dom_ / for_ 前缀，与类型名区分开。
+# ============================================================
+config domains 'dom_domestic'
+	# 默认留空：不预设任何域名的归属，行为完全由名单与健康检测决定。
+	# 空 list 不要写成 `list domain ''` —— 那会落一个空值，
+	# 生成分流时要额外过滤一次，而空值在页面上也会显示成一个空条目。
+
+config domains 'dom_foreign'
+
+# ============================================================
+# 链路健康检测与自动改道（v0.13.0）
+# ------------------------------------------------------------
+# 只对 health.watch 里的域名做探测 —— 不做全量探测。
+# 理由：全量（3.5 万域名）既不可能（一轮要几小时），也会把
+# dnsmasq 与 dnsproxy 打满。故采取「抽样观测」：
+#
+#   观测列表 = 用户手工指定 + 自动补 4 个国内、4 个国外基准域名
+#   一轮只探这十来个，任何一个出问题都能立刻在页面上看到。
+#
+# 改道规则（需求原文的落地）：
+#   未录入自定义列表的域名
+#     · 国外链路探测不通 → 改走直连
+#     · 国内链路探测不通 → 改走代理
+#   即：首选链不通且另一条链通 → 切到另一条。
+#   两条链都不通时不改道（那是链路故障，不是分流问题）。
+#
+# 改道只改 watch.servers（dnsmasq 的 --servers-file）+ SIGHUP，
+# 不重启 dnsmasq、不清缓存、不影响未观测的域名。
+# ============================================================
+config health 'health'
+	# 总开关：关闭后不探测、不改道，静态分流照常
+	option enabled '1'
+	# 单次探测的硬超时（秒）。BusyBox nslookup 没有 -timeout，
+	# 框架自己实现硬超时，故这个值就是真实上界。
+	option timeout '2'
+	# 每次探测的重试次数（不含首次）。单次 UDP 丢包很常见，
+	# 不重试会让改道变成随机行为。
+	option retries '2'
+	# 连续失败多少轮才判定「不通」。取 2 是为了避开单轮抖动：
+	# 一轮探测可能同时碰上两个域名各丢一次包。
+	option fail_threshold '2'
+	# 连续成功多少轮才回切到首选链。取 3 且配合 min_dwell，
+	# 避免链路在临界状态下反复横跳（每次横跳都改一次 servers-file）。
+	option recover_threshold '3'
+	# 改道后至少停留多少秒才允许回切。
+	option min_dwell '120'
+	# 探测轮询间隔（秒）。0 = 不自动轮询，只能从页面手动触发。
+	option interval '60'
+	# 观测域名（用户可增删）。清空后脚本会回落到内置基准集，
+	# 不会出现「一个都不探 → 页面永远显示无数据」的空转状态。
+	list watch 'www.baidu.com'
+	list watch 'www.taobao.com'
+	list watch 'www.qq.com'
+	list watch 'www.163.com'
+	list watch 'www.google.com'
+	list watch 'www.youtube.com'
+	list watch 'github.com'
+	list watch 'www.wikipedia.org'
+
 config selftest 'selftest'
 	option auto_rollback '1'
 	option interval '300'

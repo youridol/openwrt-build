@@ -59,6 +59,8 @@
 **/etc/uci-defaults/99-zz-dnschain     text eol=lf
 **/usr/bin/dnschain-reconcile          text eol=lf
 **/usr/bin/dnschain-selftest           text eol=lf
+**/usr/bin/dnschain-health             text eol=lf
+**/usr/share/dnschain/dnschain.sh      text eol=lf
 **/etc/capabilities/dnschain-filter.json text eol=lf
 
 # LuCI 主题 shadcn（设为默认主题）

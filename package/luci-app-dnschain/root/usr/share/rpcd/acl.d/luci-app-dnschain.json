@@ -19,7 +19,8 @@
 			},
 			"command": [
 				"/usr/bin/dnschain-selftest",
-				"/usr/bin/dnschain-reconcile"
+				"/usr/bin/dnschain-reconcile",
+				"/usr/bin/dnschain-health"
 			]
 		},
 		"write": {
@@ -31,6 +32,7 @@
 			"command": [
 				"/usr/bin/dnschain-selftest",
 				"/usr/bin/dnschain-reconcile",
+				"/usr/bin/dnschain-health",
 				"/etc/init.d/dnschain",
 				"/etc/init.d/dnsmasq"
 			]

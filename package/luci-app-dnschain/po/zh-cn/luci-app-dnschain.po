@@ -838,3 +838,420 @@ msgstr "默认 → 国内上游"
 
 msgid "gfw 域名 → 经代理出站"
 msgstr "gfw 域名 → 经代理出站"
+
+msgid "域名"
+msgstr "域名"
+
+msgid "自定义域名"
+msgstr "自定义域名"
+
+msgid "判定链路"
+msgstr "判定链路"
+
+msgid "改道状态"
+msgstr "改道状态"
+
+msgid "改道明细"
+msgstr "改道明细"
+
+msgid "观测与阈值"
+msgstr "观测与阈值"
+
+msgid "域名操作"
+msgstr "域名操作"
+
+msgid "自定义 · 国内"
+msgstr "自定义 · 国内"
+
+msgid "自定义 · 国外"
+msgstr "自定义 · 国外"
+
+msgid "数据库命中"
+msgstr "数据库命中"
+
+msgid "未覆盖"
+msgstr "未覆盖"
+
+msgid "格式非法"
+msgstr "格式非法"
+
+msgid "不能含空格："
+msgstr "不能含空格："
+
+msgid "只能包含字母、数字、点与连字符："
+msgstr "只能包含字母、数字、点与连字符："
+
+msgid "点的位置不对："
+msgstr "点的位置不对："
+
+msgid "至少要有两级（例如 example.com）："
+msgstr "至少要有两级（例如 example.com）："
+
+msgid "顶级域至少 2 位："
+msgstr "顶级域至少 2 位："
+
+msgid "顶级域不能是纯数字："
+msgstr "顶级域不能是纯数字："
+
+msgid "手工指定域名走哪条链。<b>自定义优先于名单</b>：写在这里的域名不再受 gfw 名单影响，也<b>不参与自动改道</b> —— 你写的就是最终答案。<br/>格式：只接受域名（含 <code>xn--</code> 形式），不接受通配符、IP、URL。"
+msgstr "手工指定域名走哪条链。<b>自定义优先于名单</b>：写在这里的域名不再受 gfw 名单影响，也<b>不参与自动改道</b> —— 你写的就是最终答案。<br/>格式：只接受域名（含 <code>xn--</code> 形式），不接受通配符、IP、URL。"
+
+msgid "国内域名（走直连）"
+msgstr "国内域名（走直连）"
+
+msgid "这些域名交给国内 dnsproxy 实例（直连出口），解析结果同时写入 <code>china</code> IP 集，保证后续流量也直连。"
+msgstr "这些域名交给国内 dnsproxy 实例（直连出口），解析结果同时写入 <code>china</code> IP 集，保证后续流量也直连。"
+
+msgid "手工指定域名走哪条链。<b>自定义优先于名单</b>：写在这里的域名不再受 gfw 名单影响，也<b>不参与自动改道</b>。"
+msgstr "手工指定域名走哪条链。<b>自定义优先于名单</b>：写在这里的域名不再受 gfw 名单影响，也<b>不参与自动改道</b>。"
+
+msgid "国外域名（走代理）"
+msgstr "国外域名（走代理）"
+
+msgid "这些域名交给国外 dnsproxy 实例（经 <code>:1234</code> 代理出口），解析结果写入 <code>blacklist</code> IP 集，保证后续流量进代理。"
+msgstr "这些域名交给国外 dnsproxy 实例（经 <code>:1234</code> 代理出口），解析结果写入 <code>blacklist</code> IP 集，保证后续流量进代理。"
+
+msgid "已录入清单"
+msgstr "已录入清单"
+
+msgid "已生效"
+msgstr "已生效"
+
+msgid "待应用（生效 %d 条）"
+msgstr "待应用（生效 %d 条）"
+
+msgid "（空）"
+msgstr "（空）"
+
+msgid "列表"
+msgstr "列表"
+
+msgid "条数"
+msgstr "条数"
+
+msgid "国内（直连）"
+msgstr "国内（直连）"
+
+msgid "国外（代理）"
+msgstr "国外（代理）"
+
+msgid "点「保存并应用」才会重建分流规则（会重启 dnsmasq，约 3 秒解析中断）。"
+msgstr "点「保存并应用」才会重建分流规则（会重启 dnsmasq，约 3 秒解析中断）。"
+
+msgid "走法"
+msgstr "走法"
+
+msgid "单域名解释"
+msgstr "单域名解释"
+
+msgid "输入域名，例如 github.com"
+msgstr "输入域名，例如 github.com"
+
+msgid "解释"
+msgstr "解释"
+
+msgid "输入一个域名，下面会列出它的归属、首选链路、两条链的实测结果与最终判定。"
+msgstr "输入一个域名，下面会列出它的归属、首选链路、两条链的实测结果与最终判定。"
+
+msgid "取不到解释结果 —— 检查 /usr/bin/dnschain-health 是否存在且可执行。"
+msgstr "取不到解释结果 —— 检查 /usr/bin/dnschain-health 是否存在且可执行。"
+
+msgid "数据库命中（gfw 名单）"
+msgstr "数据库命中（gfw 名单）"
+
+msgid "未覆盖（名单里没有）"
+msgstr "未覆盖（名单里没有）"
+
+msgid "直连链路"
+msgstr "直连链路"
+
+msgid "代理链路"
+msgstr "代理链路"
+
+msgid "改走直连"
+msgstr "改走直连"
+
+msgid "改走代理"
+msgstr "改走代理"
+
+msgid "双链故障"
+msgstr "双链故障"
+
+msgid "固定归属，不改道"
+msgstr "固定归属，不改道"
+
+msgid "拒绝"
+msgstr "拒绝"
+
+msgid "保持直连"
+msgstr "保持直连"
+
+msgid "保持代理"
+msgstr "保持代理"
+
+msgid "归属"
+msgstr "归属"
+
+msgid "首选链路"
+msgstr "首选链路"
+
+msgid "当前链路"
+msgstr "当前链路"
+
+msgid "探测 · 直连"
+msgstr "探测 · 直连"
+
+msgid "探测 · 代理"
+msgstr "探测 · 代理"
+
+msgid "答案 · 直连"
+msgstr "答案 · 直连"
+
+msgid "答案 · 代理"
+msgstr "答案 · 代理"
+
+msgid "参与改道"
+msgstr "参与改道"
+
+msgid "否（自定义固定）"
+msgstr "否（自定义固定）"
+
+msgid "是"
+msgstr "是"
+
+msgid "判定"
+msgstr "判定"
+
+msgid "理由"
+msgstr "理由"
+
+msgid "状态导图"
+msgstr "状态导图"
+
+msgid "改道通道"
+msgstr "改道通道"
+
+msgid "dhcp.@dnsmasq[0].serversfile 未设置 —— 改道无法生效"
+msgstr "dhcp.@dnsmasq[0].serversfile 未设置 —— 改道无法生效"
+
+msgid "dnsmasq 未运行"
+msgstr "dnsmasq 未运行"
+
+msgid "读不到 dnsmasq 的进程参数"
+msgstr "读不到 dnsmasq 的进程参数"
+
+msgid "UCI 已配 %s，但 dnsmasq 进程里没有 --servers-file（需重启 dnsmasq）"
+msgstr "UCI 已配 %s，但 dnsmasq 进程里没有 --servers-file（需重启 dnsmasq）"
+
+msgid "已就绪"
+msgstr "已就绪"
+
+msgid "未就绪"
+msgstr "未就绪"
+
+msgid "明细"
+msgstr "明细"
+
+msgid "还没有探测数据。点下方「立即探测一轮」，或等待一个轮询间隔。"
+msgstr "还没有探测数据。点下方「立即探测一轮」，或等待一个轮询间隔。"
+
+msgid "降级中"
+msgstr "降级中"
+
+msgid "已改道"
+msgstr "已改道"
+
+msgid "固定归属"
+msgstr "固定归属"
+
+msgid "未探测"
+msgstr "未探测"
+
+msgid "链路"
+msgstr "链路"
+
+msgid "连败"
+msgstr "连败"
+
+msgid "最近探测"
+msgstr "最近探测"
+
+msgid "原因"
+msgstr "原因"
+
+msgid "只探测<b>观测列表</b>里的域名，不做全量探测 —— 3.5 万个域名一轮要几小时，也会把 dnsmasq 与 dnsproxy 打满。"
+msgstr "只探测<b>观测列表</b>里的域名，不做全量探测 —— 3.5 万个域名一轮要几小时，也会把 dnsmasq 与 dnsproxy 打满。"
+
+msgid "启用健康检测与自动改道"
+msgstr "启用健康检测与自动改道"
+
+msgid "关闭后不探测、不改道，静态分流照常工作。"
+msgstr "关闭后不探测、不改道，静态分流照常工作。"
+
+msgid "观测域名"
+msgstr "观测域名"
+
+msgid "清空后会自动回落到内置基准集（国内外各 4 个）。"
+msgstr "清空后会自动回落到内置基准集（国内外各 4 个）。"
+
+msgid "单次探测超时（秒）"
+msgstr "单次探测超时（秒）"
+
+msgid "BusyBox 的 <code>nslookup</code> 没有 <code>-timeout</code> 参数，框架自己实现硬超时，所以这个值就是真实上界。"
+msgstr "BusyBox 的 <code>nslookup</code> 没有 <code>-timeout</code> 参数，框架自己实现硬超时，所以这个值就是真实上界。"
+
+msgid "重试次数"
+msgstr "重试次数"
+
+msgid "每次探测失败后的重试次数（不含首次）。单次 UDP 丢包很常见，不重试会让改道变成随机行为。"
+msgstr "每次探测失败后的重试次数（不含首次）。单次 UDP 丢包很常见，不重试会让改道变成随机行为。"
+
+msgid "改道阈值（连败轮数）"
+msgstr "改道阈值（连败轮数）"
+
+msgid "连续失败多少轮才判定「不通」。取 1 会让单轮抖动直接触发改道。"
+msgstr "连续失败多少轮才判定「不通」。取 1 会让单轮抖动直接触发改道。"
+
+msgid "回切阈值（连续成功轮数）"
+msgstr "回切阈值（连续成功轮数）"
+
+msgid "首选链连续成功多少轮才回切。配合「最小驻留」避免临界状态反复横跳。"
+msgstr "首选链连续成功多少轮才回切。配合「最小驻留」避免临界状态反复横跳。"
+
+msgid "最小驻留（秒）"
+msgstr "最小驻留（秒）"
+
+msgid "改道后至少停留多久才允许回切。"
+msgstr "改道后至少停留多久才允许回切。"
+
+msgid "0 = 不自动轮询，只能从下方按钮手动触发。小于 15 秒会被抬到 15 秒（一轮探测本身就要 3~10 秒，更短只会让两轮重叠）。"
+msgstr "0 = 不自动轮询，只能从下方按钮手动触发。小于 15 秒会被抬到 15 秒（一轮探测本身就要 3~10 秒，更短只会让两轮重叠）。"
+
+msgid "保存并应用"
+msgstr "保存并应用"
+
+msgid "重建分流片段与动态上游文件，并重启 dnsmasq 让静态规则生效。<br/><b>会有约 3 秒解析中断</b> —— 静态片段通过 conf-dir 加载，实测 reload（SIGHUP）不会重读它，只能 restart。"
+msgstr "重建分流片段与动态上游文件，并重启 dnsmasq 让静态规则生效。<br/><b>会有约 3 秒解析中断</b> —— 静态片段通过 conf-dir 加载，实测 reload（SIGHUP）不会重读它，只能 restart。"
+
+msgid "已应用"
+msgstr "已应用"
+
+msgid "立即探测一轮"
+msgstr "立即探测一轮"
+
+msgid "跑一轮健康检测并按阈值判定是否改道。<b>不会重启 dnsmasq</b>：改道只改 servers-file 并 SIGHUP。"
+msgstr "跑一轮健康检测并按阈值判定是否改道。<b>不会重启 dnsmasq</b>：改道只改 servers-file 并 SIGHUP。"
+
+msgid "探测完成"
+msgstr "探测完成"
+
+msgid "清空改道状态"
+msgstr "清空改道状态"
+
+msgid "把所有「已改道」撤回，回到「按归属走」。用于排障时确认某条链是否真的坏了。"
+msgstr "把所有「已改道」撤回，回到「按归属走」。用于排障时确认某条链是否真的坏了。"
+
+msgid "已清空"
+msgstr "已清空"
+
+msgid "校验自定义列表"
+msgstr "校验自定义列表"
+
+msgid "检查两个列表里有没有非法域名、以及同一个域名是否同时出现在两边。"
+msgstr "检查两个列表里有没有非法域名、以及同一个域名是否同时出现在两边。"
+
+msgid "校验结果"
+msgstr "校验结果"
+
+msgid "域名判定链路图"
+msgstr "域名判定链路图"
+
+msgid "用户录入"
+msgstr "用户录入"
+
+msgid "名单里没有"
+msgstr "名单里没有"
+
+msgid "gfw 名单"
+msgstr "gfw 名单"
+
+msgid "归属确定后"
+msgstr "归属确定后"
+
+msgid "进入链路探测"
+msgstr "进入链路探测"
+
+msgid "链路探测"
+msgstr "链路探测"
+
+msgid "阈值判定"
+msgstr "阈值判定"
+
+msgid "探测首选链路"
+msgstr "探测首选链路"
+
+msgid "超时 + 重试"
+msgstr "超时 + 重试"
+
+msgid "探测另一条链路"
+msgstr "探测另一条链路"
+
+msgid "仅在首选失败时"
+msgstr "仅在首选失败时"
+
+msgid "保持"
+msgstr "保持"
+
+msgid "首选链可达"
+msgstr "首选链可达"
+
+msgid "改道"
+msgstr "改道"
+
+msgid "首选不通 · 另一条通"
+msgstr "首选不通 · 另一条通"
+
+msgid "都不通 → 不改道"
+msgstr "都不通 → 不改道"
+
+msgid "未录入自定义列表的域名：访问国外链路不通 → 自动改走直连；访问国内链路不通 → 自动改走代理"
+msgstr "未录入自定义列表的域名：访问国外链路不通 → 自动改走直连；访问国内链路不通 → 自动改走代理"
+
+msgid "两条链都不通时不改道 —— 那是链路故障，改道只会掩盖问题"
+msgstr "两条链都不通时不改道 —— 那是链路故障，改道只会掩盖问题"
+
+msgid "首选链路可达"
+msgstr "首选链路可达"
+
+msgid "首选链开始失败，未达改道阈值"
+msgstr "首选链开始失败，未达改道阈值"
+
+msgid "自动切到另一条链，恢复后会自动回切"
+msgstr "自动切到另一条链，恢复后会自动回切"
+
+msgid "两条链都不通 → 先查 dnsproxy 与代理"
+msgstr "两条链都不通 → 先查 dnsproxy 与代理"
+
+msgid "自定义列表已指定，不参与改道"
+msgstr "自定义列表已指定，不参与改道"
+
+msgid "等一轮间隔或手动触发探测"
+msgstr "等一轮间隔或手动触发探测"
+
+msgid "改道状态思维导图"
+msgstr "改道状态思维导图"
+
+msgid "观测 %d 个"
+msgstr "观测 %d 个"
+
+msgid "%d 个域名"
+msgstr "%d 个域名"
+
+msgid "…等 %d 个"
+msgstr "…等 %d 个"
+
+msgid "（无）"
+msgstr "（无）"
+
+msgid "红色 = 需要人工介入；黄色 = 系统已自动处理，观察即可；绿色 = 按归属正常走"
+msgstr "红色 = 需要人工介入；黄色 = 系统已自动处理，观察即可；绿色 = 按归属正常走"

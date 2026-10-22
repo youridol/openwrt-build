@@ -24,7 +24,21 @@
 	'use strict';
 
 	var STORAGE_KEY = 'dnschain.activeTab';
-	var TAB_ORDER = ['overview', 'resolve', 'split', 'proxy', 'dhcp', 'diag'];
+
+	/*
+	 * tab 顺序。
+	 *
+	 * 顺序即阅读顺序，按「先看结论、再管配置、最后排障」排：
+	 *   概览（链路现在什么样）
+	 *   域名（自定义列表 + 判定链路 + 改道状态）  ← v0.13.0 新增
+	 *   解析 / 分流 / 代理 / DHCP（配置）
+	 *   诊断（自检与操作）
+	 *
+	 * 「域名」紧跟概览而不是排在配置区中间：
+	 *   它同时承担「看」和「配」两件事（判定链路图与状态导图都是只读诊断），
+	 *   放到「代理」后面会让用户以为它只是又一张配置表。
+	 */
+	var TAB_ORDER = ['overview', 'domains', 'resolve', 'split', 'proxy', 'dhcp', 'diag'];
 
 	var meta = null;
 
@@ -171,8 +185,18 @@
 	 *
 	 * CSS 里用 :has() 按内容类型匹配，这里用 JS 兜底（老 WebKit 无 :has()）。
 	 * 判据：字段区第一个元素带 dc- 前缀的块级类。
+	 *
+	 * v0.13.0 新增两项：
+	 *   · dc-inline-form —— 「单域名解释」的输入行。它自己已是 flex 容器，
+	 *     放进 160px 标签列右侧会被压成极窄一列，输入框几乎不可见。
+	 *   · dc-hint —— 紧跟表格的说明行，应跟着表格一起占满整行。
+	 *
+	 * 刻意**不含** dc-chip：chip 只在表格单元格里出现，
+	 * 而 markBlockRows 只看字段区的直接子元素，加了也不会命中；
+	 * 写进来反而让人以为有额外作用。
 	 */
-	var BLOCK_CLASSES = ['dc-chain', 'dc-metrics', 'dc-stats', 'dc-table-wrap', 'dc-alert', 'dc-badge'];
+	var BLOCK_CLASSES = ['dc-chain', 'dc-metrics', 'dc-stats', 'dc-table-wrap',
+		'dc-alert', 'dc-badge', 'dc-inline-form', 'dc-hint'];
 
 	function markBlockRows() {
 		var fields = document.querySelectorAll('.cbi-value > .cbi-value-field');
@@ -195,12 +219,51 @@
 		}
 	}
 
+	/**
+	 * 「单域名解释」的输入行。
+	 *
+	 * 为什么不用 <form>：CBI 的 map 模板已经把整页包在 <form method="post">
+	 * 里，再嵌 <form> 是非法 HTML —— 浏览器会丢掉内层标签，
+	 * 「解释」按钮就变成了提交外层表单（= 触发保存）。
+	 * 所以这里用普通 input + button，点击时自己跳转。
+	 *
+	 * 跳转方式：在 URL 上带 dc_explain 参数并 reload。
+	 * 为什么不用 XHR：解释结果是一段结构化表格，服务端渲染最省事；
+	 * 而且这是一次「看一眼就走」的查询，多一次整页加载可以接受。
+	 */
+	function bindExplain() {
+		var box = document.querySelector('[data-dc-explain]');
+		if (!box) return;
+
+		var input = box.querySelector('[data-dc-explain-input]');
+		var go = box.querySelector('[data-dc-explain-go]');
+		if (!input || !go) return;
+
+		function submit() {
+			var v = (input.value || '').trim();
+			if (!v) return;
+			var url = new URL(window.location.href);
+			url.searchParams.set('dc_explain', v);
+			window.location.href = url.toString();
+		}
+
+		go.addEventListener('click', submit);
+		input.addEventListener('keydown', function (ev) {
+			/* Enter 提交；不拦的话 Enter 会触发外层 CBI 表单的默认提交（保存） */
+			if (ev.key === 'Enter') {
+				ev.preventDefault();
+				submit();
+			}
+		});
+	}
+
 	function init() {
 		meta = readMeta();
 		if (!meta) return;
 
 		dropEmptyTabmenu();
 		markBlockRows();
+		bindExplain();
 
 		/* 收起承载元数据的空 section：CBI 会给它套 .cbi-section 与
 		 * .cbi-value 两层，实测占 11px，在 tab 栏上方留一段空白。

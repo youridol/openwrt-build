@@ -564,4 +564,232 @@ function M.entry_port()
 	return (p ~= "") and p or "5353"
 end
 
+-----------------------------------------------------------------------
+-- 域名归属 / 自定义列表 / 链路健康（v0.13.0）
+--
+-- 这一层只做「读运行时产物 + 调脚本」，**不自己重新实现判定逻辑**。
+-- 归属与改道的真相在 /usr/share/dnschain/dnschain.sh 与
+-- /usr/bin/dnschain-health 里，页面重复实现一份必然漂移 ——
+-- 而「页面显示 A、实际干 B」是这类配置页最难排查的故障。
+-----------------------------------------------------------------------
+
+--- 运行时目录
+M.run_dir = "/var/etc/dnschain"
+M.state_dir = "/var/run/dnschain"
+
+--- 读一个纯文本列表文件（每行一条，去空行、去注释）
+--
+-- 注意：**不能**给 for 的循环变量赋值。Lua 5.4 起 for 的控制变量是
+-- const（lupa/新固件上会直接报 "attempt to assign to const variable"），
+-- 而本固件是 5.1、桌面验证环境是 5.4 —— 两种都要能跑，
+-- 故另起一个变量接结果。
+local function read_lines(path)
+	local f = io.open(path, "r")
+	if not f then return {} end
+	local out = {}
+	for raw in f:lines() do
+		local s = raw:gsub("^%s+", ""):gsub("%s+$", "")
+		if s ~= "" and s:sub(1, 1) ~= "#" then
+			out[#out + 1] = s
+		end
+	end
+	f:close()
+	return out
+end
+M.read_lines = read_lines
+
+--- 自定义列表（已规范化，由脚本落盘）
+function M.custom_domestic()
+	return cached("custom_domestic", function()
+		return read_lines(M.run_dir .. "/custom-domestic.txt")
+	end) or {}
+end
+
+function M.custom_foreign()
+	return cached("custom_foreign", function()
+		return read_lines(M.run_dir .. "/custom-foreign.txt")
+	end) or {}
+end
+
+--- UCI 里的原始自定义列表（用户刚改、还没 apply 时以它为准）
+--
+-- 页面要同时显示「已保存的」与「已生效的」两份：
+-- 只显示后者时，用户点保存后看不到变化（因为要等 apply）；
+-- 只显示前者时，看不出 apply 是否真的成功了。
+function M.uci_list(section, option)
+	return cached("ucilist:" .. section .. "." .. option, function()
+		local out = {}
+		local f = io.popen("uci -q get dnschain." .. section .. "." .. option .. " 2>/dev/null")
+		if not f then return out end
+		local data = f:read("*a") or ""
+		f:close()
+		for tok in data:gmatch("%S+") do
+			out[#out + 1] = tok
+		end
+		return out
+	end) or {}
+end
+
+--- 观测列表（UCI 原值；为空时脚本会回落到内置基准集）
+function M.watch_list()
+	return M.uci_list("health", "watch")
+end
+
+--- 健康状态行
+--
+-- 返回 { {domain, class, pref, active, fail, ok, last, result, state}, ... }
+-- 字段顺序与 dnschain-health status 的 ROW 行一一对应。
+function M.health_rows()
+	return cached("health_rows", function()
+		local out = sys.exec("/usr/bin/dnschain-health status 2>/dev/null") or ""
+		local rows = {}
+		for raw in out:gmatch("[^\n]+") do
+			local payload = raw:match("^ROW%s+(.+)$")
+			if payload then
+				-- 用 gmatch 按 | 切分；Lua 的 split 没有标准实现，
+				-- 这里手工展开，避免引入 luci.util.split 的版本差异
+				local f = {}
+				for part in (payload .. "|"):gmatch("([^|]*)|") do
+					f[#f + 1] = part
+				end
+				if #f >= 9 then
+					rows[#rows + 1] = {
+						domain = f[1],
+						class  = f[2],
+						pref   = f[3],
+						active = f[4],
+						fail   = tonumber(f[5]) or 0,
+						ok     = tonumber(f[6]) or 0,
+						last   = tonumber(f[7]) or 0,
+						result = f[8],
+						state  = f[9],
+					}
+				end
+			end
+		end
+		return rows
+	end) or {}
+end
+
+--- 健康汇总
+function M.health_summary()
+	return cached("health_summary", function()
+		local out = sys.exec("/usr/bin/dnschain-health status 2>/dev/null") or ""
+		local line = out:match("SUM%s+([^\n]+)") or ""
+		local s = {}
+		for k, v in line:gmatch("(%w+)=(%d+)") do
+			s[k] = tonumber(v)
+		end
+		return s
+	end) or {}
+end
+
+--- 单域名解释（页面「思维链路图」用它把判定摊开）
+--
+-- 返回 key => value 的表。脚本输出 KEY=VALUE，缺字段就是取不到。
+--
+-- 参数必须 shell 转义：域名经 shell 传给脚本，含空格/引号时会变成
+-- 多个参数甚至命令注入。用「单引号包裹 + 内部单引号转义」是最稳妥的
+-- POSIX 写法，不依赖 luci 的 util.shellquote（版本差异较大）。
+function M.shell_quote(s)
+	return "'" .. tostring(s):gsub("'", "'\\''") .. "'"
+end
+
+function M.explain(domain)
+	if type(domain) ~= "string" or domain == "" then
+		return {}
+	end
+	local out = sys.exec("/usr/bin/dnschain-health explain " .. M.shell_quote(domain) ..
+		" 2>/dev/null") or ""
+	local t = {}
+	for raw in out:gmatch("[^\n]+") do
+		local k, v = raw:match("^([A-Z_]+)=(.*)$")
+		if k then t[k] = v end
+	end
+	return t
+end
+
+--- 运行一轮健康检测（页面按钮）
+function M.health_cycle()
+	local out = sys.exec("/usr/bin/dnschain-health cycle 2>&1") or ""
+	M.invalidate()
+	return out
+end
+
+--- 应用自定义列表（重建派生文件 + 重启 dnsmasq）
+function M.apply_domains()
+	local out = sys.exec("/usr/bin/dnschain-health apply 2>&1") or ""
+	M.invalidate()
+	return out
+end
+
+--- 清空改道状态
+function M.reset_health()
+	local out = sys.exec("/usr/bin/dnschain-health reset 2>&1") or ""
+	M.invalidate()
+	return out
+end
+
+--- 自定义列表校验（返回 ok, 明细文本）
+function M.check_domains()
+	local out = sys.exec("/usr/bin/dnschain-health check 2>&1") or ""
+	local ok = out:match("^OK") ~= nil or out:match("\nOK$") ~= nil
+	return ok, out
+end
+
+--- dnsmasq 是否已带 --servers-file（改道通道是否就绪）
+--
+-- 只设了 UCI 不生效：必须验运行进程的实际参数。
+-- 这是「改道看起来成功、实际没生效」的唯一可靠判据。
+function M.serversfile_ready()
+	return cached("serversfile_ready", function()
+		local uci_sf = uci_get("dhcp.@dnsmasq[0].serversfile")
+		if uci_sf == "" then
+			return { ready = false, reason = "uci-missing", path = "" }
+		end
+
+		local pid = M.port_owner("53", "udp")
+		if pid == "" then
+			return { ready = false, reason = "no-dnsmasq", path = uci_sf }
+		end
+
+		local f = io.open("/proc/" .. pid .. "/cmdline", "r")
+		if not f then
+			return { ready = false, reason = "no-cmdline", path = uci_sf }
+		end
+		local cmd = (f:read("*a") or ""):gsub("%z", "\n")
+		f:close()
+
+		if cmd:find("--servers%-file") then
+			return { ready = true, reason = "", path = uci_sf }
+		end
+		return { ready = false, reason = "argv-missing", path = uci_sf }
+	end)
+end
+
+--- watch.servers 的实际内容（用于「当前改道生效情况」核对）
+function M.watch_servers_file()
+	return cached("watch_servers_file", function()
+		return read_lines(M.run_dir .. "/watch.servers")
+	end) or {}
+end
+
+--- 静态分流片段的条数（不含注释）
+--
+-- 为什么要 pcall 包一层：io.lines 在文件不存在时**抛错**而不是返回 nil，
+-- 而这里的调用点位于页面渲染路径上 —— 未装框架、文件尚未生成时
+-- 会直接 500，用户看到的是「页面打不开」而不是「还没有数据」。
+function M.split_rule_count()
+	return cached("split_rule_count", function()
+		local n = 0
+		local ok = pcall(function()
+			for _ in io.lines("/tmp/dnsmasq.d/dnschain-split.conf") do
+				n = n + 1
+			end
+		end)
+		if not ok then return 0 end
+		return n
+	end) or 0
+end
+
 return M

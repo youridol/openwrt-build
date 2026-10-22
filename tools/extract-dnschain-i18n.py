@@ -19,6 +19,10 @@ REPO = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
 LUA_FILES = [
     "package/luci-app-dnschain/luasrc/model/cbi/dnschain/general.lua",
     "package/luci-app-dnschain/luasrc/model/cbi/dnschain/dnschain.lua",
+    # v0.13.0：两张思维导图的文案（图例、状态档位、底部说明）都在这里。
+    # 漏掉它会让「域名」tab 的图内文字全部中英混排 ——
+    # 图是 SVG，缺译不会报错，只会静默显示成源文。
+    "package/luci-app-dnschain/luasrc/model/cbi/dnschain/diagrams.lua",
     "package/luci-app-dnschain/luasrc/controller/dnschain.lua",
 ]
 PO = "package/luci-app-dnschain/po/zh-cn/luci-app-dnschain.po"

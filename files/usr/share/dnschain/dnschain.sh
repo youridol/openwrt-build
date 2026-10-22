@@ -141,6 +141,48 @@ dc_extract_domains() {
 }
 
 # ------------------------------------------------------------
+# 用「排除列表」过滤输入（每行一个精确匹配）
+#
+# 用法: dc_exclude <排除文件> [输入文件]
+#   排除文件为空 / 不存在 / 只有注释时，原样输出输入
+#
+# ⚠️ 必须自己做这个判断，不能直接 `grep -Fvxf <排除文件>`（v0.13.0 实测）：
+#   BusyBox 的 grep 在 **pattern 文件为空** 时返回 rc=1 且**输出零行** ——
+#   不是「一条都不排除」，而是「把输入全吞掉」。
+#   实测：printf "a\nb\nc\n" | grep -Fvxf /tmp/empty  → 0 行
+#   加 -s（抑制错误）也一样。
+#
+#   这个坑在本框架里**必然触发**：custom-domestic.txt 默认是空文件
+#   （用户还没录自定义域名），而 db-domains.txt 有 23715 条 →
+#   foreign-split.conf 变成 0 字节 → preflight 判「国外分流为空」→
+#   拒绝启动，整条链路起不来（实测症状：dnschain restart 后
+#   「ERROR: foreign-split.conf 为空」且 dnsproxy 不再监听）。
+#
+#   正确做法：排除文件为空时直接 cat，根本不调用 grep。
+# ------------------------------------------------------------
+dc_exclude() {
+	local pat="$1"
+	local input="$2"
+
+	# 有内容才算「有排除项」：跳过空行与注释
+	if [ -n "$pat" ] && [ -r "$pat" ] \
+	   && grep -qvE '^[[:space:]]*(#|$)' "$pat" 2>/dev/null; then
+		if [ -n "$input" ]; then
+			grep -Fvxf "$pat" "$input" 2>/dev/null
+		else
+			grep -Fvxf "$pat" 2>/dev/null
+		fi
+	else
+		if [ -n "$input" ]; then
+			cat "$input" 2>/dev/null
+		else
+			cat 2>/dev/null
+		fi
+	fi
+	return 0
+}
+
+# ------------------------------------------------------------
 # 生成「国外域名 → 国外 dnsproxy 实例」的 dnsmasq 分流规则
 #
 # v0.10.0 架构：**两个 dnsproxy 实例 + dnsmasq 按域名分流**
@@ -165,11 +207,17 @@ dc_extract_domains() {
 #     google AAAA → 2001:4860:482d:7700::
 #     baidu  A    → 183.2.172.177
 #
-# 输出文件：/var/etc/dnschain/foreign-split.conf（dnsmasq 片段）
-# 同时把 IDNA 域名写到 idna-bypass.conf（dnsmasq 的 punycode 旁路）。
+# 输出文件：/var/etc/dnschain/foreign-split.conf（数据库国外的**生效**清单）
+#
+# 注意这个文件从 v0.13.0 起**不再**是 dnsmasq 片段（那是 dnschain-split.conf），
+# 而是一份纯域名清单，两个用途：
+#   ① preflight 的「国外分流规则非空」判据（空清单意味着 gfw 名单没就绪）
+#   ② 页面的规模统计
+# 它已经扣掉了「自定义国内」与「观测域名」—— 这两类不由静态规则决定去向，
+# 留在清单里会让页面上的数字与实际分流不一致。
 # ------------------------------------------------------------
 dc_gen_upstream_file() {
-	local outdir count fport
+	local outdir count fport tmp watch_f
 
 	outdir="$DNSCHAIN_RUN_DIR"
 	fport=$(dc_get main foreign_port 5336)
@@ -182,7 +230,14 @@ dc_gen_upstream_file() {
 		return 1
 	fi
 
-	# 国外域名 → 国外 dnsproxy 实例（dnsmasq 的 server= 规则）
+	dc_gen_custom_lists || return 1
+	[ -s "$DNSCHAIN_DB_DOMAINS" ] || dc_gen_db_domains >/dev/null
+
+	tmp=$(mktemp) || return 1
+	watch_f=$(mktemp) || { rm -f "$tmp"; return 1; }
+	dc_watch_list > "$watch_f"
+
+	# 数据库国外 − 自定义国内 − 观测域名
 	#
 	# ⚠️ **不过滤 xn--**（v0.10.0 修正）。
 	# v0.9.x 过滤 IDNA 是因为 dnsproxy 的 `[/域名/]` 形式不认 punycode
@@ -195,14 +250,21 @@ dc_gen_upstream_file() {
 	# 实测这 58 条全部解析失败（apple.xn--czr694b、nike.xn--hxt814e 等）。
 	# 改成不过滤后它们也指向 :5336，恢复正常。
 	#
-	# 仍需过滤**非法标签**（不是合法域名的垃圾行）。
-	dc_extract_domains \
-		| grep -E '^[a-zA-Z0-9]([a-zA-Z0-9._-]*[a-zA-Z0-9])?\.[a-zA-Z]{2,}$' \
-		| sed "s|.*|server=/&/127.0.0.1#${fport}|" > "${outdir}/foreign-split.conf"
+	# ⚠️ 两次排除都必须走 dc_exclude（不能直接 grep -Fvxf）：
+	#   custom-domestic.txt 默认是空文件，而 BusyBox grep 在 pattern
+	#   文件为空时会吞掉全部输入 → foreign-split.conf 变 0 字节 →
+	#   preflight 拒绝启动。详见 dc_exclude 的注释。
+	if [ -r "$DNSCHAIN_DB_DOMAINS" ]; then
+		dc_exclude "$DNSCHAIN_CUSTOM_DOM" "$DNSCHAIN_DB_DOMAINS" \
+			| dc_exclude "$watch_f" > "$tmp"
+	fi
+
+	mv -f "$tmp" "${outdir}/foreign-split.conf" 2>/dev/null || { rm -f "$tmp" "$watch_f"; return 1; }
+	rm -f "$watch_f"
 
 	count=$(wc -l < "${outdir}/foreign-split.conf" 2>/dev/null || echo 0)
 
-	dnschain_log "foreign-split.conf: ${count} 条 → 127.0.0.1#${fport}"
+	dnschain_log "foreign-split.conf: ${count} 条（数据库国外 − 自定义国内 − 观测域名）→ 127.0.0.1#${fport}"
 	echo "$count"
 }
 
@@ -306,10 +368,69 @@ dc_args_to_cmdline() {
 }
 
 # ------------------------------------------------------------
-# 当前 dnsmasq 的 PID
+# 当前 dnsmasq 的**真 worker** PID
+#
+# ⚠️ 不能直接用 `pidof dnsmasq | awk '{print $1}'`（v0.13.0 实测修正）。
+#
+# 本固件的 dnsmasq 是「ujail → dnsmasq → 子进程」三层结构，实测：
+#
+#   6623  /sbin/ujail -t 5 ... -- /usr/sbin/dnsmasq -C ...   ppid=1
+#   6670  /usr/sbin/dnsmasq -C ... -k -x ...                 ppid=6623
+#   6691  /usr/sbin/dnsmasq -C ... -k -x ...                 ppid=6670
+#
+#   `pidof dnsmasq` 返回 **6691 6670 6623**（新到旧），故取第一个拿到 6691。
+#   但真正持有 :53 socket 的是 **6670**（38 个 fd），6691 只有 5 个 fd、
+#   wchan = anon_pipe_read —— 它是 dnsmasq fork 出来等管道的辅助进程。
+#
+# 实测判据（/etc/hosts 会随 SIGHUP 重读）：
+#   HUP → 6691 后 zz-hup-test.invalid 仍无解析结果
+#   HUP → 6670 后立刻返回 192.0.2.99
+#   即**发给 6691 的 SIGHUP 是空操作**。
+#
+# 后果（如果取错）：改道写进 watch.servers 后 SIGHUP 不生效，
+# 页面显示「已改道」而实际没换上游 —— 正是最该避免的静默失效。
+#
+# 正确判据：**持有 :53 UDP socket 的那个 PID**。用 /proc/net/udp 的
+# inode 反查 /proc/<pid>/fd，不依赖 pidof 的顺序（AGENTS §4.3 同法）。
+# 取不到时回落到 pidof 的**最后一个**（最老、最可能是真 worker）。
 # ------------------------------------------------------------
 dc_dnsmasq_pid() {
-	pidof dnsmasq 2>/dev/null | awk '{print $1}'
+	local inodes pid found
+
+	# 1. 优先：持有 :53 UDP socket 的进程
+	#
+	# /proc/net/udp 的 local_address 形如 0100007F:0035（小端 hex），
+	# 0035 = 53。只取 inode 列，再逐 pid 反查。
+	inodes=$(awk 'NR > 1 && $2 ~ /:0035$/ { print $10 }' /proc/net/udp 2>/dev/null)
+
+	if [ -n "$inodes" ]; then
+		for pid in $(pidof dnsmasq 2>/dev/null); do
+			for ino in $inodes; do
+				if ls -l "/proc/${pid}/fd" 2>/dev/null | grep -q "socket:\[${ino}\]"; then
+					echo "$pid"
+					return 0
+				fi
+			done
+		done
+	fi
+
+	# 2. 回落：pidof 的最后一个
+	#
+	# 为什么是最后一个而不是第一个：pidof 按 PID 降序输出，
+	# 最后一个是最早启动的，在 ujail 结构里最靠近真正的 worker。
+	# 这个回落不完美，但比「取第一个必错」好，且下面还有 pidfile 兜底。
+	found=$(pidof dnsmasq 2>/dev/null | awk '{ print $NF }')
+	[ -n "$found" ] && { echo "$found"; return 0; }
+
+	# 3. 再回落：pidfile
+	for f in /var/run/dnsmasq/dnsmasq.*.pid /var/run/dnsmasq.pid; do
+		if [ -r "$f" ]; then
+			found=$(cat "$f" 2>/dev/null | tr -d ' \n')
+			[ -n "$found" ] && { echo "$found"; return 0; }
+		fi
+	done
+
+	echo ""
 }
 
 # ------------------------------------------------------------
@@ -371,6 +492,1127 @@ dc_upstream_port() {
 	fi
 
 	echo "$port"
+}
+
+# ============================================================
+# 域名归属 / 自定义列表 / 链路健康 / 自动改道（v0.13.0 新增）
+# ------------------------------------------------------------
+# 设计依据：docs/adr/0006-domain-routing-and-reroute.md
+#
+# 三个概念必须分清（页面与脚本用的是同一套定义）：
+#
+#   归属（class）  域名「应该」走哪条链，是**静态判定**，只看配置与名单：
+#                    custom-domestic  用户手工录入「国内域名」
+#                    custom-foreign   用户手工录入「国外域名」
+#                    db-foreign       命中 SSR-Plus 的 gfw/基础名单
+#                    uncovered        三个来源都没覆盖
+#
+#   首选（preferred）  归属推导出的链路：
+#                    自定义与数据库国外 → foreign（代理出口）
+#                    自定义国内 / 未覆盖 → domestic（直连出口）
+#                    「未覆盖 → domestic」不是随便定的：dnsmasq 的默认
+#                    上游就是 :entry_port（国内实例），所以未覆盖域名
+#                    本来就走直连。改道逻辑必须与这个事实一致，
+#                    否则「不配置任何东西」和「配置了框架」行为会不同。
+#
+#   当前（active）  实际生效的链路，由健康探测决定，可能与首选不同。
+#
+# 自动改道的两条规则（需求原文）：
+#   未录入自定义列表的域名 ——
+#     国外链路探测不通 → 改走直连（切到 domestic 实例）
+#     国内链路探测不通 → 改走代理（切到 foreign 实例）
+# 落到实现上就是一句话：**首选链不通且另一条链通，就切到另一条**。
+# 两种情形分别对应上面的两条规则，见 dc_health_cycle 的注释。
+#
+# 为什么自定义列表里的域名不参与改道：
+#   用户明确指定了走哪条链，那是对策略的表达，不是对可达性的猜测。
+#   框架只报告它的健康状态，不擅自改道。
+# ============================================================
+
+# ⚠️ watch.servers 必须放在 **ujail 已挂载** 的目录里（v0.13.0 实测踩过）。
+#
+# 本固件的 dnsmasq 由 ujail 降权运行，实测 /proc/<pid>/status:
+#     Uid: 453 453 453 453        ← dnsmasq 用户，不是 root
+# 且 ujail 只挂载了固定的一组路径（由 init.d/dnsmasq 的
+# `procd_add_jail_mount` 决定，**不接受 serversfile 指向的路径**）：
+#     -r /tmp/dnsmasq.d        -rw /var/run/dnsmasq/   ...
+#
+# 原来放在 /var/etc/dnschain/ 下时，那个目录**既不在白名单、文件又是
+# 0600 root:root**，于是：
+#   · dnsmasq 读不到 → servers-file 一条都没加载
+#   · SIGHUP 却成功返回、日志也不报错 → 改道完全无效且无迹可循
+#   · 实测症状：github.com 经 :53 稳定超时（走 gfw_list 里指向死端口
+#     :5335 的旧声明），而直连 :5336 / :5353 都正常
+#
+# 改到 /var/run/dnsmasq/ 后实测：指向不存在的 :59999 会立刻超时，
+# 还原后立刻恢复 —— 证明 servers-file 真的被读了。
+# （/var/run 是 tmpfs，重启即清空，每次启动都会重新生成，符合预期。）
+DNSCHAIN_WATCH_SERVERS="/var/run/dnsmasq/watch.servers"
+DNSCHAIN_DB_DOMAINS="${DNSCHAIN_RUN_DIR}/db-domains.txt"
+DNSCHAIN_CUSTOM_DOM="${DNSCHAIN_RUN_DIR}/custom-domestic.txt"
+DNSCHAIN_CUSTOM_FOR="${DNSCHAIN_RUN_DIR}/custom-foreign.txt"
+DNSCHAIN_HEALTH_STATE="${DNSCHAIN_STATE_DIR}/health.state"
+
+# ------------------------------------------------------------
+# 域名规范化：去首尾空白、去尾部点、转小写
+#
+# 只去**首尾**空白，不去中间的 —— 中间有空格一定不是合法域名，
+# 去掉会把 "a .com" 静默变成 "a.com" 收下，用户看到的却是自己写了
+# 带空格的东西却被接受了。这类「宽容」在配置界面里是负资产。
+#
+# 为什么要转小写：dnsmasq 的 server=/域名/ 匹配是大小写不敏感的，
+# 但状态文件与页面显示必须唯一，否则 Foo.com 与 foo.com 会被当成
+# 两个观测目标、各自维护一份改道状态。
+# ------------------------------------------------------------
+dc_domain_normalize() {
+	printf '%s' "$1" \
+		| sed -e 's/^[[:space:]]*//' -e 's/[[:space:]]*$//' \
+		| sed -e 's/\.$//' \
+		| tr 'A-Z' 'a-z'
+}
+
+# ------------------------------------------------------------
+# 域名格式校验（严格）
+#
+# 规则（与 dnsmasq 的 canonicalise 基本对齐，但更严）：
+#   - 总长 ≤ 253，每个标签 1..63
+#   - 至少两个标签（单标签是主机名，不是域名；dnsmasq 的 //
+#     是「无点名字」的特殊写法，混进来会改变语义）
+#   - 标签只允许 a-z 0-9 -，且不以 - 开头/结尾
+#   - 顶级域必须是纯字母且 ≥2 位，或 punycode（xn--）
+#   - 禁止 * / 空格 等字符
+#
+# 为什么不接受通配：server=/域名/ 是按标签后缀匹配的，
+# 用户写 *.example.com 会得到一条永远匹配不到的规则，
+# 而页面上看不出任何异常 —— 这类静默失效必须在录入时就拦住。
+#
+# 为什么接受 xn--：dnsmasq 原生支持 punycode（AGENTS §4.0 第 4 条），
+# 过滤掉会让 IDNA 域名无法录入。
+# ------------------------------------------------------------
+dc_domain_valid() {
+	local d label tld n _oifs
+
+	d=$(dc_domain_normalize "$1")
+	[ -n "$d" ] || return 1
+	[ "${#d}" -le 253 ] || return 1
+
+	case "$d" in
+		*..*|.*|*.) return 1 ;;
+		*[!a-z0-9.-]*) return 1 ;;
+	esac
+
+	case "$d" in
+		*.*) : ;;
+		*) return 1 ;;
+	esac
+
+	_oifs=$IFS
+	IFS=.
+	set -- $d
+	IFS=$_oifs
+
+	[ $# -ge 2 ] || return 1
+
+	n=0
+	tld=""
+	for label in "$@"; do
+		[ -n "$label" ] || return 1
+		[ "${#label}" -le 63 ] || return 1
+		case "$label" in
+			-*|*-) return 1 ;;
+			*[!a-z0-9-]*) return 1 ;;
+		esac
+		n=$((n + 1))
+		tld="$label"
+	done
+
+	case "$tld" in
+		xn--*) : ;;
+		*[!a-z]*) return 1 ;;
+		*) [ "${#tld}" -ge 2 ] || return 1 ;;
+	esac
+
+	return 0
+}
+
+# ------------------------------------------------------------
+# 把 UCI list 规范化成「每行一个合法域名，去重排序」
+# 用法: dc_list_normalize <section> <option>
+# ------------------------------------------------------------
+dc_list_normalize() {
+	local d
+	dc_get_list "$1" "$2" | while read -r d; do
+		[ -n "$d" ] || continue
+		d=$(dc_domain_normalize "$d")
+		dc_domain_valid "$d" || continue
+		echo "$d"
+	done | sort -u
+}
+
+# ------------------------------------------------------------
+# 观测列表（参与健康探测与自动改道的域名）
+#
+# 回落逻辑：用户把 watch 清空后，用内置基准集。
+# 为什么要回落而不是「空就是空」：空列表意味着永不探测、页面永远
+# 显示「无数据」，用户会以为功能坏了。基准集是「国内外各 4 个」
+# 的稳定站点，能代表两条链的通断。
+# ------------------------------------------------------------
+DNSCHAIN_WATCH_SEED="www.baidu.com www.taobao.com www.qq.com www.163.com
+www.google.com www.youtube.com github.com www.wikipedia.org"
+
+dc_watch_list() {
+	local d out
+
+	out=$(dc_get_list health watch | while read -r d; do
+		[ -n "$d" ] || continue
+		d=$(dc_domain_normalize "$d")
+		dc_domain_valid "$d" || continue
+		echo "$d"
+	done | sort -u)
+
+	[ -n "$out" ] || out=$(printf '%s\n' "$DNSCHAIN_WATCH_SEED" \
+		| while read -r d; do
+			[ -n "$d" ] || continue
+			echo "$d"
+		done | sort -u)
+
+	printf '%s\n' "$out"
+}
+
+# ------------------------------------------------------------
+# 数据库域名集合（缓存成文件，供 O(1) 归属判定）
+#
+# 为什么缓存：gfw_list.conf 实测 3.5 万行，每次判定都 sed 一遍
+# 要 200ms+，而页面一次渲染要做几十次判定。
+# 文件由 dc_gen_db_domains 生成，随名单导入刷新。
+# ------------------------------------------------------------
+dc_gen_db_domains() {
+	local n
+	mkdir -p "$DNSCHAIN_RUN_DIR" || return 1
+	dc_extract_domains \
+		| grep -E '^[a-zA-Z0-9]([a-zA-Z0-9._-]*[a-zA-Z0-9])?\.[a-zA-Z]{2,}$' \
+		| tr 'A-Z' 'a-z' \
+		| sort -u > "${DNSCHAIN_DB_DOMAINS}.tmp" || return 1
+	mv -f "${DNSCHAIN_DB_DOMAINS}.tmp" "$DNSCHAIN_DB_DOMAINS" || return 1
+	n=$(wc -l < "$DNSCHAIN_DB_DOMAINS" 2>/dev/null || echo 0)
+	echo "$n"
+}
+
+# ------------------------------------------------------------
+# 归属判定
+# 输出：custom-domestic | custom-foreign | db-foreign | uncovered | invalid
+#
+# 优先级：自定义 > 数据库 > 未覆盖。
+# 自定义优先是刻意的：用户手工录入就是要覆盖名单的自动判定，
+# 否则「我明明写了走直连，它还是走代理」会成为无解的困惑。
+#
+# ⚠️ 必须做**后缀匹配**，不能只做精确匹配（v0.13.0 实测修正）。
+#
+# dnsmasq 的 `server=/google.com/` 对 `www.google.com` **生效**，
+# 而 gfw 名单里只写了 `google.com`（实测：grep 到 google.com 有 1 条、
+# www.google.com 有 0 条）。原来这里用 `grep -Fqx` 精确匹配，
+# 于是 www.google.com 被判成 `uncovered` → 首选 domestic →
+# 改道逻辑把它拉到直连 → 拿到**污染答案**：
+#
+#   实测 www.google.com  A 经 :5353（直连）→ 31.13.92.37（Facebook 的 IP）
+#   实测 www.youtube.com A 经 :5353（直连）→ 185.45.5.35
+#
+# 也就是说：**归属判定比 dnsmasq 的实际匹配更窄**，会让本该走代理的
+# 子域名被改道到直连。这不是「改道错了」，而是「归属就错了」。
+#
+# 判定顺序与 dnsmasq 一致：精确命中 → 逐级去掉最左标签再试。
+# 例：a.b.google.com → a.b.google.com → b.google.com → google.com
+# 这样 `db-foreign` 能覆盖所有子域名，与 dnsmasq 行为对齐。
+#
+# 为什么不用 `grep -F "$d"` 做子串匹配：那会让 `notgoogle.com`
+# 命中 `google.com`。必须按标签边界匹配，故逐级剥标签。
+# ------------------------------------------------------------
+dc_domain_class() {
+	local d cur i n
+
+	d=$(dc_domain_normalize "$1")
+	dc_domain_valid "$d" || { echo "invalid"; return 0; }
+
+	# 自定义列表：精确匹配
+	#
+	# 为什么自定义**不**做后缀匹配：用户录 `google.com` 表达的是
+	# 「这个域名走代理」，而不是「所有子域名都走代理」——后者是名单
+	# 的语义。两种语义混在一起会让「我录了 google.com 却把
+	# mail.google.com 也拉走了」变得无法解释。
+	[ -r "$DNSCHAIN_CUSTOM_DOM" ] && grep -Fqx "$d" "$DNSCHAIN_CUSTOM_DOM" 2>/dev/null \
+		&& { echo "custom-domestic"; return 0; }
+	[ -r "$DNSCHAIN_CUSTOM_FOR" ] && grep -Fqx "$d" "$DNSCHAIN_CUSTOM_FOR" 2>/dev/null \
+		&& { echo "custom-foreign"; return 0; }
+
+	# 数据库：后缀匹配（与 dnsmasq 的 server=/域名/ 语义一致）
+	if [ -r "$DNSCHAIN_DB_DOMAINS" ]; then
+		cur="$d"
+		n=$(echo "$cur" | awk -F. '{ print NF }')
+		i=0
+		while [ "$i" -lt "$n" ]; do
+			if grep -Fqx "$cur" "$DNSCHAIN_DB_DOMAINS" 2>/dev/null; then
+				echo "db-foreign"
+				return 0
+			fi
+			# 去掉最左一个标签；剩下不足两个标签就停
+			cur=$(echo "$cur" | sed 's/^[^.]*\.//')
+			case "$cur" in
+				*.*) ;;
+				*) break ;;
+			esac
+			i=$((i + 1))
+		done
+	fi
+
+	echo "uncovered"
+}
+
+# ------------------------------------------------------------
+# 首选链路（由归属推导）
+# ------------------------------------------------------------
+dc_domain_preferred() {
+	case "$(dc_domain_class "$1")" in
+		custom-foreign|db-foreign) echo "foreign" ;;
+		*)                         echo "domestic" ;;
+	esac
+}
+
+# 该域名是否「用户固定」，即不参与自动改道
+dc_domain_fixed() {
+	case "$(dc_domain_class "$1")" in
+		custom-domestic|custom-foreign) return 0 ;;
+		*) return 1 ;;
+	esac
+}
+
+# ------------------------------------------------------------
+# 自定义列表落盘（供归属判定与分流生成共用）
+#
+# 注意：这不是「把 UCI 抄一遍」，而是**规范化后的唯一副本**。
+# 归属判定、分流生成、页面显示全部读这三个文件，
+# 避免三处各自解释一遍 UCI 而产生漂移。
+# ------------------------------------------------------------
+dc_gen_custom_lists() {
+	mkdir -p "$DNSCHAIN_RUN_DIR" || return 1
+	dc_list_normalize dom_domestic domain > "${DNSCHAIN_CUSTOM_DOM}.tmp" || return 1
+	mv -f "${DNSCHAIN_CUSTOM_DOM}.tmp" "$DNSCHAIN_CUSTOM_DOM" || return 1
+	dc_list_normalize dom_foreign domain > "${DNSCHAIN_CUSTOM_FOR}.tmp" || return 1
+	mv -f "${DNSCHAIN_CUSTOM_FOR}.tmp" "$DNSCHAIN_CUSTOM_FOR" || return 1
+}
+
+# ------------------------------------------------------------
+# nft 集合是否存在（决定要不要写 nftset= 行）
+#
+# 为什么必须先探测：SSR-Plus 未启用时 ss_spec 表根本不存在，
+# 此时 dnsmasq 每解析一个域名都会尝试写集合并失败，
+# 在日志里刷 "failed to add ... to nftset"。宁可少写一行，
+# 也不要在别人的日志里制造噪声。
+# ------------------------------------------------------------
+dc_nftset_exists() {
+	nft list set inet ss_spec "$1" >/dev/null 2>&1
+}
+
+# ------------------------------------------------------------
+# 生成 dnsmasq 的完整分流片段（dnschain-split.conf）
+#
+# 这是**唯一**生成该文件的函数（init 与 reconcile 都调它），
+# 避免历史上「两份文件各写一遍、内容逐渐不一致」的老问题。
+#
+# 规则：
+#   数据库国外 − 自定义国内 − 观测列表  → server= 指向 foreign_port
+#                                        + nftset 写 blacklist
+#   自定义国外                          → server= 指向 foreign_port
+#                                        + nftset 写 blacklist
+#   自定义国内                          → server= 指向 entry_port
+#                                        + nftset 写 china（强制直连）
+#
+# 为什么观测列表要从静态片段里排除：
+#   观测域名的实际链路由健康探测动态决定，写在 watch.servers
+#   （--servers-file，SIGHUP 即生效）。同一个域名若同时出现在
+#   静态片段和 servers-file 里，dnsmasq 会把两条 server= 当作
+#   **候选**（不是后者覆盖前者），改道就变成了「随机走一条」。
+#   一个域名只能有一处声明 —— 这是本设计的硬约束。
+#
+# 输出：stdout 两行 "<split 条数> <nftset 条数>"
+# ------------------------------------------------------------
+dc_gen_dnsmasq_split() {
+	local out eport fport tmp_dom tmp_split tmp_nft
+	local n_split n_nft have_black have_china
+
+	out="${DNSCHAIN_DNSMASQ_CONF_DIR}/dnschain-split.conf"
+	eport=$(dc_get main entry_port 5353)
+	fport=$(dc_get main foreign_port 5336)
+
+	mkdir -p "$DNSCHAIN_DNSMASQ_CONF_DIR" || return 1
+
+	dc_gen_custom_lists || return 1
+	[ -s "$DNSCHAIN_DB_DOMAINS" ] || dc_gen_db_domains >/dev/null
+
+	tmp_dom=$(mktemp) || return 1
+	tmp_split=$(mktemp) || { rm -f "$tmp_dom"; return 1; }
+	tmp_nft=$(mktemp) || { rm -f "$tmp_dom" "$tmp_split"; return 1; }
+
+	# 观测列表：每行一个，用于排除
+	local watch_f
+	watch_f=$(mktemp) || { rm -f "$tmp_dom" "$tmp_split" "$tmp_nft"; return 1; }
+	dc_watch_list > "$watch_f"
+
+	# 数据库国外，排除自定义国内与观测列表
+	#
+	# 必须走 dc_exclude：custom-domestic.txt 默认空文件，
+	# 直接 grep -Fvxf 会吞掉整个名单（详见 dc_exclude 注释）。
+	if [ -r "$DNSCHAIN_DB_DOMAINS" ]; then
+		dc_exclude "$DNSCHAIN_CUSTOM_DOM" "$DNSCHAIN_DB_DOMAINS" \
+			| dc_exclude "$watch_f"
+	fi > "$tmp_dom"
+
+	have_black=0
+	have_china=0
+	dc_nftset_exists blacklist && have_black=1
+	dc_nftset_exists china && have_china=1
+
+	# 1) 数据库国外 → 国外实例 + 入 blacklist
+	if [ -s "$tmp_dom" ]; then
+		sed "s|.*|server=/&/127.0.0.1#${fport}|" "$tmp_dom" >> "$tmp_split"
+		[ "$have_black" = "1" ] && \
+			sed 's|.*|nftset=/&/4#inet#ss_spec#blacklist|' "$tmp_dom" >> "$tmp_nft"
+	fi
+
+	# 2) 自定义国外 → 国外实例 + 入 blacklist
+	if [ -s "$DNSCHAIN_CUSTOM_FOR" ]; then
+		sed "s|.*|server=/&/127.0.0.1#${fport}|" "$DNSCHAIN_CUSTOM_FOR" >> "$tmp_split"
+		[ "$have_black" = "1" ] && \
+			sed 's|.*|nftset=/&/4#inet#ss_spec#blacklist|' "$DNSCHAIN_CUSTOM_FOR" >> "$tmp_nft"
+	fi
+
+	# 3) 自定义国内 → 国内实例 + 入 china（强制直连）
+	if [ -s "$DNSCHAIN_CUSTOM_DOM" ]; then
+		sed "s|.*|server=/&/127.0.0.1#${eport}|" "$DNSCHAIN_CUSTOM_DOM" >> "$tmp_split"
+		[ "$have_china" = "1" ] && \
+			sed 's|.*|nftset=/&/4#inet#ss_spec#china|' "$DNSCHAIN_CUSTOM_DOM" >> "$tmp_nft"
+	fi
+
+	n_split=$(wc -l < "$tmp_split" 2>/dev/null || echo 0)
+	n_nft=$(wc -l < "$tmp_nft" 2>/dev/null || echo 0)
+
+	{
+		echo "# dnschain: 域名分流（由 init.d/dnschain 生成，勿手工编辑）"
+		echo "# 数据库国外 + 自定义国外 → :${fport}（代理出口）"
+		echo "# 自定义国内            → :${eport}（直连出口，并写入 china 集强制直连）"
+		echo "# 观测域名不在此文件：它们由 watch.servers（--servers-file）动态决定，"
+		echo "#   同一域名只能有一处 server= 声明，否则 dnsmasq 会当成候选随机选。"
+		cat "$tmp_split"
+		[ "$n_nft" -gt 0 ] && {
+			echo "# nftset: 解析结果写入对应 IP 集"
+			cat "$tmp_nft"
+		}
+	} > "$out"
+
+	rm -f "$tmp_dom" "$tmp_split" "$tmp_nft" "$watch_f"
+	echo "${n_split} ${n_nft}"
+}
+
+# ------------------------------------------------------------
+# 生成观测域名的动态上游文件（watch.servers）
+#
+# 走 dnsmasq 的 --servers-file：该文件在收到 SIGHUP 时会被
+# **重新读取**（dnsmasq.c 的 EVENT_RELOAD 分支显式调用
+# read_servers_file），因此改道只需 SIGHUP，不需要重启 dnsmasq。
+#
+# 这一点是本设计的稳定性基石：AGENTS §4.4 已实测「reload 不重读
+# conf-dir」，所以静态片段改动必须 restart（约 3 秒中断）；
+# 而改道是高频事件，绝不能走 restart。servers-file 正好提供了
+# 一条「不重启也能换上游」的通道。
+#
+# 输出：changed | same
+# ------------------------------------------------------------
+dc_gen_watch_servers() {
+	local eport fport tmp enabled d pref active
+
+	eport=$(dc_get main entry_port 5353)
+	fport=$(dc_get main foreign_port 5336)
+	enabled=$(dc_get health enabled 1)
+
+	mkdir -p "$DNSCHAIN_RUN_DIR" || return 1
+
+	tmp=$(mktemp) || return 1
+
+	{
+		echo "# dnschain: 观测域名的动态上游（SIGHUP 生效，勿手工编辑）"
+		echo "# 由 /usr/bin/dnschain-health 维护；改道只改本文件 + SIGHUP"
+	} > "$tmp"
+
+	dc_watch_list | while read -r d; do
+		[ -n "$d" ] || continue
+		pref=$(dc_domain_preferred "$d")
+		active="$pref"
+		if [ "$enabled" = "1" ]; then
+			active=$(dc_health_active "$d" "$pref")
+		fi
+		case "$active" in
+			foreign)  echo "server=/$(echo "$d")/127.0.0.1#${fport}" ;;
+			*)        echo "server=/$(echo "$d")/127.0.0.1#${eport}" ;;
+		esac
+	done >> "$tmp"
+
+	if [ -r "$DNSCHAIN_WATCH_SERVERS" ] && cmp -s "$tmp" "$DNSCHAIN_WATCH_SERVERS"; then
+		rm -f "$tmp"
+		echo "same"
+		return 0
+	fi
+
+	mv -f "$tmp" "$DNSCHAIN_WATCH_SERVERS" || return 1
+
+	# ⚠️ 必须放开读权限，否则 dnsmasq 根本读不到这个文件（v0.13.0 实测）：
+	#
+	#   mktemp 生成的文件是 0600 root:root，而本固件的 dnsmasq 由 ujail
+	#   降权到 uid 453（dnsmasq 用户）运行。实测 /proc/<pid>/status:
+	#       Uid: 453 453 453 453
+	#   于是 600 root:root 的文件它读不到 —— SIGHUP 看似成功，
+	#   servers-file 却一条都没加载，改道完全无效（且没有任何报错）。
+	#
+	#   症状：watch.servers 内容正确、dnsmasq 也在跑、SIGHUP 也没报错，
+	#   但观测域名走的一直是 gfw_list 里的旧上游（:5335，无监听）
+	#   → 实测 github.com 经 :53 稳定超时，而直连 :5336 / :5353 都正常。
+	#
+	#   故这里显式 0644。这不是「放松安全」，而是让降权后的进程读得到：
+	#   该文件只含域名与本地回环端口，不含任何凭据。
+	chmod 0644 "$DNSCHAIN_WATCH_SERVERS" 2>/dev/null
+
+	echo "changed"
+}
+
+# ------------------------------------------------------------
+# 让 dnsmasq 重读 servers-file（SIGHUP：不重启、不清缓存）
+#
+# 注意：这里**不用** init.d/dnsmasq restart。改道是可能每分钟
+# 发生的事，restart 会带来约 3 秒的解析中断（AGENTS §4.4）。
+# ------------------------------------------------------------
+dc_reload_servers_file() {
+	local pid
+	pid=$(dc_dnsmasq_pid)
+	[ -n "$pid" ] || { dnschain_log "WARN: dnsmasq 未运行，跳过 SIGHUP"; return 1; }
+	kill -HUP "$pid" 2>/dev/null || return 1
+	return 0
+}
+
+# ------------------------------------------------------------
+# 带硬超时的命令执行
+#
+# 用法: dc_run_timeout <秒> <输出文件> <命令...>
+#   stdout: "0" = 命令正常结束；"1" = 命中硬超时
+#   命令的 stdout+stderr 全部写进 <输出文件>
+#
+# 为什么状态码走 stdout 而不是变量：
+#   调用方几乎总是写 out=$(dc_run_timeout ...)，而命令替换在**子 shell**
+#   里执行 —— 函数内给变量赋值（如 DC_TIMEOUT_HIT=1）在父 shell 里
+#   看不到，超时会被静默当成「命令返回空」。这个坑必须从接口上避开。
+#
+# 为什么需要硬超时：BusyBox 的 nslookup 没有 -timeout 参数，
+# 链路不通时它会按 resolv.conf 的 timeout/attempts 卡住 5~15 秒。
+# 探测循环里 10 个域名就能把一轮拖成分钟级。
+#
+# 为什么不用 `timeout` 命令：本固件不保证装了 coreutils 的 timeout，
+# 而这里必须「一定」有超时。故用「后台子进程 + 完成标记文件」：
+#   - 子进程跑完写标记 → 主流程看到标记即返回
+#   - 到点没标记 → 发 TERM，包装层 trap 再杀真实命令
+# 不能只用 kill -0 判活：子进程退出后会变成僵尸，kill -0 依然成功，
+# 会白等满整个超时（这是踩过的坑，标记文件是必需的）。
+# ------------------------------------------------------------
+# 短睡一拍的粒度：首次调用时探测 BusyBox 是否支持小数 sleep。
+#
+# 为什么要探测：OpenWrt 的 busybox 通常开了 FANCY_SLEEP（支持 0.1），
+# 但这是编译选项、不保证。写死 sleep 0.1 在不支持的固件上会立刻报错
+# 返回，轮询退化成死循环 —— 超时机制静默失效，探测又把一轮拖成分钟级。
+# 写死 sleep 1 则让每次探测至少花 1 秒，10 个域名一轮就是 20 秒以上。
+# 故探测一次、缓存结论。
+DNSCHAIN_SLEEP_TICK=""
+
+dc_sleep_tick() {
+	if [ -z "$DNSCHAIN_SLEEP_TICK" ]; then
+		if sleep 0.1 2>/dev/null; then
+			DNSCHAIN_SLEEP_TICK=0.1
+		else
+			DNSCHAIN_SLEEP_TICK=1
+		fi
+	fi
+	sleep "$DNSCHAIN_SLEEP_TICK"
+}
+
+# 每秒对应多少拍
+dc_ticks_per_sec() {
+	[ "$DNSCHAIN_SLEEP_TICK" = "0.1" ] && { echo 10; return 0; }
+	echo 1
+}
+
+dc_run_timeout() {
+	local secs out flag pid np i iters tps
+
+	secs="$1"
+	out="$2"
+	shift 2
+
+	# 用固定路径而不是 mktemp：超时判定要读标记，多一个临时文件
+	# 就多一处可能残留（重启前 /tmp 不会自动清）。
+	flag="${out}.done"
+	rm -f "$out" "$flag"
+
+	# 包装子 shell 的三件事：
+	#   ① 把真实命令放后台，自己 wait —— 这样 TERM 能打断 wait 进 trap
+	#   ② trap 里 kill 掉真实命令的子进程，避免 nslookup 变成孤儿继续
+	#      跑到 dnsproxy 自己的 8 秒超时（否则一轮探测会堆出十几个残留）
+	#   ③ 正常结束时写完成标记
+	(
+		trap 'kill "$np" 2>/dev/null; exit 1' TERM INT
+		"$@" > "$out" 2>&1 &
+		np=$!
+		wait "$np"
+		: > "$flag"
+	) &
+	pid=$!
+
+	# 先探一次粒度（这一步只在本进程第一次调用时真正 sleep）
+	dc_sleep_tick
+	tps=$(dc_ticks_per_sec)
+	iters=$((secs * tps))
+
+	i=0
+	while [ ! -f "$flag" ] && [ "$i" -lt "$iters" ]; do
+		dc_sleep_tick
+		i=$((i + 1))
+	done
+
+	if [ -f "$flag" ]; then
+		wait "$pid" 2>/dev/null
+		echo 0
+		return 0
+	fi
+
+	# 此刻 $pid 必然是「还在跑」或「已退出但未被 wait 回收的僵尸」。
+	# 僵尸的 pid 在回收前不会被复用，故这里 kill 一定落在自己人身上。
+	kill -TERM "$pid" 2>/dev/null
+	wait "$pid" 2>/dev/null
+	echo 1
+	return 0
+}
+
+# ------------------------------------------------------------
+# DNS 查询结果分类：OK / EMPTY / NX / TIMEOUT / FAIL
+#
+# 用法: dc_dns_class <域名> <服务器[:端口]> [qtype] [超时秒]
+#
+# 五分类的判据与「为什么不能把 EMPTY 当失败」见 AGENTS §5.1：
+#   OK      rcode=0 且 ancount>0
+#   EMPTY   rcode=0 且 ancount=0   ← NODATA，不是故障
+#   NX      NXDOMAIN
+#   TIMEOUT 完全无响应（硬超时命中，或 nslookup 报 timed out）
+#   FAIL    其它错误
+#
+# 统计答案行用 awk 而不是 `grep -vc`：
+# grep 无匹配时退出码为 1，`|| echo 0` 会追加第二个 0，
+# 得到 "0\n0"，随后的 [ -gt ] 直接报错。awk 没有这个陷阱。
+# ------------------------------------------------------------
+dc_dns_class() {
+	local name server qtype tmo ofile hit out an
+
+	name="$1"
+	server="$2"
+	qtype="${3:-a}"
+	tmo="${4:-2}"
+
+	ofile=$(mktemp) || { echo "FAIL"; return 0; }
+
+	if [ "$qtype" = "a" ]; then
+		hit=$(dc_run_timeout "$tmo" "$ofile" nslookup "$name" "$server")
+	else
+		hit=$(dc_run_timeout "$tmo" "$ofile" nslookup "-type=${qtype}" "$name" "$server")
+	fi
+	out=$(cat "$ofile" 2>/dev/null)
+	rm -f "$ofile"
+
+	[ "$hit" = "1" ] && { echo "TIMEOUT"; return 0; }
+
+	case "$out" in
+		*NXDOMAIN*|*"does not exist"*) echo "NX"; return 0 ;;
+		*"timed out"*|*"no servers could be reached"*|*"can't resolve"*)
+			echo "TIMEOUT"; return 0 ;;
+	esac
+
+	an=$(printf '%s\n' "$out" | awk '
+		/^Address:/ {
+			a = $0
+			sub(/^Address:[ \t]*/, "", a)
+			if (a ~ /^([0-9]{1,3}\.){3}[0-9]{1,3}:[0-9]+$/) next
+			if (a ~ /^\[.*\]:[0-9]+$/) next
+			n++
+		}
+		END { print n + 0 }')
+
+	if [ "${an:-0}" -gt 0 ] 2>/dev/null; then
+		echo "OK"
+		return 0
+	fi
+
+	case "$out" in
+		*"Address:"*) echo "EMPTY" ;;
+		*)            echo "FAIL" ;;
+	esac
+}
+
+# 取第一个解析出的地址（用于「两条链答案是否一致」的判断）
+dc_dns_first_addr() {
+	local name server qtype tmo ofile out
+
+	name="$1"; server="$2"; qtype="${3:-a}"; tmo="${4:-2}"
+
+	ofile=$(mktemp) || return 0
+
+	if [ "$qtype" = "a" ]; then
+		dc_run_timeout "$tmo" "$ofile" nslookup "$name" "$server" >/dev/null
+	else
+		dc_run_timeout "$tmo" "$ofile" nslookup "-type=${qtype}" "$name" "$server" >/dev/null
+	fi
+	out=$(cat "$ofile" 2>/dev/null)
+	rm -f "$ofile"
+
+	printf '%s\n' "$out" | sed -n 's/^Address: \([0-9a-fA-F.:]*\)$/\1/p' | head -1
+}
+
+# ------------------------------------------------------------
+# 健康状态读写
+#
+# 状态文件一行一个域名，字段用 | 分隔（域名里不会出现 |）：
+#   domain|preferred|active|fail|ok|last_epoch|last_result
+#
+# 为什么落盘在 /var/run：改道状态是运行时事实，重启即失效重算。
+# 持久化反而危险 —— 断电前的「已改道」不该在下次开机继续生效，
+# 那时链路可能是好的。
+# ------------------------------------------------------------
+dc_health_read() {
+	local d line
+	d="$1"
+	[ -r "$DNSCHAIN_HEALTH_STATE" ] || return 1
+	line=$(awk -F'|' -v d="$d" '$1 == d { print; exit }' "$DNSCHAIN_HEALTH_STATE" 2>/dev/null)
+	[ -n "$line" ] || return 1
+	echo "$line"
+}
+
+# 取字段：dc_health_field <domain> <1..7>
+dc_health_field() {
+	local line
+	line=$(dc_health_read "$1") || return 1
+	echo "$line" | awk -F'|' -v n="$2" '{ print $n }'
+}
+
+# 当前生效链路（无状态时回落到首选）
+dc_health_active() {
+	local pref active
+	pref="$2"
+	[ -n "$pref" ] || pref=$(dc_domain_preferred "$1")
+	active=$(dc_health_field "$1" 3)
+	case "$active" in
+		domestic|foreign) echo "$active" ;;
+		*)                echo "$pref" ;;
+	esac
+}
+
+# 写入/更新一行（整体重写，观测域名数量级是十位，成本可忽略）
+dc_health_write() {
+	local d pref active fail ok last res tmp
+
+	d="$1"; pref="$2"; active="$3"; fail="$4"; ok="$5"; last="$6"; res="$7"
+
+	mkdir -p "$DNSCHAIN_STATE_DIR" || return 1
+	tmp=$(mktemp) || return 1
+
+	if [ -r "$DNSCHAIN_HEALTH_STATE" ]; then
+		awk -F'|' -v d="$d" '$1 != d' "$DNSCHAIN_HEALTH_STATE" > "$tmp" 2>/dev/null
+	fi
+
+	printf '%s|%s|%s|%s|%s|%s|%s\n' \
+		"$d" "$pref" "$active" "$fail" "$ok" "$last" "$res" >> "$tmp"
+
+	mv -f "$tmp" "$DNSCHAIN_HEALTH_STATE" || return 1
+}
+
+# 更新一行但**保留原来的 last**
+#
+# 用途：改道后的「等回切」阶段。
+#
+# `last` 的语义是「上次**改道**发生的时刻」，`min_dwell` 用它算
+# 「改道后至少停留多久」。若等待期间每轮都把它刷成 now，
+# `now - last` 恒为 0 → dwell 永远不满足 → **回切被永久阻塞**。
+#
+# 实测（v0.13.0）：ok 计数涨到 12（阈值 3），状态一直停在
+# `recover-wait:OK`，watch.servers 一直指向 :5336，
+# 首选链早已恢复却不回切。这条正是「只测改道不测回切」会漏掉的。
+dc_health_write_keep_last() {
+	local d pref active fail ok res last tmp
+
+	d="$1"; pref="$2"; active="$3"; fail="$4"; ok="$5"; res="$6"
+
+	# 取不到旧 last 时退回 now（首轮没有历史）
+	last=$(dc_health_field "$d" 6 2>/dev/null)
+	[ -n "$last" ] || last=$(date +%s 2>/dev/null || echo 0)
+
+	mkdir -p "$DNSCHAIN_STATE_DIR" || return 1
+	tmp=$(mktemp) || return 1
+
+	if [ -r "$DNSCHAIN_HEALTH_STATE" ]; then
+		awk -F'|' -v d="$d" '$1 != d' "$DNSCHAIN_HEALTH_STATE" > "$tmp" 2>/dev/null
+	fi
+
+	printf '%s|%s|%s|%s|%s|%s|%s\n' \
+		"$d" "$pref" "$active" "$fail" "$ok" "$last" "$res" >> "$tmp"
+
+	mv -f "$tmp" "$DNSCHAIN_HEALTH_STATE" || return 1
+}
+
+# 状态表（供页面与 status 子命令读取）
+# 输出：domain|pref|active|fail|ok|last|res
+dc_health_state_dump() {
+	[ -r "$DNSCHAIN_HEALTH_STATE" ] || return 0
+	cat "$DNSCHAIN_HEALTH_STATE"
+}
+
+# 自定义列表的条数（页面统计用；列表本身由 dc_gen_custom_lists 落盘）
+dc_custom_count() {
+	local n
+	case "$1" in
+		domestic) n=$(wc -l < "$DNSCHAIN_CUSTOM_DOM" 2>/dev/null || echo 0) ;;
+		foreign)  n=$(wc -l < "$DNSCHAIN_CUSTOM_FOR" 2>/dev/null || echo 0) ;;
+		*)        echo 0; return 0 ;;
+	esac
+	echo "${n:-0}"
+}
+
+# ------------------------------------------------------------
+# 一轮健康探测与改道判定
+#
+# 前置条件（缺一不可，否则整轮跳过、不改任何状态）：
+#   1. 框架启用
+#   2. 两个 dnsproxy 实例都在监听
+#      —— 本地实例没起来时探测必然超时，此时改道是纯误判，
+#         会把所有域名在开机阶段翻一遍。
+#   3. health.enabled=1
+#
+# 判定（每个观测域名）：
+#   r_pref = 探测首选链
+#   r_other = 探测另一条链（仅在需要时探，省一半查询）
+#
+#   情形 A 当前 == 首选：
+#     r_pref 通         → 计数清零
+#     r_pref 不通       → fail++；若 fail ≥ 阈值 且 r_other 通 → 改道到另一条
+#   情形 B 当前 == 另一条（已改道）：
+#     r_pref 通         → ok++；若 ok ≥ 恢复阈值 且 停留时长 ≥ 最小驻留 → 回切
+#     r_pref 不通       → ok 清零，保持现状
+#
+# 两条需求规则如何落在这里：
+#   · 国外链路不通 → 改直连：数据库国外域名首选 foreign，
+#     情形 A 命中，另一条链是 domestic（直连出口）→ 切直连。
+#   · 国内链路不通 → 改代理：未覆盖域名首选 domestic（dnsmasq 默认上游），
+#     情形 A 命中，另一条链是 foreign（代理出口）→ 切代理。
+#
+# 双链路都不通时不改道：那不是分流问题，改道只会掩盖故障。
+# 此时保持当前链路并标记 both-bad，页面会直接提示去查链路。
+# ------------------------------------------------------------
+dc_health_cycle() {
+	local enabled eport fport tmo retries fail_thr ok_thr dwell
+	local d pref other active fail ok last res r_pref r_other
+	local now decision changed
+	local n_ok n_switch n_bad n_skip
+
+	enabled=$(dc_get main enabled 1)
+	[ "$enabled" = "1" ] || { echo "SKIP 框架未启用"; return 0; }
+	[ "$(dc_get health enabled 1)" = "1" ] || { echo "SKIP 健康检测未启用"; return 0; }
+
+	eport=$(dc_get main entry_port 5353)
+	fport=$(dc_get main foreign_port 5336)
+
+	if ! dc_port_listening "$eport" udp || ! dc_port_listening "$fport" udp; then
+		echo "SKIP 本地 dnsproxy 实例未就绪（:${eport} / :${fport}）"
+		return 0
+	fi
+
+	tmo=$(dc_get health timeout 2)
+	retries=$(dc_get health retries 2)
+	fail_thr=$(dc_get health fail_threshold 2)
+	ok_thr=$(dc_get health recover_threshold 3)
+	dwell=$(dc_get health min_dwell 120)
+
+	now=$(date +%s 2>/dev/null || echo 0)
+	changed=0
+	n_ok=0; n_switch=0; n_bad=0; n_skip=0
+
+	for d in $(dc_watch_list); do
+		[ -n "$d" ] || continue
+
+		pref=$(dc_domain_preferred "$d")
+		case "$pref" in
+			foreign) other="domestic" ;;
+			*)       other="foreign" ;;
+		esac
+
+		active=$(dc_health_active "$d" "$pref")
+		fail=$(dc_health_field "$d" 4)
+		ok=$(dc_health_field "$d" 5)
+		last=$(dc_health_field "$d" 6)
+		[ -n "$fail" ] || fail=0
+		[ -n "$ok" ] || ok=0
+		[ -n "$last" ] || last=0
+
+		# 用户固定的域名：只记录健康，不改道
+		if dc_domain_fixed "$d"; then
+			res=$(dc_probe_chain "$d" "$active" "$tmo" "$retries")
+			dc_health_write "$d" "$pref" "$active" 0 0 "$now" "fixed:$res"
+			n_skip=$((n_skip + 1))
+			continue
+		fi
+
+		r_pref=$(dc_probe_chain "$d" "$pref" "$tmo" "$retries")
+
+		if [ "$active" = "$pref" ]; then
+			if [ "$r_pref" = "OK" ] || [ "$r_pref" = "EMPTY" ]; then
+				dc_health_write "$d" "$pref" "$pref" 0 0 "$now" "$r_pref"
+				n_ok=$((n_ok + 1))
+				continue
+			fi
+
+			# 首选链不通：只有另一条链确实通，才允许改道
+			r_other=$(dc_probe_chain "$d" "$other" "$tmo" "$retries")
+
+			case "$r_other" in
+				OK|EMPTY)
+					fail=$((fail + 1))
+					if [ "$fail" -ge "$fail_thr" ]; then
+						dc_health_write "$d" "$pref" "$other" 0 0 "$now" \
+							"switch:$r_pref->$r_other"
+						dnschain_log "改道: ${d} ${pref}(${r_pref}) → ${other}"
+						changed=1
+						n_switch=$((n_switch + 1))
+					else
+						dc_health_write "$d" "$pref" "$pref" "$fail" 0 "$now" \
+							"probe:$r_pref"
+						n_bad=$((n_bad + 1))
+					fi
+					;;
+				*)
+					# 两条链都不通：不是分流问题，不动策略
+					dc_health_write "$d" "$pref" "$pref" 0 0 "$now" \
+						"both-bad:$r_pref/$r_other"
+					n_bad=$((n_bad + 1))
+					;;
+			esac
+			continue
+		fi
+
+		# 已改道：观察首选链是否恢复
+		if [ "$r_pref" = "OK" ] || [ "$r_pref" = "EMPTY" ]; then
+			ok=$((ok + 1))
+
+			# ⚠️ `last` 是**上次改道的时刻**，不是上次探测的时刻（v0.13.0 实测修正）。
+			#
+			# 原来这里在 else 分支也调 dc_health_write（会写 last=now），
+			# 于是每轮都刷新 last，`now - last` 恒为 0，
+			# `min_dwell` 永远不满足 → **回切被永久阻塞**。
+			# 实测：ok 计数涨到 12（阈值 3），状态一直停在
+			# `recover-wait:OK`，watch.servers 一直指向 :5336，
+			# 即使首选链早就恢复了也不回切。
+			#
+			# 修法：等待期间**不更新 last**，只更新 ok 计数。
+			# 这样 last 保持为「改道发生的那一刻」，dwell 才真正是
+			# 「改道后至少停留多久」的语义。
+			if [ "$ok" -ge "$ok_thr" ] && [ $((now - last)) -ge "$dwell" ] 2>/dev/null; then
+				dc_health_write "$d" "$pref" "$pref" 0 0 "$now" "recover:$r_pref"
+				dnschain_log "回切: ${d} ${other} → ${pref}（首选链恢复）"
+				changed=1
+				n_ok=$((n_ok + 1))
+			else
+				# 只累加 ok 计数，保留原 last
+				dc_health_write_keep_last "$d" "$pref" "$other" 0 "$ok" \
+					"recover-wait:$r_pref"
+				n_skip=$((n_skip + 1))
+			fi
+		else
+			dc_health_write "$d" "$pref" "$other" 0 0 "$now" "fallback:$r_pref"
+			n_switch=$((n_switch + 1))
+		fi
+	done
+
+	# 状态变了就重写 servers-file 并让 dnsmasq 重读（SIGHUP，不重启）
+	if [ "$changed" = "1" ]; then
+		case "$(dc_gen_watch_servers)" in
+			changed) dc_reload_servers_file && \
+				dnschain_log "已重写 watch.servers 并 SIGHUP 生效" ;;
+			*) : ;;
+		esac
+	fi
+
+	printf 'CYCLE ok=%s switch=%s bad=%s skip=%s\n' \
+		"$n_ok" "$n_switch" "$n_bad" "$n_skip"
+	return 0
+}
+
+# ------------------------------------------------------------
+# 单域名探测（带重试）
+#
+# 第二个参数接受两种形式：
+#   ① 链路名：foreign | domestic   （按配置取端口）
+#   ② 显式端口：127.0.0.1:5336 / 127.0.0.1#5336
+#
+# ⚠️ 必须支持形式 ②（v0.13.0 实测修正）。
+#   原来只认形式 ①，其它一律落到 `*)` 分支 → 取 entry_port。
+#   后果：传 `127.0.0.1#59999` 这种「指定端口探测」会被**静默改成**
+#   探测 :5353，而 :5353 是活的 → 死端口被判为 OK。
+#
+#   这是最危险的一类错误：探测判据本身撒谎，于是
+#   「链路挂了却不改道」——正是需求 2 要防的场景。
+#   实测：dc_probe_chain www.google.com 127.0.0.1#59999 → OK（错）
+#
+# 为什么要有重试：单次 UDP 丢包很常见（尤其跨境）。
+# 一次失败就判定不通会让改道变成随机行为。
+# 重试次数取 health.retries，每次独立超时。
+# ------------------------------------------------------------
+dc_probe_chain() {
+	local d chain tmo retries i port r target
+	d="$1"; chain="$2"; tmo="${3:-2}"; retries="${4:-2}"
+
+	case "$chain" in
+		foreign)  port=$(dc_get main foreign_port 5336) ;;
+		domestic) port=$(dc_get main entry_port 5353) ;;
+		*)
+			# 形式 ②：已经带了端口，直接用
+			case "$chain" in
+				*:*|*'#'*)
+					# nslookup 要 `host:port` 形式，把 `#` 归一成 `:`
+					target=$(echo "$chain" | tr '#' ':')
+					port=""
+					;;
+				*)
+					port=$(dc_get main entry_port 5353) ;;
+			esac
+			;;
+	esac
+
+	[ -n "${target:-}" ] || target="127.0.0.1:${port}"
+
+	i=0
+	while [ "$i" -le "$retries" ]; do
+		r=$(dc_dns_class "$d" "$target" a "$tmo")
+		case "$r" in
+			OK|EMPTY|NX) echo "$r"; return 0 ;;
+		esac
+		i=$((i + 1))
+	done
+
+	echo "$r"
+}
+
+# ------------------------------------------------------------
+# 决策解释（页面「归属判定」用它把结论摊开给人看）
+#
+# 输出 KEY=VALUE，一行一个，便于 Lua 侧逐行解析：
+#   CLASS / PREFERRED / ACTIVE / WATCH / FIXED
+#   PROBE_DOMESTIC / PROBE_FOREIGN / ANSWER_DOMESTIC / ANSWER_FOREIGN
+#   DECISION / REASON
+# ------------------------------------------------------------
+dc_explain_domain() {
+	local d cls pref active other tmo retries r_dom r_for a_dom a_for
+	local watch fixed decision reason dom_up for_up
+
+	d=$(dc_domain_normalize "$1")
+	cls=$(dc_domain_class "$d")
+
+	echo "DOMAIN=${d}"
+	echo "CLASS=${cls}"
+
+	[ "$cls" = "invalid" ] && {
+		echo "DECISION=reject"
+		echo "REASON=域名格式不合法"
+		return 0
+	}
+
+	pref=$(dc_domain_preferred "$d")
+	case "$pref" in
+		foreign) other="domestic" ;;
+		*)       other="foreign" ;;
+	esac
+
+	active=$(dc_health_active "$d" "$pref")
+
+	watch=0
+	dc_watch_list | grep -Fqx "$d" && watch=1
+
+	fixed=0
+	dc_domain_fixed "$d" && fixed=1
+
+	echo "PREFERRED=${pref}"
+	echo "ACTIVE=${active}"
+	echo "WATCH=${watch}"
+	echo "FIXED=${fixed}"
+
+	tmo=$(dc_get health timeout 2)
+	retries=$(dc_get health retries 2)
+
+	r_dom=$(dc_probe_chain "$d" domestic "$tmo" "$retries")
+	r_for=$(dc_probe_chain "$d" foreign "$tmo" "$retries")
+
+	a_dom=$(dc_dns_first_addr "$d" "127.0.0.1:$(dc_get main entry_port 5353)" a "$tmo")
+	a_for=$(dc_dns_first_addr "$d" "127.0.0.1:$(dc_get main foreign_port 5336)" a "$tmo")
+
+	echo "PROBE_DOMESTIC=${r_dom}"
+	echo "PROBE_FOREIGN=${r_for}"
+	echo "ANSWER_DOMESTIC=${a_dom}"
+	echo "ANSWER_FOREIGN=${a_for}"
+
+	# 判定必须与 dc_health_cycle 的规则**完全一致** ——
+	# 页面上的解释与守护进程的实际动作对不上，是最坏的一类不一致：
+	# 用户按解释去排障，却发现系统干的是另一件事。
+	# 所以这里也以「首选链」为基准，而不是「先看国内通不通」。
+	dom_up=0
+	for_up=0
+	case "$r_dom" in OK|EMPTY) dom_up=1 ;; esac
+	case "$r_for" in OK|EMPTY) for_up=1 ;; esac
+
+	if [ "$fixed" = "1" ]; then
+		decision="fixed"
+		reason="自定义列表已固定走 ${pref}，不参与自动改道"
+	elif [ "$pref" = "foreign" ]; then
+		if [ "$for_up" = "1" ]; then
+			if [ "$dom_up" = "1" ] && [ -n "$a_dom" ] && [ -n "$a_for" ] && [ "$a_dom" != "$a_for" ]; then
+				decision="keep-foreign"
+				reason="国外链路可达，走代理；但两条链答案不同（直连 ${a_dom} / 代理 ${a_for}），直连侧疑似污染"
+			else
+				decision="keep-foreign"
+				reason="国外链路可达，按归属走代理"
+			fi
+		elif [ "$dom_up" = "1" ]; then
+			decision="reroute-domestic"
+			reason="国外链路 ${r_for} 不可达、国内链路可达 → 改走直连"
+		else
+			decision="both-bad"
+			reason="两条链都不通（直连 ${r_dom} / 代理 ${r_for}）→ 不是分流问题，请查链路"
+		fi
+	else
+		if [ "$dom_up" = "1" ]; then
+			if [ "$for_up" = "1" ] && [ -n "$a_dom" ] && [ -n "$a_for" ] && [ "$a_dom" != "$a_for" ]; then
+				decision="keep-domestic"
+				reason="国内链路可达，走直连；但两条链答案不同（直连 ${a_dom} / 代理 ${a_for}）"
+			else
+				decision="keep-domestic"
+				reason="国内链路可达，按归属走直连"
+			fi
+		elif [ "$for_up" = "1" ]; then
+			decision="reroute-foreign"
+			reason="国内链路 ${r_dom} 不可达、国外链路可达 → 改走代理"
+		else
+			decision="both-bad"
+			reason="两条链都不通（直连 ${r_dom} / 代理 ${r_for}）→ 不是分流问题，请查链路"
+		fi
+	fi
+
+	echo "DECISION=${decision}"
+	echo "REASON=${reason}"
 }
 
 # ------------------------------------------------------------

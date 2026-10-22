@@ -44,7 +44,15 @@ DNSMASQ_DC_CONF="${DNSCHAIN_DNSMASQ_CONF_DIR}/dnschain-split.conf"
 # 生成全部运行时配置
 # ------------------------------------------------------------
 generate_all() {
+	local n_db
+
 	mkdir -p "$DNSCHAIN_RUN_DIR" "$DNSCHAIN_STATE_DIR" || return 1
+
+	# 自定义列表与数据库域名集合是「归属判定」的输入，
+	# 必须排在任何依赖归属的生成动作之前。
+	dc_gen_custom_lists || return 1
+	n_db=$(dc_gen_db_domains) || n_db=0
+	dnschain_log "数据库国外域名 ${n_db} 条"
 
 	dnschain_log "生成国外域名分流规则..."
 	dc_gen_upstream_file >/dev/null || return 1
@@ -55,6 +63,9 @@ generate_all() {
 	dnschain_log "生成国外 dnsproxy 参数..."
 	dc_gen_foreign_args >/dev/null || return 1
 
+	# 观测域名的动态上游（改道只改这个文件 + SIGHUP）
+	dc_gen_watch_servers >/dev/null || return 1
+
 	# 记录本次名单指纹，供收敛器判断是否需要重导
 	dc_lists_fingerprint > "$DNSCHAIN_STATE_DIR/lists.fingerprint"
 
@@ -64,23 +75,28 @@ generate_all() {
 # ------------------------------------------------------------
 # 生成 dnsmasq 的分流 + nftset 规则
 #
-# 两部分：
-#   1. server=/国外域名/127.0.0.1#<foreign_port>   ← 国外域名交给实例 2
-#   2. nftset=/国外域名/4#inet#ss_spec#blacklist  ← 解析结果写入代理 IP 集
+# v0.13.0 起生成逻辑整体移到库函数 dc_gen_dnsmasq_split()：
+# 它同时处理三类域名，并把观测域名从静态片段里排除。
 #
-# 第 2 部分替代了 chinadns-ng 的 `-A inet@ss_spec@blacklist`。
-# 实测依据：dnsmasq 编译含 nftset（`dnsmasq --version` 输出里有 nftset），
-#          且 whitelist_domain 集在查 bilibili.com 后从 79 → 81。
+# 三类（优先级：自定义 > 数据库 > 未覆盖）：
+#   数据库国外 − 自定义国内 − 观测域名 → server= 指向 foreign_port + 入 blacklist
+#   自定义国外                          → server= 指向 foreign_port + 入 blacklist
+#   自定义国内                          → server= 指向 entry_port   + 入 china
 #
-# 为什么不用 SSR-Plus 生成的 gfw_list.conf：
-#   那些行目标是 127.0.0.1#5335（chinadns-ng），本版本已不再使用。
-#   这里单独生成一份片段，不改 SSR-Plus 的任何文件（AGENTS §4.0）。
+# 为什么必须收口到一处：
+#   此前 init 里内联一段 sed、reconcile 里又生成一次，两处口径稍有
+#   差异就会让「页面上显示的分流条数」与「实际生效的规则」不一致。
+#   现在只有一个生成函数，页面统计也读它的产物。
+#
+# 为什么观测域名不写在这里：
+#   它们的去向由健康探测动态决定（watch.servers）。同一个域名若同时
+#   出现在静态片段与 servers-file 里，dnsmasq 会把两条 server= 当作
+#   **候选**（不是后者覆盖前者），改道就退化成「随机走一条」。
 # ------------------------------------------------------------
 update_dnsmasq_split() {
-	local enabled fport tmp_split tmp_nft cnt_split cnt_nft
+	local enabled res n_split n_nft
 
 	enabled=$(dc_get main enabled 1)
-	fport=$(dc_get main foreign_port 5336)
 	mkdir -p "$DNSCHAIN_DNSMASQ_CONF_DIR" || return 1
 
 	if [ "$enabled" != "1" ]; then
@@ -90,34 +106,52 @@ update_dnsmasq_split() {
 		return 0
 	fi
 
-	tmp_split=$(mktemp) || return 1
-	tmp_nft=$(mktemp) || { rm -f "$tmp_split"; return 1; }
+	res=$(dc_gen_dnsmasq_split) || {
+		dnschain_log "ERROR: 生成 dnsmasq 分流片段失败"
+		return 1
+	}
 
-	# ⚠️ 不过滤 xn--（同 dc_gen_upstream_file 的理由）：
-	# dnsmasq 原生支持 punycode，过滤掉会让 IDNA 域名失去分流与入集。
-	dc_extract_domains \
-		| grep -E '^[a-zA-Z0-9]([a-zA-Z0-9._-]*[a-zA-Z0-9])?\.[a-zA-Z]{2,}$' \
-		> /tmp/.dc-domains.$$
+	n_split=$(echo "$res" | awk '{print $1}')
+	n_nft=$(echo "$res" | awk '{print $2}')
+	dnschain_log "dnsmasq 分流 ${n_split:-0} 条 → :$(dc_get main foreign_port 5336)；nftset ${n_nft:-0} 条"
+	return 0
+}
 
-	# 1. 分流：国外域名 → 国外实例
-	sed "s|.*|server=/&/127.0.0.1#${fport}|" /tmp/.dc-domains.$$ > "$tmp_split"
-	# 2. nftset：国外域名解析结果 → 代理 IP 集
-	sed 's|.*|nftset=/&/4#inet#ss_spec#blacklist|' /tmp/.dc-domains.$$ > "$tmp_nft"
+# ------------------------------------------------------------
+# 让 dnsmasq 加载 watch.servers（观测域名的动态上游）
+#
+# 通过 UCI 的 serversfile 选项下发 —— OpenWrt 的 dnsmasq init 脚本
+# 会把它转成 --servers-file（dnsmasq.init 里
+# `config_get serversfile "$cfg" "serversfile"` 那段）。
+#
+# 为什么要走 UCI 而不是写 /etc/dnsmasq.conf：
+#   /etc/dnsmasq.conf 是用户可编辑文件，且 OpenWrt 的 init 会先加载它
+#   再追加 UCI 生成的行；两处都写会让同一个选项出现两次。
+#   写 UCI 只有一处真相，且页面能显示它。
+#
+# ⚠️ 路径必须是 ujail 已挂载的目录（v0.13.0 实测踩过）：
+#   dnsmasq 由 ujail 降权到 uid 453 运行，只能看到 init 脚本里
+#   `procd_add_jail_mount` 声明过的路径。serversfile 指向别处时
+#   **既不报错也不生效** —— SIGHUP 成功、日志干净，改道却完全没发生。
+#   故 DNSCHAIN_WATCH_SERVERS 指向 /var/run/dnsmasq/（已 -rw 挂载）。
+#   验证方式：把它临时指向不存在的端口，改道应立即失效（详见
+#   docs/adr/0006 的「改道通道」一节）。
+# ------------------------------------------------------------
+update_serversfile() {
+	local cur want
 
-	cnt_split=$(wc -l < "$tmp_split" 2>/dev/null || echo 0)
-	cnt_nft=$(wc -l < "$tmp_nft" 2>/dev/null || echo 0)
+	want="$DNSCHAIN_WATCH_SERVERS"
+	cur=$(uci -q get dhcp.@dnsmasq[0].serversfile 2>/dev/null)
 
-	{
-		echo "# dnschain: 国外域名分流 + 解析结果入代理 IP 集（由 init.d/dnschain 管理，勿手工编辑）"
-		echo "# 替代 chinadns-ng 的 -d gfw / -A inet@ss_spec@blacklist"
-		echo "# 1) server= 把国外域名交给 dnsproxy 实例 2（:${fport}，只配 DoH）"
-		cat "$tmp_split"
-		echo "# 2) nftset= 把国外域名的解析结果写入 ss_spec#blacklist"
-		cat "$tmp_nft"
-	} > "$DNSMASQ_DC_CONF"
+	[ "$cur" = "$want" ] && return 0
 
-	rm -f "$tmp_split" "$tmp_nft" /tmp/.dc-domains.$$
-	dnschain_log "dnsmasq 分流 ${cnt_split} 条 → :${fport}；nftset ${cnt_nft} 条"
+	uci -q set "dhcp.@dnsmasq[0].serversfile=${want}" || {
+		dnschain_log "ERROR: 写入 dhcp.@dnsmasq[0].serversfile 失败"
+		return 1
+	}
+	uci -q commit dhcp
+	dnschain_log "已设置 serversfile=${want}（观测域名改道无需重启 dnsmasq）"
+	return 0
 }
 
 # ------------------------------------------------------------
@@ -295,6 +329,35 @@ reload_dnsmasq() {
 	fi
 }
 
+# ------------------------------------------------------------
+# 启动健康探测守护进程（procd 托管）
+#
+# 为什么单独一个 procd 实例而不是塞进 dnsproxy 的 shell 包装：
+#   dnsproxy 是外部二进制，它的 respawn 语义是「进程退出就重启」。
+#   若把探测循环挂在它旁边，探测崩溃会连带重启 dnsproxy，
+#   造成不必要的解析中断。独立实例各管各的。
+#
+# 为什么 enabled=0 时不启动：
+#   用户可能只想保留静态分流（明确的自定义列表），不要自动改道。
+#   此时不建实例，procd 也不会反复重启一个「什么都不做」的进程。
+# ------------------------------------------------------------
+start_health_daemon() {
+	local enabled interval
+
+	enabled=$(dc_get health enabled 1)
+	[ "$enabled" = "1" ] || return 0
+
+	interval=$(dc_get health interval 60)
+	[ "$interval" -gt 0 ] 2>/dev/null || return 0
+
+	procd_open_instance "health"
+	procd_set_param command /usr/bin/dnschain-health daemon
+	procd_set_param respawn 3600 5 5
+	procd_set_param stdout 1
+	procd_set_param stderr 1
+	procd_close_instance
+}
+
 start_service() {
 	config_load "$DNSCHAIN_CONF"
 
@@ -314,8 +377,9 @@ start_service() {
 		return 1
 	fi
 
-	# 先生成 dnsmasq 的分流片段并加载，再启动两个 dnsproxy 实例
+	# 先生成 dnsmasq 的分流片段与动态上游文件，再启动两个 dnsproxy 实例
 	update_dnsmasq_split
+	update_serversfile
 	reload_dnsmasq
 
 	start_dnsproxy
@@ -323,7 +387,10 @@ start_service() {
 
 	update_dot_reject
 
-	dnschain_log "已启动：国内 :$(dc_get main entry_port 5353)、国外 :$(dc_get main foreign_port 5336)（无 chinadns-ng）"
+	# 健康探测在实例起来之后才启动（它自己也会等一轮 interval 再探）
+	start_health_daemon
+
+	dnschain_log "已启动：国内 :$(dc_get main entry_port 5353)、国外 :$(dc_get main foreign_port 5336)"
 
 	# 名单指纹留给收敛器比较
 	dc_lists_fingerprint > "$DNSCHAIN_STATE_DIR/lists.fingerprint" 2>/dev/null
@@ -341,6 +408,11 @@ stop_service() {
 	cat > "$DNSMASQ_DC_CONF" <<-EOF
 		# dnschain: 服务已停止（由 init.d/dnschain 管理）
 	EOF
+
+	# 健康状态是运行时事实：服务停了就该丢掉，否则下次启动会带着
+	# 上次的「已改道」状态继续跑，而那时链路可能是好的。
+	rm -f "$DNSCHAIN_HEALTH_STATE" 2>/dev/null
+
 	if [ -x /etc/init.d/firewall ]; then
 		/etc/init.d/firewall reload >/dev/null 2>&1
 	fi
@@ -356,6 +428,9 @@ reload_service() {
 		preflight || return 1
 	fi
 	update_dnsmasq_split
+	update_serversfile
+	# 配置变了，旧的改道结论不再可信：清状态，按新归属重新开始
+	rm -f "$DNSCHAIN_HEALTH_STATE" 2>/dev/null
 	reload_dnsmasq
 	update_dot_reject
 	# 让 procd 重启实例

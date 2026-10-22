@@ -263,6 +263,9 @@ html[data-darkmode="true"] {
  * 判据用 :has() 按内容类型匹配，不依赖 Lua 侧加标记（CBI 不支持给
  * option 加自定义 CSS 类）。JS 侧有同样逻辑的兜底（见 dnschain.js
  * 的 markBlockRows），供不支持 :has() 的旧浏览器使用。
+ *
+ * v0.13.0 新增 .dc-chip：已录入域名的 chip 行也是「整块内容」，
+ * 放进标签列右侧会被压成极窄一列，chip 逐个竖着堆。
  */
 
 .cbi-value:has(> .cbi-value-field > .dc-chain),
@@ -270,7 +273,9 @@ html[data-darkmode="true"] {
 .cbi-value:has(> .cbi-value-field > .dc-metrics),
 .cbi-value:has(> .cbi-value-field > .dc-table-wrap),
 .cbi-value:has(> .cbi-value-field > .dc-stats),
-.cbi-value:has(> .cbi-value-field > .dc-alert) {
+.cbi-value:has(> .cbi-value-field > .dc-alert),
+.cbi-value:has(> .cbi-value-field > .dc-inline-form),
+.cbi-value:has(> .cbi-value-field > .dc-hint) {
 	display: block;
 }
 
@@ -279,7 +284,9 @@ html[data-darkmode="true"] {
 .cbi-value:has(> .cbi-value-field > .dc-metrics) > .cbi-value-title,
 .cbi-value:has(> .cbi-value-field > .dc-table-wrap) > .cbi-value-title,
 .cbi-value:has(> .cbi-value-field > .dc-stats) > .cbi-value-title,
-.cbi-value:has(> .cbi-value-field > .dc-alert) > .cbi-value-title {
+.cbi-value:has(> .cbi-value-field > .dc-alert) > .cbi-value-title,
+.cbi-value:has(> .cbi-value-field > .dc-inline-form) > .cbi-value-title,
+.cbi-value:has(> .cbi-value-field > .dc-hint) > .cbi-value-title {
 	width: auto;
 	max-width: none;
 	flex: none;
@@ -296,7 +303,9 @@ html[data-darkmode="true"] {
 .cbi-value:has(> .cbi-value-field > .dc-metrics) > .cbi-value-field,
 .cbi-value:has(> .cbi-value-field > .dc-table-wrap) > .cbi-value-field,
 .cbi-value:has(> .cbi-value-field > .dc-stats) > .cbi-value-field,
-.cbi-value:has(> .cbi-value-field > .dc-alert) > .cbi-value-field {
+.cbi-value:has(> .cbi-value-field > .dc-alert) > .cbi-value-field,
+.cbi-value:has(> .cbi-value-field > .dc-inline-form) > .cbi-value-field,
+.cbi-value:has(> .cbi-value-field > .dc-hint) > .cbi-value-field {
 	width: 100%;
 	max-width: none;
 	flex: none;
@@ -520,4 +529,164 @@ html[data-darkmode="true"] {
 	.dc-metric__label { flex-basis: 68px; font-size: 11px; }
 	.dc-tab { padding: 6px 10px; font-size: 12px; }
 	.dc-stats { grid-template-columns: repeat(auto-fit, minmax(104px, 1fr)); }
+}
+
+/* =====================================================================
+ * 域名 tab（v0.13.0）
+ *
+ * 三块内容：自定义列表 / 判定链路图 / 改道状态图 + 明细表。
+ * 这里只加「新出现的东西」的样式，复用上面的徽标、卡片、表格原语。
+ * ===================================================================== */
+
+/* ── 域名 chip ───────────────────────────────────────────────────── */
+
+/*
+ * 已录入的域名用 chip 显示而不是逗号拼接的文本：
+ *   逗号串在域名多时会折成一整块，看不出「到底有几条、哪条是哪个」；
+ *   chip 一行一个语义单位，扫读成本低得多。
+ *
+ * 两个色系对应两条链：
+ *   --dom（直连）用 ok 绿，--for（代理）用 info 蓝。
+ *   刻意不用红/黄：那两色在本页已经专用于「异常」，
+ *   拿它们标链路会让用户以为列表里的域名出了问题。
+ */
+.dc-chip {
+	display: inline-block;
+	margin: 2px 4px 2px 0;
+	padding: 2px 8px;
+	border: 1px solid var(--dc-border-soft);
+	border-radius: var(--dc-r-sm);
+	font-size: 11px;
+	line-height: 1.6;
+	font-family: ui-monospace, SFMono-Regular, Menlo, Consolas, monospace;
+	word-break: break-all;
+}
+
+.dc-chip--dom {
+	border-color: var(--dc-ok);
+	background: var(--dc-ok-soft);
+	color: var(--dc-ok);
+}
+
+.dc-chip--for {
+	border-color: var(--dc-info);
+	background: var(--dc-info-soft);
+	color: var(--dc-info);
+}
+
+/* ── 行内小表单（单域名解释）───────────────────────────────────── */
+
+/*
+ * CBI 的 .cbi-value-field 默认是块级，把 form 放进去会占满整行；
+ * 这里让它横排并限制宽度，避免输入框被拉成一整行（那看起来像
+ * 「这是个长文本域」而不是「输一个域名」）。
+ */
+.dc-inline-form {
+	display: flex;
+	flex-wrap: wrap;
+	gap: 8px;
+	align-items: center;
+	margin: 0 0 12px;
+	max-width: 520px;
+}
+
+.dc-inline-form input[type="text"] {
+	flex: 1 1 220px;
+	min-width: 0;
+}
+
+.dc-inline-form .cbi-button {
+	flex: 0 0 auto;
+}
+
+/* ── 键值表（解释结果）─────────────────────────────────────────── */
+
+/*
+ * 解释结果是「标签 — 值」两栏，不是数据表。
+ * 用 .dc-kv 覆盖 .dc-table 的等宽列行为：标签列固定窄宽，
+ * 值列吃掉剩余空间 —— 否则长理由文本会把标签列拉得很宽。
+ */
+.dc-table.dc-kv {
+	min-width: 0;
+	table-layout: fixed;
+}
+
+.dc-table.dc-kv .dc-kv__k {
+	width: 132px;
+	padding-right: 12px;
+	font-size: 12px;
+	opacity: 0.7;
+	white-space: nowrap;
+	vertical-align: top;
+}
+
+.dc-table.dc-kv .dc-kv__v {
+	word-break: break-word;
+	vertical-align: top;
+}
+
+@media (max-width: 720px) {
+	.dc-table.dc-kv .dc-kv__k { width: 96px; }
+}
+
+/* ── 表格里的小字（原因串）─────────────────────────────────────── */
+
+/*
+ * 改道原因形如 switch:TIMEOUT->OK，比域名长但重要性低。
+ * 缩一号 + 等宽 + 允许折行，避免把「状态」列挤到换行。
+ */
+.dc-small {
+	font-size: 11px;
+	opacity: 0.8;
+	word-break: break-all;
+}
+
+/* 链路迁移箭头（直连 → 代理） */
+.dc-arrow {
+	opacity: 0.55;
+	margin: 0 2px;
+}
+
+/* ── 提示行 ─────────────────────────────────────────────────────── */
+
+.dc-hint {
+	margin-top: 8px;
+	font-size: 11px;
+	opacity: 0.62;
+	line-height: 1.6;
+}
+
+/* ── 图示容器（两张思维导图共用）───────────────────────────────── */
+
+/*
+ * 两张图都比概览那张宽（判定链路 720、状态导图 760），
+ * 窄屏下必须能横向滚动而不是压扁 —— 压扁会让 10~11px 的
+ * 说明文字彻底不可读。
+ *
+ * 为什么 min-width 是 620 而不是图的原始宽度：
+ *   图的 viewBox 会等比缩放，620 宽时字号约缩到 86%，仍可读；
+ *   再窄就开始糊。低于 620 改横向滚动。
+ */
+.dc-chain--map svg {
+	min-width: 620px;
+}
+
+@media (min-width: 1100px) {
+	.dc-chain--map svg {
+		min-width: 0;
+	}
+}
+
+/*
+ * 图里的文字全部用 currentColor 或语义色，故这里只需保证
+ * 字体跟随主题 —— SVG 不继承 body 的 font-family，
+ * 不显式设置时会被渲染成浏览器默认 serif，与页面其余部分割裂。
+ */
+.dc-chain svg text {
+	font-family: inherit;
+}
+
+/* 判定链路图/状态图的行距比概览图紧，上下留白可以小一点 */
+.dc-chain--map {
+	padding: 2px 0;
 }

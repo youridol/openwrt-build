@@ -34,6 +34,7 @@
 -- 每个 section 通过 s.dc_tab 归组，由 dnschain.js 收拢成 tab 面板。
 
 local ds = require "luci.model.cbi.dnschain.dnschain"
+local dg = require "luci.model.cbi.dnschain.diagrams"
 
 local m, s, o
 
@@ -96,6 +97,7 @@ end
 
 local TAB_LABELS = {
 	overview = translate("概览"),
+	domains  = translate("域名"),
 	resolve  = translate("解析"),
 	split    = translate("分流"),
 	proxy    = translate("代理"),
@@ -106,6 +108,14 @@ local TAB_LABELS = {
 -- section 标题 → tab
 local SECTION_TAB = {
 	[translate("当前状态")]      = "overview",
+
+	-- 域名 tab（v0.13.0）：自定义列表 + 判定链路 + 状态导图 + 改道表
+	[translate("自定义域名")]    = "domains",
+	[translate("判定链路")]      = "domains",
+	[translate("改道状态")]      = "domains",
+	[translate("改道明细")]      = "domains",
+	[translate("观测与阈值")]    = "domains",
+	[translate("域名操作")]      = "domains",
 
 	[translate("国内上游")]      = "resolve",
 	[translate("国外上游")]      = "resolve",
@@ -538,6 +548,534 @@ function o.cfgvalue()
 		'<th>' .. translate("状态") .. '</th>' ..
 		'<th>' .. translate("说明") .. '</th>' ..
 		'</tr></thead><tbody>' .. table.concat(rows) .. '</tbody></table></div>'
+end
+
+------------------------------------------------------------------------
+-- Tab「域名」：自定义列表 + 判定链路 + 改道状态（v0.13.0）
+--
+-- 这一页要回答三个问题，顺序就是三个 section 的顺序：
+--
+--   ① 我录了哪些域名？            → 自定义域名（两个输入框 + 已录入清单）
+--   ② 某个域名会怎么走、为什么？  → 判定链路（思维链路图）
+--   ③ 现在哪些域名不正常？        → 改道状态（状态思维导图 + 明细表）
+--
+-- 为什么①②③必须是同一个 tab：
+--   用户改完列表后最想知道的是「这下它会怎么走」，而改道状态又直接
+--   依赖归属判定。拆成两个 tab 时，用户得来回切才能把三件事对上，
+--   而这三件事在逻辑上是一条链。
+------------------------------------------------------------------------
+
+-- 归属标签（两处表格共用，避免两套文案漂移）
+local CLASS_LABEL = {
+	["custom-domestic"] = translate("自定义 · 国内"),
+	["custom-foreign"]  = translate("自定义 · 国外"),
+	["db-foreign"]      = translate("数据库命中"),
+	["uncovered"]       = translate("未覆盖"),
+	["invalid"]         = translate("格式非法"),
+}
+
+local function ds_class_label(cls)
+	return dg.esc(CLASS_LABEL[cls] or cls or "—")
+end
+
+-- 校验一个域名（页面侧第一道闸）
+--
+-- 与脚本里的 dc_domain_valid 保持同一套规则，但**不追求完全等价**：
+-- 这里的目标是「用户敲错时立刻看到」，脚本那道闸才是权威。
+-- 页面校验写得过于复杂反而会误拒合法域名（例如 xn-- 形式的 IDNA），
+-- 所以这里只拦「明显不对」的形态，剩下的交给脚本。
+local function validate_domain(value)
+	local raw = tostring(value or "")
+	local v = raw:gsub("^%s+", ""):gsub("%s+$", ""):lower():gsub("%.$", "")
+
+	-- 空值放行：DynamicList 的「最后一行空输入」是正常的，
+	-- 由 rmempty 负责把它丢掉。这里返回 nil 会被当成「校验失败」，
+	-- 用户就会看到「保存成功但配置没变」这种更难查的现象。
+	if v == "" then return value end
+
+	if v:find("%s") then
+		return nil, translate("不能含空格：") .. v
+	end
+	if v:find("[^a-z0-9%.%-]") then
+		return nil, translate("只能包含字母、数字、点与连字符：") .. v
+	end
+	if v:find("%.%.") or v:sub(1, 1) == "." or v:sub(-1) == "." then
+		return nil, translate("点的位置不对：") .. v
+	end
+	if not v:find("%.") then
+		return nil, translate("至少要有两级（例如 example.com）：") .. v
+	end
+
+	-- 不做「禁止 --」的检查：xn-- 是合法的 IDNA 前缀，
+	-- punycode 编码结果里也会出现 --。拦它会把 IDNA 域名误拒。
+	local tld = v:match("%.([^%.]+)$") or ""
+	if #tld < 2 then
+		return nil, translate("顶级域至少 2 位：") .. v
+	end
+	if tld:match("^%d+$") then
+		return nil, translate("顶级域不能是纯数字：") .. v
+	end
+
+	return v
+end
+
+-- ── 自定义域名 ────────────────────────────────────────────────────
+--
+-- 两个 list 分开放在两个 NamedSection 里，而不是一个 section 两个 list：
+--   UCI 里它们是两个独立的 config 段（domestic / foreign），
+--   放进同一个 NamedSection 会让写回时互相覆盖。
+s = m:section(NamedSection, "dom_domestic", "domains", translate("自定义域名"),
+	translate("手工指定域名走哪条链。<b>自定义优先于名单</b>：" ..
+		"写在这里的域名不再受 gfw 名单影响，也<b>不参与自动改道</b> —— " ..
+		"你写的就是最终答案。<br/>" ..
+		"格式：只接受域名（含 <code>xn--</code> 形式），不接受通配符、IP、URL。"))
+s.addremove = false
+
+o = s:option(DynamicList, "domain", translate("国内域名（走直连）"),
+	translate("这些域名交给国内 dnsproxy 实例（直连出口），" ..
+		"解析结果同时写入 <code>china</code> IP 集，保证后续流量也直连。"))
+o.datatype = "string"
+o.rmempty = true
+o.placeholder = "www.baidu.com"
+o.validate = validate_domain
+
+s = m:section(NamedSection, "dom_foreign", "domains", translate("自定义域名"),
+	translate("手工指定域名走哪条链。<b>自定义优先于名单</b>：" ..
+		"写在这里的域名不再受 gfw 名单影响，也<b>不参与自动改道</b>。"))
+s.addremove = false
+
+o = s:option(DynamicList, "domain", translate("国外域名（走代理）"),
+	translate("这些域名交给国外 dnsproxy 实例（经 <code>:1234</code> 代理出口），" ..
+		"解析结果写入 <code>blacklist</code> IP 集，保证后续流量进代理。"))
+o.datatype = "string"
+o.rmempty = true
+o.placeholder = "www.google.com"
+o.validate = validate_domain
+
+-- 已录入清单 + 生效状态
+--
+-- 为什么同时显示「已保存」与「已生效」：
+--   点保存只写 UCI，真正改分流要等 apply（它会重启 dnsmasq，
+--   约 3 秒中断，所以不能自动触发）。只显示一份时，
+--   用户保存完看不到变化会以为没生效，反复点保存。
+o = s:option(DummyValue, "_domains_list", translate("已录入清单"))
+o.rawhtml = true
+function o.cfgvalue()
+	local dom_uci = ds.uci_list("dom_domestic", "domain")
+	local for_uci = ds.uci_list("dom_foreign", "domain")
+	local dom_run = ds.custom_domestic()
+	local for_run = ds.custom_foreign()
+
+	local function badge(n_uci, n_run)
+		if n_uci == n_run then
+			return '<span class="dc-badge dc-badge--ok">' .. translate("已生效") .. '</span>'
+		end
+		return '<span class="dc-badge dc-badge--warn">' ..
+			string.format(translate("待应用（生效 %d 条）"), n_run) .. '</span>'
+	end
+
+	local function chips(list, tone)
+		if #list == 0 then
+			return '<span class="dc-badge dc-badge--mute">' .. translate("（空）") .. '</span>'
+		end
+		local out = {}
+		for _, d in ipairs(list) do
+			out[#out + 1] = string.format(
+				'<span class="dc-chip dc-chip--%s">%s</span>', tone, dg.esc(d))
+		end
+		return table.concat(out, " ")
+	end
+
+	local function row(title, list, n_run, tone)
+		return string.format(
+			'<tr><td>%s</td><td class="dc-table__num">%d</td>' ..
+			'<td>%s</td><td>%s</td></tr>',
+			title, #list, badge(#list, n_run), chips(list, tone))
+	end
+
+	return '<div class="dc-table-wrap"><table class="dc-table"><thead><tr>' ..
+		'<th>' .. translate("列表") .. '</th>' ..
+		'<th class="dc-table__num">' .. translate("条数") .. '</th>' ..
+		'<th>' .. translate("状态") .. '</th>' ..
+		'<th>' .. translate("域名") .. '</th>' ..
+		'</tr></thead><tbody>' ..
+		row(translate("国内（直连）"), dom_uci, #dom_run, "dom") ..
+		row(translate("国外（代理）"), for_uci, #for_run, "for") ..
+		'</tbody></table></div>' ..
+		'<div class="dc-hint">' ..
+		translate("点「保存并应用」才会重建分流规则（会重启 dnsmasq，约 3 秒解析中断）。") ..
+		'</div>'
+end
+
+-- ── 判定链路（思维链路图）──────────────────────────────────────────
+s = m:section(TypedSection, "dnschain", translate("判定链路"))
+s.anonymous = true
+s.addremove = false
+
+o = s:option(DummyValue, "_route_map", translate("走法"))
+o.rawhtml = true
+function o.cfgvalue()
+	return dg.route_map({
+		entry_port   = ds.entry_port(),
+		foreign_port = ds.foreign_port(),
+	})
+end
+
+-- 单域名解释：用户输入一个域名，页面把「归属 → 首选 → 探测 → 结论」摊开
+--
+-- 为什么用 GET 参数而不是按钮 + 会话变量：
+--   这里的查询是「看一眼就走」，不该持久化成 UCI 键（那会让配置里
+--   多出一个和分流无关的字段，备份/还原时也跟着跑）。
+--   用一次带参数的 GET 刷新即可，服务端读 formvalue 渲染结果。
+--
+-- 为什么 pcall 包一层：formvalue 只在真正的 HTTP 请求上下文里可用。
+--   在 CLI（lua -e）或单元测试里调本文件时它不存在，
+--   直接调会抛 "attempt to call a nil value" —— 整个页面 500。
+local explain_domain = ""
+do
+	local http = require "luci.http"
+	if http and type(http.formvalue) == "function" then
+		local ok, v = pcall(http.formvalue, "dc_explain")
+		if ok and type(v) == "string" then
+			explain_domain = v:gsub("^%s+", ""):gsub("%s+$", "")
+		end
+	end
+end
+
+o = s:option(DummyValue, "_explain", translate("单域名解释"))
+o.rawhtml = true
+function o.cfgvalue()
+	local function esc(s) return dg.esc(s) end
+
+	-- ⚠️ 这里**不能**用 <form>。
+	-- CBI 的 map 模板已经把整页包在 <form method="post"> 里，
+	-- 再嵌一个 <form> 是非法 HTML：浏览器会直接丢掉内层 form 标签，
+	-- 于是「解释」按钮实际提交的是**外层**表单 —— 也就是触发一次保存，
+	-- 用户点「解释」却看到「配置已保存」，还会把没改完的输入一起提交。
+	-- 改用普通 input + button，由 dnschain.js 绑点击后自己跳转。
+	local input = string.format(
+		'<div class="dc-inline-form" data-dc-explain>' ..
+		'<input type="text" class="cbi-input-text" data-dc-explain-input value="%s" ' ..
+		'placeholder="%s" />' ..
+		'<button type="button" class="cbi-button cbi-button-action" data-dc-explain-go>%s</button>' ..
+		'</div>',
+		esc(explain_domain), translate("输入域名，例如 github.com"), translate("解释"))
+
+	if explain_domain == "" then
+		return input .. '<div class="dc-hint">' ..
+			translate("输入一个域名，下面会列出它的归属、首选链路、两条链的实测结果与最终判定。") ..
+			'</div>'
+	end
+
+	local e = ds.explain(explain_domain)
+
+	if not next(e) then
+		return input .. '<div class="dc-alert dc-alert--bad">' ..
+			'<span class="dc-alert__icon">✗</span><div>' ..
+			translate("取不到解释结果 —— 检查 /usr/bin/dnschain-health 是否存在且可执行。") ..
+			'</div></div>'
+	end
+
+	local CLASS_LABEL = {
+		["custom-domestic"] = translate("自定义 · 国内"),
+		["custom-foreign"]  = translate("自定义 · 国外"),
+		["db-foreign"]      = translate("数据库命中（gfw 名单）"),
+		["uncovered"]       = translate("未覆盖（名单里没有）"),
+		["invalid"]         = translate("格式非法"),
+	}
+
+	local CHAIN_LABEL = {
+		domestic = translate("直连链路"),
+		foreign  = translate("代理链路"),
+	}
+
+	local PROBE_TONE = {
+		OK = "ok", EMPTY = "ok", NX = "info",
+		TIMEOUT = "bad", FAIL = "bad",
+	}
+
+	local function probe_badge(v)
+		if not v or v == "" then
+			return '<span class="dc-badge dc-badge--mute">—</span>'
+		end
+		return string.format('<span class="dc-badge dc-badge--%s">%s</span>',
+			PROBE_TONE[v] or "mute", esc(v))
+	end
+
+	local decision = e["DECISION"] or ""
+	local DECISION_TONE = "ok"
+	local DECISION_LABEL = decision
+
+	if decision == "reroute-domestic" then
+		DECISION_TONE = "warn"
+		DECISION_LABEL = translate("改走直连")
+	elseif decision == "reroute-foreign" then
+		DECISION_TONE = "warn"
+		DECISION_LABEL = translate("改走代理")
+	elseif decision == "both-bad" then
+		DECISION_TONE = "bad"
+		DECISION_LABEL = translate("双链故障")
+	elseif decision == "fixed" then
+		DECISION_TONE = "info"
+		DECISION_LABEL = translate("固定归属，不改道")
+	elseif decision == "reject" then
+		DECISION_TONE = "bad"
+		DECISION_LABEL = translate("拒绝")
+	elseif decision == "keep-domestic" then
+		DECISION_LABEL = translate("保持直连")
+	elseif decision == "keep-foreign" then
+		DECISION_LABEL = translate("保持代理")
+	end
+
+	local function kv(k, v)
+		return string.format(
+			'<tr><td class="dc-kv__k">%s</td><td class="dc-kv__v">%s</td></tr>', k, v)
+	end
+
+	local rows = {
+		kv(translate("域名"), '<code>' .. esc(e["DOMAIN"] or "") .. '</code>'),
+		kv(translate("归属"),
+			'<span class="dc-badge dc-badge--info">' ..
+			esc(CLASS_LABEL[e["CLASS"]] or e["CLASS"] or "—") .. '</span>'),
+		kv(translate("首选链路"),
+			'<span class="dc-badge dc-badge--mute">' ..
+			esc(CHAIN_LABEL[e["PREFERRED"]] or e["PREFERRED"] or "—") .. '</span>'),
+		kv(translate("当前链路"),
+			'<span class="dc-badge dc-badge--mute">' ..
+			esc(CHAIN_LABEL[e["ACTIVE"]] or e["ACTIVE"] or "—") .. '</span>'),
+		kv(translate("探测 · 直连"), probe_badge(e["PROBE_DOMESTIC"])),
+		kv(translate("探测 · 代理"), probe_badge(e["PROBE_FOREIGN"])),
+		kv(translate("答案 · 直连"),
+			'<code>' .. esc(e["ANSWER_DOMESTIC"] ~= "" and e["ANSWER_DOMESTIC"] or "—") .. '</code>'),
+		kv(translate("答案 · 代理"),
+			'<code>' .. esc(e["ANSWER_FOREIGN"] ~= "" and e["ANSWER_FOREIGN"] or "—") .. '</code>'),
+		kv(translate("参与改道"),
+			e["FIXED"] == "1"
+				and ('<span class="dc-badge dc-badge--info">' .. translate("否（自定义固定）") .. '</span>')
+				or ('<span class="dc-badge dc-badge--ok">' .. translate("是") .. '</span>')),
+		kv(translate("判定"),
+			string.format('<span class="dc-badge dc-badge--%s">%s</span>',
+				DECISION_TONE, esc(DECISION_LABEL))),
+		kv(translate("理由"), esc(e["REASON"] or "—")),
+	}
+
+	return input ..
+		'<div class="dc-table-wrap"><table class="dc-table dc-kv">' ..
+		'<tbody>' .. table.concat(rows) .. '</tbody></table></div>'
+end
+
+-- ── 改道状态（状态思维导图）────────────────────────────────────────
+s = m:section(TypedSection, "dnschain", translate("改道状态"))
+s.anonymous = true
+s.addremove = false
+
+o = s:option(DummyValue, "_status_map", translate("状态导图"))
+o.rawhtml = true
+function o.cfgvalue()
+	local rows = ds.health_rows()
+	local sum = ds.health_summary()
+	return dg.status_map(rows, sum)
+end
+
+-- 通道就绪性：改道写进 servers-file 后必须真的被 dnsmasq 读到
+--
+-- 只配 UCI 不生效的情况是存在的（dnsmasq 未重启、或进程被别处启动）。
+-- 这一行是「改道看起来成功、实际没生效」的唯一可靠判据。
+o = s:option(DummyValue, "_reroute_channel", translate("改道通道"))
+o.rawhtml = true
+function o.cfgvalue()
+	local st = ds.serversfile_ready()
+
+	local REASON = {
+		["uci-missing"]  = translate("dhcp.@dnsmasq[0].serversfile 未设置 —— 改道无法生效"),
+		["no-dnsmasq"]   = translate("dnsmasq 未运行"),
+		["no-cmdline"]   = translate("读不到 dnsmasq 的进程参数"),
+		["argv-missing"] = translate("UCI 已配 %s，但 dnsmasq 进程里没有 --servers-file（需重启 dnsmasq）"),
+	}
+
+	if st.ready then
+		return string.format(
+			'<span class="dc-badge dc-badge--ok">%s</span> <code>%s</code>',
+			translate("已就绪"), dg.esc(st.path))
+	end
+
+	local reason = REASON[st.reason] or st.reason
+	if st.reason == "argv-missing" then
+		reason = string.format(reason, dg.esc(st.path))
+	end
+
+	return string.format(
+		'<span class="dc-badge dc-badge--bad">%s</span> %s',
+		translate("未就绪"), dg.esc(reason))
+end
+
+-- ── 改道明细表 ────────────────────────────────────────────────────
+s = m:section(TypedSection, "dnschain", translate("改道明细"))
+s.anonymous = true
+s.addremove = false
+
+o = s:option(DummyValue, "_status_table", translate("明细"))
+o.rawhtml = true
+function o.cfgvalue()
+	local rows = ds.health_rows()
+
+	if #rows == 0 then
+		return '<div class="dc-alert dc-alert--info">' ..
+			'<span class="dc-alert__icon">i</span><div>' ..
+			translate("还没有探测数据。点下方「立即探测一轮」，或等待一个轮询间隔。") ..
+			'</div></div>'
+	end
+
+	local CHAIN = { domestic = translate("直连"), foreign = translate("代理") }
+	local STATE_TONE = {
+		["ok"] = "ok", ["degraded"] = "warn", ["rerouted"] = "warn",
+		["both-bad"] = "bad", ["fixed"] = "info", ["unknown"] = "mute",
+	}
+	local STATE_LABEL = {
+		["ok"] = translate("正常"), ["degraded"] = translate("降级中"),
+		["rerouted"] = translate("已改道"), ["both-bad"] = translate("双链故障"),
+		["fixed"] = translate("固定归属"), ["unknown"] = translate("未探测"),
+	}
+
+	local trs = {}
+	for _, r in ipairs(rows) do
+		local moved = (r.active ~= r.pref)
+		local chain_cell
+		if moved then
+			chain_cell = string.format(
+				'%s <span class="dc-arrow">→</span> <b>%s</b>',
+				CHAIN[r.pref] or r.pref, CHAIN[r.active] or r.active)
+		else
+			chain_cell = CHAIN[r.active] or r.active or "—"
+		end
+
+		trs[#trs + 1] = string.format(
+			'<tr><td><code>%s</code></td>' ..
+			'<td>%s</td><td>%s</td>' ..
+			'<td class="dc-table__num">%d</td>' ..
+			'<td>%s</td>' ..
+			'<td><span class="dc-badge dc-badge--%s">%s</span></td>' ..
+			'<td><code class="dc-small">%s</code></td></tr>',
+			dg.esc(r.domain),
+			ds_class_label(r["class"]),
+			chain_cell,
+			r.fail or 0,
+			os.date("%H:%M:%S", r.last or 0),
+			STATE_TONE[r.state] or "mute",
+			dg.esc(STATE_LABEL[r.state] or r.state or "—"),
+			dg.esc(r.result or "—"))
+	end
+
+	return '<div class="dc-table-wrap"><table class="dc-table"><thead><tr>' ..
+		'<th>' .. translate("域名") .. '</th>' ..
+		'<th>' .. translate("归属") .. '</th>' ..
+		'<th>' .. translate("链路") .. '</th>' ..
+		'<th class="dc-table__num">' .. translate("连败") .. '</th>' ..
+		'<th>' .. translate("最近探测") .. '</th>' ..
+		'<th>' .. translate("状态") .. '</th>' ..
+		'<th>' .. translate("原因") .. '</th>' ..
+		'</tr></thead><tbody>' .. table.concat(trs) .. '</tbody></table></div>'
+end
+
+-- ── 观测与阈值 ────────────────────────────────────────────────────
+s = m:section(TypedSection, "health", translate("观测与阈值"),
+	translate("只探测<b>观测列表</b>里的域名，不做全量探测 —— " ..
+		"3.5 万个域名一轮要几小时，也会把 dnsmasq 与 dnsproxy 打满。"))
+s.anonymous = true
+s.addremove = false
+
+o = s:option(Flag, "enabled", translate("启用健康检测与自动改道"),
+	translate("关闭后不探测、不改道，静态分流照常工作。"))
+o.rmempty = false
+o.default = "1"
+
+o = s:option(DynamicList, "watch", translate("观测域名"),
+	translate("清空后会自动回落到内置基准集（国内外各 4 个）。"))
+o.datatype = "string"
+o.rmempty = true
+o:depends("enabled", "1")
+
+o = s:option(Value, "timeout", translate("单次探测超时（秒）"),
+	translate("BusyBox 的 <code>nslookup</code> 没有 <code>-timeout</code> 参数，" ..
+		"框架自己实现硬超时，所以这个值就是真实上界。"))
+o.datatype = "range(1, 10)"
+o.default = "2"
+o:depends("enabled", "1")
+
+o = s:option(Value, "retries", translate("重试次数"),
+	translate("每次探测失败后的重试次数（不含首次）。" ..
+		"单次 UDP 丢包很常见，不重试会让改道变成随机行为。"))
+o.datatype = "range(0, 5)"
+o.default = "2"
+o:depends("enabled", "1")
+
+o = s:option(Value, "fail_threshold", translate("改道阈值（连败轮数）"),
+	translate("连续失败多少轮才判定「不通」。取 1 会让单轮抖动直接触发改道。"))
+o.datatype = "range(1, 10)"
+o.default = "2"
+o:depends("enabled", "1")
+
+o = s:option(Value, "recover_threshold", translate("回切阈值（连续成功轮数）"),
+	translate("首选链连续成功多少轮才回切。配合「最小驻留」避免临界状态反复横跳。"))
+o.datatype = "range(1, 20)"
+o.default = "3"
+o:depends("enabled", "1")
+
+o = s:option(Value, "min_dwell", translate("最小驻留（秒）"),
+	translate("改道后至少停留多久才允许回切。"))
+o.datatype = "range(0, 3600)"
+o.default = "120"
+o:depends("enabled", "1")
+
+o = s:option(Value, "interval", translate("轮询间隔（秒）"),
+	translate("0 = 不自动轮询，只能从下方按钮手动触发。小于 15 秒会被抬到 15 秒" ..
+		"（一轮探测本身就要 3~10 秒，更短只会让两轮重叠）。"))
+o.datatype = "range(0, 3600)"
+o.default = "60"
+o:depends("enabled", "1")
+
+-- ── 域名操作 ──────────────────────────────────────────────────────
+s = m:section(TypedSection, "dnschain", translate("域名操作"))
+s.anonymous = true
+s.addremove = false
+
+o = s:option(Button, "_apply_domains", translate("保存并应用"),
+	translate("重建分流片段与动态上游文件，并重启 dnsmasq 让静态规则生效。" ..
+		"<br/><b>会有约 3 秒解析中断</b> —— 静态片段通过 conf-dir 加载，" ..
+		"实测 reload（SIGHUP）不会重读它，只能 restart。"))
+o.inputstyle = "apply"
+function o.write(self, section)
+	local out = ds.apply_domains()
+	ds.invalidate()
+	setmsg("✓ " .. translate("已应用") .. "\n" .. (out or ""))
+end
+
+o = s:option(Button, "_cycle_now", translate("立即探测一轮"),
+	translate("跑一轮健康检测并按阈值判定是否改道。" ..
+		"<b>不会重启 dnsmasq</b>：改道只改 servers-file 并 SIGHUP。"))
+o.inputstyle = "apply"
+function o.write(self, section)
+	local out = ds.health_cycle()
+	ds.invalidate()
+	setmsg("✓ " .. translate("探测完成") .. "\n" .. (out or ""))
+end
+
+o = s:option(Button, "_reset_health", translate("清空改道状态"),
+	translate("把所有「已改道」撤回，回到「按归属走」。用于排障时确认某条链是否真的坏了。"))
+o.inputstyle = "reset"
+function o.write(self, section)
+	local out = ds.reset_health()
+	ds.invalidate()
+	setmsg("✓ " .. translate("已清空") .. "\n" .. (out or ""))
+end
+
+o = s:option(Button, "_check_domains", translate("校验自定义列表"),
+	translate("检查两个列表里有没有非法域名、以及同一个域名是否同时出现在两边。"))
+o.inputstyle = "reload"
+function o.write(self, section)
+	local ok, out = ds.check_domains()
+	ds.invalidate()
+	setmsg((ok and "✓ " or "✗ ") .. translate("校验结果") .. "\n" .. (out or ""))
 end
 
 ------------------------------------------------------------------------

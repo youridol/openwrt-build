@@ -45,7 +45,12 @@ WF="$TMPD/openwrt-build/.github/workflows/build-openwrt.yml"
 [ -f "$WF" ] || { echo "FAIL: 找不到 $WF" >&2; exit 1; }
 
 python3 - "$WF" > "$TMPD/check.sh" <<'PY'
-import re, sys
+import re, sys, io
+# 显式 UTF-8 输出：workflow 的注释里有 ⚠️ 之类的字符，
+# 在 Windows 上 Python 默认用 GBK 写 stdout，会直接
+# UnicodeEncodeError 崩掉 —— 而 CI 是 Linux（默认 UTF-8）看不出这个问题。
+# 本地复跑 CI 校验正是这个脚本的用途，所以必须在这里兜住。
+sys.stdout = io.TextIOWrapper(sys.stdout.buffer, encoding='utf-8', errors='replace')
 src = open(sys.argv[1], encoding='utf-8').read()
 m = re.search(
     r'- name: Verify dnschain framework contracts\n.*?run: \|\n(.*?)(?=\n      - name:|\Z)',
@@ -62,6 +67,28 @@ echo "----------------------------------------"
 sh "$TMPD/check.sh"
 rc=$?
 echo "----------------------------------------"
+
+# ── 同步跑一遍 v0.13.0 的域名分流与改道契约 ──────────────────
+#
+# 为什么不只靠上面那段：上面那段是从 workflow 里抽出来的
+# `Verify dnschain framework contracts` 步骤，而域名/改道契约
+# 在**另一个**步骤里（它调用 tools/verify-dnschain-domains.sh）。
+# 本地要一次跑全，否则会出现「CI 模拟通过但真 CI 挂在下一步」。
+if [ -f "$TMPD/openwrt-build/tools/verify-dnschain-domains.sh" ]; then
+	echo "── 域名分流与改道契约（独立步骤）─────────────"
+	# 该脚本用仓库根相对路径，故在 openwrt-build 副本里跑
+	(
+		cd "$TMPD/openwrt-build" || exit 1
+		sh tools/verify-dnschain-domains.sh
+	)
+	rc2=$?
+	echo "----------------------------------------"
+	if [ "$rc2" -ne 0 ]; then
+		echo "域名分流与改道契约校验失败（真实 CI 会失败）" >&2
+		[ "$rc" -eq 0 ] && rc=$rc2
+	fi
+fi
+
 if [ "$rc" -eq 0 ]; then
 	echo "CI 模拟校验通过（真实 CI 应能通过）"
 else

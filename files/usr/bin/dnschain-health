@@ -1,0 +1,326 @@
+#!/bin/sh
+# ============================================================
+# dnschain-health — 链路健康探测与自动改道
+# ------------------------------------------------------------
+# 设计依据：docs/adr/0006-domain-routing-and-reroute.md
+#
+# 职责（只做这一件事）：
+#   1. 对 health.watch 里的域名，分别探测国内 / 国外两条链
+#   2. 按阈值判定是否改道 / 回切
+#   3. 改道后重写 /var/run/dnsmasq/watch.servers 并 SIGHUP dnsmasq
+#
+# 它**不**改静态分流片段（dnschain-split.conf）—— 那需要重启 dnsmasq，
+# 代价约 3 秒解析中断（AGENTS §4.4），绝不能用在每分钟发生的改道上。
+# 观测域名的去向一律走 --servers-file（SIGHUP 即重读）。
+#
+# 子命令：
+#   cycle     跑一轮探测与判定（默认；由 init.d/dnschain 的守护循环调用）
+#   daemon    常驻循环，每 interval 秒跑一轮 cycle（procd 托管）
+#   status    打印当前状态表（供页面读取）
+#   explain   解释单个域名的归属与判定（供页面「思维链路图」使用）
+#   check     校验自定义列表格式（供页面保存前预检）
+#   reset     清空健康状态并重建 watch.servers（回到「按归属走」）
+#   apply     仅重建 watch.servers（配置改动后让 dnsmasq 立即生效）
+#
+# 约束（AGENTS §6 第 11 条）：POSIX sh（dash）兼容。
+#   禁止进程替换 <(...)、[[ ]]、数组、local 之外的可选语法。
+# ============================================================
+
+. /usr/share/dnschain/dnschain.sh
+
+# ------------------------------------------------------------
+# explain：解释单个域名「会怎么走、为什么」
+#
+# 输出格式 KEY=VALUE，一行一个。页面按行解析，
+# 缺字段就是「取不到」，不做默认值填充 —— 显示「—」比显示假的 0 好。
+# ------------------------------------------------------------
+cmd_explain() {
+	local d
+	d="$1"
+	[ -n "$d" ] || { echo "ERROR=缺少域名参数"; return 1; }
+	dc_explain_domain "$d"
+	return 0
+}
+
+# ------------------------------------------------------------
+# status：状态表 + 汇总
+#
+# 输出两段：
+#   ROW domain|class|pref|active|fail|ok|last|result|chain_state
+#   SUM total=<n> normal=<n> rerouted=<n> both_bad=<n> fixed=<n>
+#
+# chain_state 是给页面画状态图用的粗粒度结论：
+#   ok        当前链可达，无需改道
+#   degraded  首选链已开始失败，但还没到改道阈值
+#   rerouted  已改道到另一条链
+#   both-bad  两条链都不通
+#   fixed     自定义固定，不参与改道
+#   unknown   还没有探测数据
+#
+# degraded 必须单独一档：把它算成 ok 会让「连续失败 1 次」在页面上
+# 完全看不出来，而这正是故障最早期、最该被看见的时刻。
+# ------------------------------------------------------------
+cmd_status() {
+	local d cls pref active fail ok last res state
+	local n_total n_ok n_rerouted n_bad n_fixed n_degraded
+
+	n_total=0; n_ok=0; n_rerouted=0; n_bad=0; n_fixed=0; n_degraded=0
+
+	for d in $(dc_watch_list); do
+		[ -n "$d" ] || continue
+
+		cls=$(dc_domain_class "$d")
+		pref=$(dc_domain_preferred "$d")
+
+		fail=$(dc_health_field "$d" 4)
+		ok=$(dc_health_field "$d" 5)
+		last=$(dc_health_field "$d" 6)
+		res=$(dc_health_field "$d" 7)
+		active=$(dc_health_field "$d" 3)
+
+		[ -n "$fail" ] || fail=0
+		[ -n "$ok" ] || ok=0
+		[ -n "$last" ] || last=0
+		[ -n "$active" ] || active="$pref"
+
+		if dc_domain_fixed "$d"; then
+			state="fixed"
+			n_fixed=$((n_fixed + 1))
+		elif [ -z "$res" ]; then
+			state="unknown"
+		else
+			case "$res" in
+				both-bad*)              state="both-bad"; n_bad=$((n_bad + 1)) ;;
+				switch:*|fallback:*)    state="rerouted"; n_rerouted=$((n_rerouted + 1)) ;;
+				recover-wait:*)         state="rerouted"; n_rerouted=$((n_rerouted + 1)) ;;
+				probe:*)                state="degraded"; n_degraded=$((n_degraded + 1)) ;;
+				*)                      state="ok";       n_ok=$((n_ok + 1)) ;;
+			esac
+		fi
+
+		printf 'ROW %s|%s|%s|%s|%s|%s|%s|%s|%s\n' \
+			"$d" "$cls" "$pref" "$active" "$fail" "$ok" "$last" "${res:-—}" "$state"
+		n_total=$((n_total + 1))
+	done
+
+	printf 'SUM total=%s normal=%s degraded=%s rerouted=%s both_bad=%s fixed=%s\n' \
+		"$n_total" "$n_ok" "$n_degraded" "$n_rerouted" "$n_bad" "$n_fixed"
+	return 0
+}
+
+# ------------------------------------------------------------
+# check：校验自定义列表格式
+#
+# 输出 BAD <域名> <原因>，最后一行 OK 或 FAIL。
+# 页面保存前调它做预检，避免把非法条目写进 UCI。
+#
+# 为什么校验放在脚本而不是只在页面上做：
+#   用户可以直接 uci set 改配置，也可能从别处导入。脚本是最后一道闸。
+# ------------------------------------------------------------
+cmd_check() {
+	local d n_bad tmpd tmpf both
+
+	n_bad=0
+
+	for d in $(dc_get_list dom_domestic domain); do
+		[ -n "$d" ] || continue
+		if ! dc_domain_valid "$d"; then
+			echo "BAD $d 不是合法域名（国内域名列表）"
+			n_bad=$((n_bad + 1))
+		fi
+	done
+
+	for d in $(dc_get_list dom_foreign domain); do
+		[ -n "$d" ] || continue
+		if ! dc_domain_valid "$d"; then
+			echo "BAD $d 不是合法域名（国外域名列表）"
+			n_bad=$((n_bad + 1))
+		fi
+	done
+
+	# 同一个域名同时出现在两个列表里 —— 归属无法确定，必须拒绝。
+	# 用 grep -Fxf 求交集而不是 comm：BusyBox 不保证带 comm，
+	# 而 grep 一定在（本框架其它地方也依赖它）。
+	tmpd=$(mktemp) || { echo "FAIL bad=${n_bad}"; return 1; }
+	tmpf=$(mktemp) || { rm -f "$tmpd"; echo "FAIL bad=${n_bad}"; return 1; }
+
+	dc_list_normalize dom_domestic domain > "$tmpd"
+	dc_list_normalize dom_foreign domain > "$tmpf"
+
+	both=$(grep -Fxf "$tmpd" "$tmpf" 2>/dev/null)
+	rm -f "$tmpd" "$tmpf"
+
+	for d in $both; do
+		[ -n "$d" ] || continue
+		echo "BAD $d 同时出现在国内与国外列表（归属冲突）"
+		n_bad=$((n_bad + 1))
+	done
+
+	if [ "$n_bad" -gt 0 ]; then
+		echo "FAIL bad=${n_bad}"
+		return 1
+	fi
+
+	echo "OK"
+	return 0
+}
+
+# ------------------------------------------------------------
+# apply：按当前配置重建全部派生文件并让 dnsmasq 生效
+#
+# 用途：页面保存自定义列表后调用。它必须同时做三件事：
+#   1. 重建自定义列表缓存（归属判定依赖它）
+#   2. 重建 dnschain-split.conf（静态分流片段）
+#   3. 重建 watch.servers（观测域名的动态上游，只需 SIGHUP）
+#
+# 为什么第 2 步可能要 restart 而第 3 步只需 SIGHUP：
+#   AGENTS §4.4 已实测「dnsmasq 的 reload 不重读 conf-dir」。
+#   dnschain-split.conf 是通过 --conf-dir 加载的，内容变了必须 restart。
+#   而 servers-file 是独立选项，SIGHUP 时会被重新读取。
+#
+# ⚠️ 但**只有内容真的变了才 restart**（v0.13.0 实测修正）。
+#   原来无条件 restart，代价是每次保存配置都断约 3 秒解析；
+#   而页面「应用」按钮、健康周期、甚至只是重算一遍都会调到这里。
+#   现在先比对新旧内容（dc_gen_dnsmasq_split 内部已经这么做了），
+#   没变就只 SIGHUP。
+#
+#   实测依据：无条件 restart 时 `apply` 输出 DNSMASQ=restarted，
+#   dnsmasq PID 从 31332 变成 1373 —— 而那次配置根本没改。
+# ------------------------------------------------------------
+cmd_apply() {
+	local cnt changed split_file before_split before_watch after_split after_watch
+
+	dc_gen_custom_lists || { echo "ERROR=生成自定义列表失败"; return 1; }
+	dc_gen_db_domains >/dev/null 2>&1
+
+	# 记录重启前的指纹：静态片段 + 观测域名文件
+	split_file=/tmp/dnsmasq.d/dnschain-split.conf
+	before_split=""
+	before_watch=""
+	[ -r "$split_file" ] && before_split=$(md5sum "$split_file" 2>/dev/null | awk '{print $1}')
+	[ -r "$DNSCHAIN_WATCH_SERVERS" ] && before_watch=$(md5sum "$DNSCHAIN_WATCH_SERVERS" 2>/dev/null | awk '{print $1}')
+
+	cnt=$(dc_gen_dnsmasq_split) || { echo "ERROR=生成分流片段失败"; return 1; }
+	echo "SPLIT=${cnt}"
+
+	dc_gen_watch_servers >/dev/null
+
+	after_split=""
+	after_watch=""
+	[ -r "$split_file" ] && after_split=$(md5sum "$split_file" 2>/dev/null | awk '{print $1}')
+	[ -r "$DNSCHAIN_WATCH_SERVERS" ] && after_watch=$(md5sum "$DNSCHAIN_WATCH_SERVERS" 2>/dev/null | awk '{print $1}')
+
+	if [ "$(dc_get main enabled 1)" != "1" ]; then
+		echo "DNSMASQ=skipped（框架未启用）"
+		echo "OK"
+		return 0
+	fi
+
+	# 静态片段变了 → 必须 restart（conf-dir 不随 SIGHUP 重读）
+	#
+	# 注意每条分支都要以 `OK` 收尾：调用方（页面、脚本、测试）
+	# 用最后一行判断成功与否，只在某一条分支漏掉会让
+	# 「重建成功但被报成失败」。
+	if [ "$before_split" != "$after_split" ]; then
+		if [ -x /etc/init.d/dnsmasq ]; then
+			/etc/init.d/dnsmasq restart >/dev/null 2>&1
+			echo "DNSMASQ=restarted（静态片段已变）"
+		else
+			echo "DNSMASQ=skipped（无 init.d/dnsmasq）"
+		fi
+		echo "OK"
+		return 0
+	fi
+
+	# 静态片段没变、只有观测域名变了 → 只 SIGHUP，不清缓存
+	if [ "$before_watch" != "$after_watch" ]; then
+		dc_reload_servers_file >/dev/null 2>&1
+		echo "DNSMASQ=sighup（仅观测域名变化）"
+		echo "OK"
+		return 0
+	fi
+
+	echo "DNSMASQ=unchanged（无变化，未动 dnsmasq）"
+	echo "OK"
+	return 0
+}
+
+# ------------------------------------------------------------
+# reset：清空健康状态
+#
+# 用途：用户排障时把「已改道」全部撤回，回到「按归属走」。
+# 不清 watch.servers（那由 apply / cycle 重建）。
+# ------------------------------------------------------------
+cmd_reset() {
+	rm -f "$DNSCHAIN_HEALTH_STATE"
+	dc_gen_watch_servers >/dev/null
+	dc_reload_servers_file >/dev/null 2>&1
+	echo "OK 已清空健康状态"
+	return 0
+}
+
+# ------------------------------------------------------------
+# daemon：常驻循环
+#
+# 为什么常驻而不是 cron：
+#   interval 默认 60 秒，cron 最小粒度是分钟且不保证与开机对齐；
+#   更重要的是 cron 每小时会 fork 一个进程跑一遍全部 cron 表，
+#   而这个循环几乎什么都不做（大部分时间在 sleep）。
+#
+# 为什么先 sleep 再跑：
+#   开机瞬间 dnsproxy 与 dnsmasq 可能还没就绪，立刻探测必然全超时。
+#   第一轮跳过，等一个 interval 后再开始，能避开开机风暴。
+#   （dc_health_cycle 内部也有「实例未就绪就整轮跳过」的保护，两层保险。）
+#
+# 为什么 interval=0 时不进入循环：用户显式关闭了自动轮询，
+# 只想从页面手动触发。此时进程直接退出，procd 不会 respawn
+# （因为进程正常返回 0，不是崩溃）。
+# ------------------------------------------------------------
+cmd_daemon() {
+	local interval
+
+	interval=$(dc_get health interval 60)
+	[ "$interval" -gt 0 ] 2>/dev/null || {
+		echo "interval=0，不进入轮询循环"
+		return 0
+	}
+
+	# 兜底下限：小于 15 秒的间隔在实测里没有意义
+	# （一轮探测本身就要 3~10 秒），只会让两个 cycle 重叠。
+	[ "$interval" -lt 15 ] && interval=15
+
+	dnschain_log "健康探测循环启动，间隔 ${interval}s"
+	sleep "$interval"
+
+	while :; do
+		dc_health_cycle >/dev/null 2>&1
+		sleep "$interval"
+	done
+}
+
+# ------------------------------------------------------------
+# 入口
+# ------------------------------------------------------------
+main() {
+	local cmd
+	cmd="${1:-cycle}"
+	[ $# -gt 0 ] && shift
+
+	mkdir -p "$DNSCHAIN_RUN_DIR" "$DNSCHAIN_STATE_DIR" 2>/dev/null
+
+	case "$cmd" in
+		cycle)   dc_health_cycle ;;
+		daemon)  cmd_daemon ;;
+		status)  cmd_status ;;
+		explain) cmd_explain "$@" ;;
+		check)   cmd_check ;;
+		apply)   cmd_apply ;;
+		reset)   cmd_reset ;;
+		*)
+			echo "用法: dnschain-health {cycle|daemon|status|explain <域名>|check|apply|reset}" >&2
+			return 1
+			;;
+	esac
+}
+
+main "$@"

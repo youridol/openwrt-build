@@ -191,10 +191,21 @@ reconcile_lists() {
 	new_lines=$(echo "$fp_new" | awk '{print $2}')
 
 	# 重建域名文件
+	#
+	# v0.13.0 起要重建**三个**派生物，缺一个就会出现「页面与生效不一致」：
+	#   1. db-domains.txt     归属判定的输入（数据库域名集合）
+	#   2. dnschain-split.conf 静态分流片段（需要 restart 才生效）
+	#   3. watch.servers      观测域名的动态上游（SIGHUP 即生效）
+	#
+	# 注意顺序：db-domains 必须先更新，否则 split 会按旧集合生成。
+	dc_gen_db_domains >/dev/null 2>&1
 	dc_gen_upstream_file >/dev/null || {
 		dnschain_log "ERROR: 重新导入失败"
 		return 1
 	}
+	dc_gen_dnsmasq_split >/dev/null 2>&1 || \
+		dnschain_log "WARN: 重建 dnschain-split.conf 失败"
+	dc_gen_watch_servers >/dev/null 2>&1
 
 	# 行数变化是否超过阈值
 	threshold=$(dc_get lists restart_threshold 1)

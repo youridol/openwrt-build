@@ -115,12 +115,43 @@ log "dnsmasq: server=127.0.0.1#5353, noresolv=1, dnsforwardmax=1024, cachesize=8
 # ------------------------------------------------------------
 mkdir -p /var/etc/dnschain /var/run/dnschain 2>/dev/null
 
+# 自定义域名列表与数据库集合是「归属判定」的输入，
+# 必须在生成分流片段之前就位，否则首刷会把它们当成空。
+dc_gen_custom_lists 2>/dev/null || log "WARN: 生成自定义域名列表失败"
+
 if [ -r /etc/ssrplus/gfw_list.conf ]; then
+	dc_gen_db_domains >/dev/null 2>&1 \
+		&& log "已生成 db-domains.txt（数据库国外域名集合）" \
+		|| log "WARN: 生成 db-domains.txt 失败（gfw 名单可能未就绪）"
+
 	dc_gen_upstream_file >/dev/null 2>&1 \
-		&& log "已生成 upstreams-domains.txt" \
-		|| log "WARN: 生成 upstreams-domains.txt 失败（gfw 名单可能未就绪）"
+		&& log "已生成 foreign-split.conf" \
+		|| log "WARN: 生成 foreign-split.conf 失败（gfw 名单可能未就绪）"
+
+	dc_gen_dnsmasq_split >/dev/null 2>&1 \
+		&& log "已生成 dnschain-split.conf（含自定义列表）" \
+		|| log "WARN: 生成 dnschain-split.conf 失败"
 else
 	log "WARN: /etc/ssrplus/gfw_list.conf 不存在，跳过首刷生成（SSR-Plus 首次启动时会创建）"
+fi
+
+# 观测域名的动态上游文件（改道通道）
+dc_gen_watch_servers >/dev/null 2>&1 \
+	&& log "已生成 watch.servers（改道通道）" \
+	|| log "WARN: 生成 watch.servers 失败"
+
+# ------------------------------------------------------------
+# 6. 把 watch.servers 挂到 dnsmasq（改道不重启的关键）
+#
+# 只写文件不配 --servers-file 等于没写：dnsmasq 不会去读它，
+# 改道就永远是「页面显示已改，实际没生效」。
+# ------------------------------------------------------------
+_cur_sf=$(uci -q get dhcp.@dnsmasq[0].serversfile 2>/dev/null)
+if [ "$_cur_sf" != "/var/etc/dnschain/watch.servers" ]; then
+	uci set dhcp.@dnsmasq[0].serversfile='/var/etc/dnschain/watch.servers' 2>/dev/null \
+		&& log "dnsmasq: serversfile -> /var/etc/dnschain/watch.servers" \
+		|| log "ERROR: 写入 serversfile 失败"
+	uci commit dhcp 2>/dev/null
 fi
 
 uci commit shadowsocksr 2>/dev/null

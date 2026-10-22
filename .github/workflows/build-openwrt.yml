@@ -183,6 +183,7 @@ jobs:
                    luasrc/controller/dnschain.lua \
                    luasrc/model/cbi/dnschain/general.lua \
                    luasrc/model/cbi/dnschain/dnschain.lua \
+                   luasrc/model/cbi/dnschain/diagrams.lua \
                    htdocs/luci-static/resources/dnschain/dnschain.css \
                    htdocs/luci-static/resources/dnschain/dnschain.js \
                    root/usr/share/luci/menu.d/luci-app-dnschain.json \
@@ -192,6 +193,34 @@ jobs:
               echo "OK   $f"
             else
               echo "FAIL 缺少 package/luci-app-dnschain/$f" >&2
+              exit 1
+            fi
+          done
+
+          # 断言运行时新增组件也在（v0.13.0）
+          #
+          # 这三个文件是「域名分流与自动改道」的全部实现：
+          #   dnschain-health        探测与改道
+          #   verify-...domains.sh   契约校验（本步骤会调它）
+          #   render-...diagrams.py  图示几何自检
+          # 缺任一都说明功能不完整，且症状隐蔽（页面照常打开）。
+          for f in files/usr/bin/dnschain-health \
+                   files/usr/share/dnschain/dnschain.sh ; do
+            if [ -f "../openwrt-build/$f" ]; then
+              echo "OK   $f"
+            else
+              echo "FAIL 缺少 $f（域名分流与自动改道功能不完整）" >&2
+              exit 1
+            fi
+          done
+
+          # 新脚本必须有执行位 —— 缺了它 rpcd 调不动，
+          # 页面所有按钮都会静默失败（点「立即探测」没反应）。
+          for f in files/usr/bin/dnschain-health ; do
+            if [ -x "../openwrt-build/$f" ]; then
+              echo "OK   $f 有执行位"
+            else
+              echo "FAIL $f 缺执行位（页面按钮会静默失败）" >&2
               exit 1
             fi
           done
@@ -331,14 +360,19 @@ jobs:
             exit 1
           fi
 
-          # 视图层的 3 个表格都必须套滚动容器
+          # 视图层的全部表格都必须套滚动容器
+          #
+          # v0.13.0 起数量不再是固定 3 个（「域名」tab 新增 3 个表格），
+          # 故改成「开闭数量必须相等且 >= 3」—— 数量对得上才是关键，
+          # 写死数字会让每次加表格都要改 CI，而改 CI 时最容易
+          # 顺手把断言删掉（那就等于没有断言）。
           GEN=package/luci-app-dnschain/luasrc/model/cbi/dnschain/general.lua
-          opened=$(grep -c 'dc-table-wrap"><table class="dc-table"' "$GEN" || true)
+          opened=$(grep -c 'dc-table-wrap"><table class="dc-table' "$GEN" || true)
           closed=$(grep -c '</tbody></table></div>' "$GEN" || true)
-          if [ "$opened" = "3" ] && [ "$closed" = "3" ]; then
-            echo "OK   3 个表格均已套滚动容器（开/闭各 $opened）"
+          if [ "$opened" -ge 3 ] && [ "$opened" = "$closed" ]; then
+            echo "OK   $opened 个表格均已套滚动容器（开/闭各 $opened）"
           else
-            echo "FAIL 表格滚动容器数量不对：开 $opened / 闭 $closed（应各 3）" >&2
+            echo "FAIL 表格滚动容器数量不对：开 $opened / 闭 $closed（应相等且 >= 3）" >&2
             exit 1
           fi
 
@@ -397,6 +431,25 @@ jobs:
             echo "OK   节点有填充（连线不会透出）"
           else
             echo "FAIL 节点 fill 不是 --dc-surface（连线会透出，像断链）" >&2
+            exit 1
+          fi
+
+          # ── v0.13.0：域名分流与自动改道的契约 ──────────────────────
+          #
+          # 这一整块抽到 tools/verify-dnschain-domains.sh 里，理由同
+          # trafficctl 的 invariants 脚本：断言较多（88 条）、本地要能
+          # 直接复跑，内联在 YAML 里无法本地执行，只能靠 push 后看 CI 日志。
+          #
+          # 该步骤的 working-directory 是 lede，而脚本在仓库根，
+          # 故用 ../openwrt-build 前缀。
+          if [ ! -f ../openwrt-build/tools/verify-dnschain-domains.sh ]; then
+            echo "FAIL 缺少 tools/verify-dnschain-domains.sh" >&2
+            exit 1
+          fi
+          if sh ../openwrt-build/tools/verify-dnschain-domains.sh; then
+            echo "OK   域名分流与改道契约校验通过"
+          else
+            echo "FAIL 域名分流与改道契约校验失败（见上方 FAIL 行）" >&2
             exit 1
           fi
 
@@ -934,6 +987,9 @@ jobs:
           if [ -f files/usr/bin/dnschain-reconcile ]; then chmod +x files/usr/bin/dnschain-reconcile; fi
           if [ -f files/usr/bin/dnschain-selftest ]; then chmod +x files/usr/bin/dnschain-selftest; fi
           if [ -f files/usr/share/dnschain/dnschain.sh ]; then chmod +x files/usr/share/dnschain/dnschain.sh; fi
+          # v0.13.0：健康探测与自动改道。缺执行位时 rpcd 调不动，
+          # 页面上「立即探测一轮」等按钮会静默无反应（不报错、无日志）。
+          if [ -f files/usr/bin/dnschain-health ]; then chmod +x files/usr/bin/dnschain-health; fi
           echo "files overlay 执行位设置完成:"
           ls -l files/etc/init.d/ files/etc/uci-defaults/ files/etc/hotplug.d/iface/ files/etc/rc.local 2>/dev/null
 
@@ -992,6 +1048,7 @@ jobs:
           for f in "$LIB" "$INIT" "$CONF" \
                    files/usr/bin/dnschain-reconcile \
                    files/usr/bin/dnschain-selftest \
+                   files/usr/bin/dnschain-health \
                    files/etc/uci-defaults/99-zz-dnschain; do
             if [ -f "$f" ]; then
               echo "OK   存在 $f"
@@ -1006,7 +1063,9 @@ jobs:
           # bash 专有语法（进程替换、[[ ]]、数组）在 dash 里是**解析期**错误，
           # 脚本一行未执行即 exit 2（本仓库曾因此连续失败三天，AGENTS §6 第 11 条）。
           for f in "$LIB" "$INIT" files/usr/bin/dnschain-reconcile \
-                   files/usr/bin/dnschain-selftest files/etc/uci-defaults/99-zz-dnschain; do
+                   files/usr/bin/dnschain-selftest \
+                   files/usr/bin/dnschain-health \
+                   files/etc/uci-defaults/99-zz-dnschain; do
             [ -f "$f" ] || continue
             if sh -n "$f" 2>/tmp/dnschain-shn.err; then
               echo "OK   dash 语法通过: $f"
@@ -1026,7 +1085,9 @@ jobs:
           #   早先的断言用了 `\(\([^)]*\)\)[[:space:]]*$`，把 `pct=$(( ... ))`
           #   也判成 bash 语法，属误报，已改为「行首就是 ((」才算。
           for f in "$LIB" "$INIT" files/usr/bin/dnschain-reconcile \
-                   files/usr/bin/dnschain-selftest files/etc/uci-defaults/99-zz-dnschain; do
+                   files/usr/bin/dnschain-selftest \
+                   files/usr/bin/dnschain-health \
+                   files/etc/uci-defaults/99-zz-dnschain; do
             [ -f "$f" ] || continue
             body="$(grep -v '^[[:space:]]*#' "$f")"
 
@@ -1038,9 +1099,15 @@ jobs:
             fi
 
             # (b) [[ ]] 条件表达式
-            if printf '%s\n' "$body" | grep -qE '\[\['; then
+            #
+            # ⚠️ 不能直接 grep '\[\[' —— 它会命中 POSIX 字符类 [[:space:]]，
+            # 那是**完全合法**的 POSIX 语法。实测（v0.13.0）本仓库的
+            # dnschain.sh 里有 `sed -e 's/^[[:space:]]*//'`，
+            # 旧断言把它判成 bash 语法 → CI 永远红。
+            # 判据改为「[[ 后面紧跟空白」，即真正的条件表达式形态。
+            if printf '%s\n' "$body" | grep -qE '(^|[^[:alnum:]_])\[\[[[:space:]]'; then
               echo "FAIL $f 含 [[ ]]（dash 不支持）"
-              printf '%s\n' "$body" | grep -n '\[\[' | head -5
+              printf '%s\n' "$body" | grep -nE '(^|[^[:alnum:]_])\[\[[[:space:]]' | head -5
               rc=1
             fi
 
