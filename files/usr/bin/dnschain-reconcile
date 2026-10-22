@@ -203,8 +203,44 @@ reconcile_lists() {
 		dnschain_log "ERROR: 重新导入失败"
 		return 1
 	}
+
+	# ── 分流片段：检测「nftset 行被清空」并修复（v0.14.1）─────────
+	#
+	# 实测故障：在 SSR-Plus 页面点「保存并应用」后，ssrplus 重建规则，
+	# `ss_spec` 表短暂消失。若 dnschain 恰在此窗口跑 apply，会生成
+	# **23714 条 server= 但 0 条 nftset=** 的片段 ——
+	# 国外域名能解析，可解析出的 IP 不进 blacklist →
+	# **流量不走代理 → 国外链路整条断掉**，且日志干净。
+	#
+	# 这里在重建前后各查一次：若 ss_spec 现在**在**、而片段里
+	# nftset 行数为 0，说明上一版是「窗口期生成的坏片段」，
+	# 必须重建（dc_gen_dnsmasq_split 内部也会保留上一版行做兜底，
+	# 但那是应急；此刻 ss_spec 已回来，应当生成完整版）。
+	local nft_before nft_after
+	nft_before=$(grep -c '^nftset=' "$DNSCHAIN_DNSMASQ_CONF_DIR/dnschain-split.conf" 2>/dev/null || echo 0)
+
 	dc_gen_dnsmasq_split >/dev/null 2>&1 || \
 		dnschain_log "WARN: 重建 dnschain-split.conf 失败"
+
+	nft_after=$(grep -c '^nftset=' "$DNSCHAIN_DNSMASQ_CONF_DIR/dnschain-split.conf" 2>/dev/null || echo 0)
+
+	# 情况一：本来有、现在没了 → 生成期间 ss_spec 不在（窗口期）
+	# 情况二：本来就是 0、而 ss_spec 现在在 → 上一版是坏的，需再生成一次
+	if dc_ss_spec_present; then
+		if [ "$nft_after" -eq 0 ] 2>/dev/null; then
+			dnschain_log "WARN: 分流片段 nftset 行数为 0（ss_spec 已存在），强制重建一次"
+			dc_gen_dnsmasq_split >/dev/null 2>&1
+			nft_after=$(grep -c '^nftset=' "$DNSCHAIN_DNSMASQ_CONF_DIR/dnschain-split.conf" 2>/dev/null || echo 0)
+			if [ "$nft_after" -gt 0 ] 2>/dev/null; then
+				dnschain_log "已修复：nftset 行数 ${nft_after}"
+			else
+				dnschain_log "ERROR: 重建后 nftset 仍为 0，请检查 ss_spec 的 blacklist/china 集合"
+			fi
+		elif [ "$nft_before" -gt 0 ] 2>/dev/null && [ "$nft_after" -lt "$nft_before" ] 2>/dev/null; then
+			dnschain_log "WARN: nftset 行数从 ${nft_before} 降到 ${nft_after}（可能有域名集合缺失）"
+		fi
+	fi
+
 	dc_gen_watch_servers >/dev/null 2>&1
 
 	# 行数变化是否超过阈值

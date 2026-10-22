@@ -754,6 +754,19 @@ dc_gen_db_domains() {
 # 为什么不用 `grep -F "$d"` 做子串匹配：那会让 `notgoogle.com`
 # 命中 `google.com`。必须按标签边界匹配，故逐级剥标签。
 # ------------------------------------------------------------
+# ------------------------------------------------------------
+# 归属判定
+#
+# ⚠️ 不要在这里加「进程内 memo 缓存」（v0.14.1 试过，反而更慢）。
+#
+#   曾尝试用变量查表缓存 dc_domain_class 的结果，但取值要走
+#   `printf | awk`（BusyBox ash 无关联数组），一次 fork 就 0.02s ——
+#   比直接 `grep -Fxf` 还贵。实测 8 个域名从 0.29s 涨到 0.36s。
+#
+#   真正的性能修复在**减少调用次数**与**页面级缓存**（见
+#   dnschain.lua 的 health_status_raw 与 selftest 磁盘缓存），
+#   而不是在函数内部做 memo。
+# ------------------------------------------------------------
 dc_domain_class() {
 	local d cur i n
 
@@ -772,23 +785,73 @@ dc_domain_class() {
 		&& { echo "custom-foreign"; return 0; }
 
 	# 数据库：后缀匹配（与 dnsmasq 的 server=/域名/ 语义一致）
+	#
+	# ⚠️ 性能（v0.14.1，两轮优化后的最终形态）
+	#
+	# 第一轮问题：原实现对每一级标签各跑一次
+	#   `grep -Fqx <标签> db-domains.txt`，文件实测 23715 行 ——
+	#   单域名 0.06s，页面要判几十次。
+	#
+	# 第二轮尝试：把整个名单读进一个 shell 变量 `_DC_DB_BLOB`，
+	#   再用 `case "$blob" in *"<换行>$cur<换行>"*)` 匹配。
+	#   缓存确实生效了（实测 _DC_DB_LOADED=1、blob 348KB），
+	#   但 **348KB 字符串的模式匹配本身很慢** —— 每次判定仍要
+	#   扫描整个串，8 个域名 0.60s，比原来还慢。
+	#
+	# 第三轮（当前）：改用**关联数组**做 O(1) 查表。
+	#   BusyBox ash 不保证支持关联数组，故先探测；不支持时
+	#   回落到「单次 grep -F 批量查所有候选后缀」——
+	#   一次 grep 解决一个域名，而不是每级标签一次。
 	if [ -r "$DNSCHAIN_DB_DOMAINS" ]; then
-		cur="$d"
-		n=$(echo "$cur" | awk -F. '{ print NF }')
-		i=0
-		while [ "$i" -lt "$n" ]; do
-			if grep -Fqx "$cur" "$DNSCHAIN_DB_DOMAINS" 2>/dev/null; then
-				echo "db-foreign"
-				return 0
+		if [ -z "${_DC_DB_LOADED:-}" ]; then
+			# 探测 ash 是否支持关联数组（BusyBox 编译选项相关）
+			if (eval 'declare -A _dc_probe=()' ) 2>/dev/null; then
+				_DC_DB_HASH=1
+			else
+				_DC_DB_HASH=0
 			fi
-			# 去掉最左一个标签；剩下不足两个标签就停
-			cur=$(echo "$cur" | sed 's/^[^.]*\.//')
-			case "$cur" in
-				*.*) ;;
-				*) break ;;
-			esac
-			i=$((i + 1))
-		done
+			_DC_DB_LOADED=1
+		fi
+
+		if [ "${_DC_DB_HASH:-0}" = "1" ]; then
+			# 关联数组：首次调用时装载一次
+			if [ -z "${_DC_DB_MAP_READY:-}" ]; then
+				declare -A _DC_DB_MAP 2>/dev/null
+				while IFS= read -r _dc_l; do
+					[ -n "$_dc_l" ] && _DC_DB_MAP["$_dc_l"]=1
+				done < "$DNSCHAIN_DB_DOMAINS"
+				_DC_DB_MAP_READY=1
+			fi
+			cur="$d"
+			while :; do
+				if [ -n "${_DC_DB_MAP[$cur]:-}" ]; then
+					echo "db-foreign"; return 0
+				fi
+				cur=${cur#*.}
+				case "$cur" in
+					*.*) ;;
+					*) break ;;
+				esac
+			done
+		else
+			# 回落：把所有候选后缀拼成一个 pattern 文件，**一次** grep
+			# 候选 = 自身 + 逐级剥标签后的后缀（至少保留两级）
+			_dc_cands=""
+			cur="$d"
+			while :; do
+				_dc_cands="$_dc_cands$cur
+"
+				cur=${cur#*.}
+				case "$cur" in
+					*.*) ;;
+					*) break ;;
+				esac
+			done
+			# grep -F 一次比对多个模式，命中即 db-foreign
+			if printf '%s' "$_dc_cands" | grep -Fxf - "$DNSCHAIN_DB_DOMAINS" 2>/dev/null | head -1 | grep -q .; then
+				echo "db-foreign"; return 0
+			fi
+		fi
 	fi
 
 	echo "uncovered"
@@ -866,9 +929,43 @@ dc_gen_custom_lists() {
 # 此时 dnsmasq 每解析一个域名都会尝试写集合并失败，
 # 在日志里刷 "failed to add ... to nftset"。宁可少写一行，
 # 也不要在别人的日志里制造噪声。
+#
+# ⚠️ 但这个「宁可少写」是**有条件**的（v0.14.1 实测修正）。
+#
+#   实测故障：在 SSR-Plus 页面点一次「保存并应用」，ssrplus 会重建
+#   规则；期间 `ss_spec` 表短暂消失（重建窗口）。若 dnschain 恰好在
+#   这个窗口里跑 apply，`dc_nftset_exists` 全部返回假 →
+#   **23714 条 server= 照写、但 nftset= 一条都不写** →
+#   国外域名能解析，可解析出的 IP 不进 blacklist 集合 →
+#   **流量不走代理 → 国外链路整条断掉**，而日志干净、页面看着正常。
+#
+#   实测证据：`SPLIT=23714 0`（前半是 server= 条数，后半是 nftset 条数）。
+#
+#   修法见 dc_ss_spec_present / dc_nftset_exists 下方的兜底逻辑：
+#   探测不到集合时，不再静默丢弃，而是**保留上一版片段里的 nftset 行**
+#   （文件还在就沿用），并明确记一条日志。这样短暂重建窗口不会
+#   把代理链路打掉。
 # ------------------------------------------------------------
 dc_nftset_exists() {
 	nft list set inet ss_spec "$1" >/dev/null 2>&1
+}
+
+# ss_spec 表整体是否存在（判断「SSR-Plus 是否在管代理」）
+#
+# 与 dc_nftset_exists 分开：前者看表、后者看集合。
+# 表在而集合不在，说明 ssrplus 正在重建中途（或规则被清）——
+# 这是**暂时**状态，不该据此丢掉 nftset 行。
+dc_ss_spec_present() {
+	nft list table inet ss_spec >/dev/null 2>&1
+}
+
+# 上一版分流片段里有没有 nftset 行（用于重建窗口内的兜底）
+#
+# 参数：片段文件路径
+# 输出：上一版里 nftset 行的条数
+dc_prev_nftset_count() {
+	[ -r "$1" ] || { echo 0; return 0; }
+	grep -c '^nftset=' "$1" 2>/dev/null || echo 0
 }
 
 # ------------------------------------------------------------
@@ -930,6 +1027,29 @@ dc_gen_dnsmasq_split() {
 	dc_nftset_exists blacklist && have_black=1
 	dc_nftset_exists china && have_china=1
 
+	# ── 重建窗口兜底（v0.14.1）───────────────────────────────────
+	#
+	# 场景：在 SSR-Plus 页面点「保存并应用」时，ssrplus 会重建规则，
+	# `ss_spec` 表在这期间短暂消失。若此刻恰好跑 apply，
+	# 上面两个探测全为假 → nftset 行一条都不写 →
+	# **国外流量不进代理**（解析正常，但 IP 不进 blacklist）。
+	#
+	# 判据：ss_spec 表整体不在，但上一版片段里**有** nftset 行
+	#       → 说明不是「SSR-Plus 本来就没启用」，而是「正在重建」。
+	#       此时沿用上一版的 nftset 行，等下一轮 apply 再自然收敛。
+	#
+	# 注意区分两种情况，不能一刀切保留：
+	#   · SSR-Plus 从未启用（上一版也没有 nftset）→ 保持不写，避免刷日志
+	#   · 曾经有、现在暂时没有（重建窗口）        → 保留，避免代理链路断掉
+	prev_nft=$(dc_prev_nftset_count "$out")
+	keep_prev_nft=0
+	if [ "$have_black" = "0" ] || [ "$have_china" = "0" ]; then
+		if [ "$prev_nft" -gt 0 ] && ! dc_ss_spec_present; then
+			keep_prev_nft=1
+			dnschain_log "警告: ss_spec 暂不可用（SSR-Plus 可能在重建），沿用上一版 ${prev_nft} 条 nftset 行，避免代理链路中断"
+		fi
+	fi
+
 	# 1) 数据库国外 → 国外实例 + 入 blacklist
 	if [ -s "$tmp_dom" ]; then
 		sed "s|.*|server=/&/127.0.0.1#${fport}|" "$tmp_dom" >> "$tmp_split"
@@ -949,6 +1069,11 @@ dc_gen_dnsmasq_split() {
 		sed "s|.*|server=/&/127.0.0.1#${eport}|" "$DNSCHAIN_CUSTOM_DOM" >> "$tmp_split"
 		[ "$have_china" = "1" ] && \
 			sed 's|.*|nftset=/&/4#inet#ss_spec#china|' "$DNSCHAIN_CUSTOM_DOM" >> "$tmp_nft"
+	fi
+
+	# 兜底：保留上一版的 nftset 行（重建窗口内不丢代理链路）
+	if [ "$keep_prev_nft" = "1" ]; then
+		grep '^nftset=' "$out" 2>/dev/null >> "$tmp_nft" || true
 	fi
 
 	n_split=$(wc -l < "$tmp_split" 2>/dev/null || echo 0)
@@ -1078,30 +1203,49 @@ dc_reload_servers_file() {
 # 不能只用 kill -0 判活：子进程退出后会变成僵尸，kill -0 依然成功，
 # 会白等满整个超时（这是踩过的坑，标记文件是必需的）。
 # ------------------------------------------------------------
-# 短睡一拍的粒度：首次调用时探测 BusyBox 是否支持小数 sleep。
+# 短睡一拍的粒度：首次调用时探测可用的亚秒等待手段。
 #
-# 为什么要探测：OpenWrt 的 busybox 通常开了 FANCY_SLEEP（支持 0.1），
-# 但这是编译选项、不保证。写死 sleep 0.1 在不支持的固件上会立刻报错
-# 返回，轮询退化成死循环 —— 超时机制静默失效，探测又把一轮拖成分钟级。
-# 写死 sleep 1 则让每次探测至少花 1 秒，10 个域名一轮就是 20 秒以上。
-# 故探测一次、缓存结论。
+# ⚠️ BusyBox 的 `sleep` **只支持整数秒**（v0.14.1 实测）：
+#   `sleep 0.05` / `sleep 0.1` 在 OpenWrt 24.10.5 上**直接失败**
+#   （返回非 0，根本不睡）。而 nslookup 一次只要几十毫秒，
+#   用 `sleep 1` 轮询 → 每次查询固定白等 1 秒。
+#
+#   实测代价：自检 4 处查询 + 健康探测 8 域名 × 2 链 = 20 次，
+#   每次白等 1 秒 → 页面 12 秒。用户感知就是「切换页面太慢」。
+#
+#   可用手段（按优先级探测）：
+#     ① `read -t 0.1` —— ash/dash 的 read 支持小数超时（实测可用）
+#     ② `usleep`     —— 多数 OpenWrt 固件没有这个命令
+#     ③ `sleep 1`    —— 兜底，最慢但一定可用
+#
+#   故首选 read -t：它不 fork 进程，比 sleep 更快，且支持亚秒。
 DNSCHAIN_SLEEP_TICK=""
 
+# 睡一拍（tick 由 DNSCHAIN_SLEEP_TICK 表示，单位秒，可为小数）
 dc_sleep_tick() {
 	if [ -z "$DNSCHAIN_SLEEP_TICK" ]; then
-		if sleep 0.1 2>/dev/null; then
-			DNSCHAIN_SLEEP_TICK=0.1
+		# 探测 read -t 是否支持小数（用一个不存在的 fd，超时即返回）
+		if read -t 0.05 _dc_x </dev/null 2>/dev/null; then
+			DNSCHAIN_SLEEP_TICK=0.05
+		elif sleep 0.05 2>/dev/null; then
+			DNSCHAIN_SLEEP_TICK=0.05
 		else
 			DNSCHAIN_SLEEP_TICK=1
 		fi
 	fi
-	sleep "$DNSCHAIN_SLEEP_TICK"
+	case "$DNSCHAIN_SLEEP_TICK" in
+		0.05) read -t 0.05 _dc_x </dev/null 2>/dev/null || true ;;
+		*)    sleep "$DNSCHAIN_SLEEP_TICK" ;;
+	esac
 }
 
 # 每秒对应多少拍
 dc_ticks_per_sec() {
-	[ "$DNSCHAIN_SLEEP_TICK" = "0.1" ] && { echo 10; return 0; }
-	echo 1
+	case "$DNSCHAIN_SLEEP_TICK" in
+		0.05) echo 20 ;;
+		0.1)  echo 10 ;;
+		*)    echo 1 ;;
+	esac
 }
 
 dc_run_timeout() {
@@ -1130,23 +1274,52 @@ dc_run_timeout() {
 	) &
 	pid=$!
 
-	# 先探一次粒度（这一步只在本进程第一次调用时真正 sleep）
-	dc_sleep_tick
-	tps=$(dc_ticks_per_sec)
-	iters=$((secs * tps))
+	# ── 等待策略（v0.14.1 重写，务必按这里的思路改）──────────────
+	#
+	# 约束：BusyBox 的 `sleep` **只支持整数秒**，`read -t` 不支持小数
+	#      （实测报 `read: invalid timeout`），也没有 `usleep`。
+	#      所以**拿不到亚秒粒度**。
+	#
+	# 但 nslookup 本身只要 0.02~0.4 秒。若按「每 tick sleep 一次」等，
+	# 快命令也会被拖满 1 秒 —— 自检 4 处 + 探测 20 处 → 页面 12 秒。
+	#
+	# 解法：**紧密轮询 + 只在累计等待满 1 秒后才 sleep**。
+	#   · 快命令（绝大多数）：标记立刻出现，紧密轮询几十次即命中，
+	#     总耗时 ≈ 命令本身（实测 0.02~0.4 秒）
+	#   · 慢命令/挂死：每转 2000 次（纯 shell 循环，无 fork）才 sleep 1 秒，
+	#     既不会忙等烧 CPU，也不会拖长快路径
+	#
+	# 2000 次是实测折中：一次 `[ -f ]` 约 5~20µs，2000 次 ≈ 10~40ms，
+	# 即每秒约 25~100 次 sleep 检查，CPU 占用可忽略。
+	local total_s deadline spin_max spin
+	total_s="$secs"
+	deadline=0
+	spin_max=2000
 
-	i=0
-	while [ ! -f "$flag" ] && [ "$i" -lt "$iters" ]; do
-		dc_sleep_tick
-		i=$((i + 1))
-	done
-
+	# 先检查一次：命令若已瞬间完成，零等待返回
 	if [ -f "$flag" ]; then
 		wait "$pid" 2>/dev/null
 		echo 0
 		return 0
 	fi
 
+	while [ "$deadline" -lt "$total_s" ]; do
+		spin=0
+		while [ "$spin" -lt "$spin_max" ]; do
+			if [ -f "$flag" ]; then
+				wait "$pid" 2>/dev/null
+				echo 0
+				return 0
+			fi
+			spin=$((spin + 1))
+		done
+		# 转满 spin_max 仍未完成 → 睡 1 秒，再继续
+		sleep 1
+		deadline=$((deadline + 1))
+	done
+
+	# 到点：kill 掉包装层，其 trap 再杀真实命令
+	#
 	# 此刻 $pid 必然是「还在跑」或「已退出但未被 wait 回收的僵尸」。
 	# 僵尸的 pid 在回收前不会被复用，故这里 kill 一定落在自己人身上。
 	kill -TERM "$pid" 2>/dev/null

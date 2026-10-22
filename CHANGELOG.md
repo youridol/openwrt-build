@@ -491,6 +491,90 @@ printf '%s\n' "$DNSCHAIN_WATCH_SEED" | while read -r d; ...
   按钮重复：仅剩「保存」×2（CBI 页头+页脚固有，非本包引入）
 ```
 
+#### 十七、页面响应慢 + 操作 ssrplus 后国外链路断（v0.14.1）
+
+用户报告两个 bug：
+① 切换 `dns_chain` 页面响应时间太长；
+② 操作 ssrplus 页面后国外链路不通，自检第 10/11/13 项 FAIL
+（`国外 A 正确` / `国外 AAAA 保留` / `代理与分流在位`）。
+
+##### 一、国外链路断：nftset 行被静默清空
+
+**根因**：在 SSR-Plus 页面点「保存并应用」时，ssrplus 会重建规则，
+`ss_spec` 表在重建窗口内**短暂消失**。若 `dnschain` 恰好在此窗口跑
+`apply`，`dc_nftset_exists` 对所有集合都返回假 →
+**23714 条 `server=` 照写、但 `nftset=` 一条都不写**。
+
+后果链条（这是最难定位的地方，日志完全干净）：
+
+```
+server=/域名/127.0.0.1#5336    ← 国外域名仍能解析（正常）
+（缺 nftset=）                  ← 解析出的 IP 不进 blacklist 集合
+→ 流量不命中 ss_spec_wan_ac
+→ 不走代理
+→ 国外链路整条断掉
+```
+
+实测证据：`dnschain-health apply` 输出 `SPLIT=23714 0`
+（前半是 server= 条数，后半是 nftset 条数）。
+
+**修法（两层保护）**：
+
+| 层 | 位置 | 行为 |
+|---|---|---|
+| 生成时兜底 | `dc_gen_dnsmasq_split` | 探测不到集合时，若上一版片段**有** nftset 行且 `ss_spec` 整体不在 → 沿用上一版行，记一条警告。区分「SSR-Plus 从未启用」（保持不写）与「正在重建」（保留） |
+| reconcile 自愈 | `dnschain-reconcile` | 重建后若 `ss_spec` 在而 nftset 为 0 → 强制再生成一次；行数下降也告警 |
+
+同时新增 `dc_ss_spec_present()`（查表而非查集合）——
+这是区分「重建中」与「未启用」的唯一可靠判据。
+
+**验证**：删掉 `ss_spec` 后跑 apply，nftset 仍为 23714（兜底生效）；
+恢复后跑 reconcile，自动修复到 23714。
+
+##### 二、页面响应 5.6 秒 → 1.96 秒
+
+逐层定位到 4 个真实瓶颈（每一层都单独实测过）：
+
+| # | 瓶颈 | 实测 | 修法 |
+|---|---|---|---|
+| 1 | `health_rows` 与 `health_summary` **各自**跑一次 `dnschain-health status` | 各 1.67s，白跑两遍 | 新增 `health_status_raw()` 共用一次调用 |
+| 2 | `dc_domain_class` 对每级标签各 `grep` 一次 23715 行名单 | 单域名 0.06s | 改「一次 grep 批量比对所有候选后缀」 |
+| 3 | `dc_run_timeout` 每 tick `sleep 1`（BusyBox sleep 只支持整数） | nslookup 仅 0.02s，却被拖满 1 秒 | 改「紧密轮询 + 每 2000 转才 sleep 1 秒」 |
+| 4 | selftest 20 项含 4 处真实 DNS 查询，页面每次刷新都跑 | 3.5s | 加 60 秒磁盘缓存 + 失效指纹 |
+
+**第 3 条的排查过程值得记**：先怀疑 `sleep 0.1` 可用（OpenWrt 常开
+FANCY_SLEEP），实测 `sleep 0.05` / `sleep 0.1` **都失败**；
+`read -t 0.1` 报 `invalid timeout`；`usleep` 不存在。
+即 **BusyBox 拿不到亚秒粒度**。所以不能靠缩短 tick，
+只能让「快路径不付等待代价」——紧密轮询到命令完成即返回。
+
+##### 三、过程中发现并修掉的 4 个实现级 bug
+
+| bug | 症状 | 根因 |
+|---|---|---|
+| 缓存永不命中 | 第二次仍跑 3.5s | BusyBox **没有 `stat` 命令**，`stat -c %Y` 恒为空 → 改 `date -r` |
+| SUMMARY 行消失 | 验收脚本报「自检有失败: 」（空值） | 改成 `_DC_BODY=$(check_all)` 捕获输出后，漏了 `main` 原本单独打印的 SUMMARY |
+| SUMMARY 全是 0 | `SUMMARY PASS=0 FAIL=0` | `PASS_CNT` 等计数在 `check_all` 的子 shell 里，父 shell 读到 0 → 改从捕获文本统计 |
+| `selftest` 函数被破坏 | `Syntax error: word unexpected` | 用正则批量替换时 PowerShell 把 `$_body` 当变量插值 → 改用 Python 按文本块精确替换 |
+
+##### 四、复测
+
+```
+页面响应（真实登录，3 次）：1.99s / 1.97s / 1.96s   （原 5.6s，-65%）
+自检：首次 2.76s（无缓存）、第二次 0.23s（命中缓存）
+       SUMMARY PASS=20 FAIL=0 SKIP=0，CONCLUSION: 链路正常
+五条需求验收：PASS=54 FAIL=0
+国外链路：:5353 baidu=OK、:5336 google=OK
+          ss_spec=2、nftset=23714
+
+本地：dash 8/8、shell 89+23、lua 88、图示 35、契约 112、i18n 409、CI 模拟通过
+```
+
+**缓存正确性单独验证**（关键：缓存不能掩盖故障）：
+停掉 v2ray → 指纹从 `5353|5336|4040|4041|1|1|1` 变为
+`...|0|0|1` → 缓存自动失效并重跑 → 准确报出用户描述的那三项 FAIL。
+恢复后回到 20/20。
+
 ## [v0.12.5] - 2026-10-22
 
 ### 变更 — 解析链路图改为思维导图形态（带弧度、不断链）

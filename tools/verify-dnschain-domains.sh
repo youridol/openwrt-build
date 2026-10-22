@@ -269,6 +269,64 @@ if [ "$seed_multi" -eq 0 ]; then
 else
 	fail "基准集有 $seed_multi 行含多个域名（会被当成一个 pattern）"
 fi
+
+# ── nftset 重建窗口兜底（v0.14.1）──
+#
+# 实测故障：在 SSR-Plus 页面点「保存并应用」后，ssrplus 重建规则，
+# `ss_spec` 表短暂消失。若 dnschain 恰在此窗口跑 apply，会生成
+# **23714 条 server= 但 0 条 nftset=** 的片段 ——
+# 国外域名能解析，但解析出的 IP 不进 blacklist → 流量不走代理 →
+# **国外链路整条断掉**，而日志干净、页面看着正常。
+#
+# 故必须有两层保护：片段生成时兜底 + reconcile 时自愈。
+if body_of "$LIB" | grep -q 'dc_ss_spec_present'; then
+	pass "有 ss_spec 整体存在性探测（区分「未启用」与「重建中」）"
+else
+	fail "缺 dc_ss_spec_present（无法区分重建窗口与未启用）"
+fi
+
+if body_of "$LIB" | grep -q 'keep_prev_nft'; then
+	pass "分流片段生成有 nftset 兜底（重建窗口内不丢代理链路）"
+else
+	fail "分流片段生成缺 nftset 兜底（SSR-Plus 重建期间会把代理链路打掉）"
+fi
+
+if grep -q 'nft_after' "$ROOT/files/usr/bin/dnschain-reconcile" 2>/dev/null \
+   || grep -q 'nft_after' "files/usr/bin/dnschain-reconcile" 2>/dev/null; then
+	pass "reconcile 会检测并修复「nftset 行数为 0」的坏片段"
+else
+	fail "reconcile 不检测 nftset 归零（坏片段不会自愈）"
+fi
+
+# ── selftest 结果缓存（v0.14.1 性能）──
+#
+# 自检 20 项含 4 处真实 DNS 查询，实测 3.5 秒；页面每次刷新都跑一遍
+# → 用户感知「切换页面太慢」。加 60 秒缓存后降到 0.2 秒。
+# 但缓存必须有失效指纹，否则会掩盖真实故障。
+if grep -q 'selftest.cache' "$ROOT/files/usr/bin/dnschain-selftest" 2>/dev/null \
+   || grep -q 'selftest.cache' "files/usr/bin/dnschain-selftest" 2>/dev/null; then
+	pass "自检结果有磁盘缓存"
+else
+	fail "自检无磁盘缓存（页面每次刷新都跑完整 20 项）"
+fi
+
+if grep -q 'selftest_fingerprint' "files/usr/bin/dnschain-selftest" 2>/dev/null; then
+	pass "自检缓存有失效指纹（状态变化会重跑，不会掩盖故障）"
+else
+	fail "自检缓存缺失效指纹（会掩盖真实故障）"
+fi
+
+# BusyBox 没有 stat 命令 —— 用 stat 取 mtime 会让缓存永不命中。
+#
+# ⚠️ 必须先剥掉注释行再判断：文件里有一段解释「为什么不能用 stat」
+#    的注释本身就含 `stat -c %Y`，直接 grep 会永久误报
+#    （AGENTS §6 第 6 条踩过同类坑）。
+if sed 's/#.*//' "files/usr/bin/dnschain-selftest" 2>/dev/null | grep -q 'stat -c %Y'; then
+	fail "自检缓存用 stat 取 mtime（BusyBox 无 stat，缓存永不命中）"
+else
+	pass "自检缓存不用 stat（BusyBox 兼容）"
+fi
+
 if body_of "$LIB" | grep -q 'both-bad'; then
 	pass "双链都不通时标记 both-bad（不改道）"
 else
