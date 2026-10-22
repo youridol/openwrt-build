@@ -1297,3 +1297,48 @@ msgstr "%d 秒前"
 
 msgid "尚未探测过"
 msgstr "尚未探测过"
+
+msgid "自定义域名 · 国内（补全归属）"
+msgstr "自定义域名 · 国内（补全归属）"
+
+msgid "自定义域名 · 国外（补全归属）"
+msgstr "自定义域名 · 国外（补全归属）"
+
+msgid "手工补全数据库没覆盖的域名归属。<b>这里只决定「归属」，不是改道开关</b>：归属定了之后由 dnsmasq 与 dnsproxy 分流，且<b>仍然参与健康检测</b> —— 首选链不通、另一条链通时照样自动改道。<br/>格式：只接受域名（含 <code>xn--</code> 形式），不接受通配符、IP、URL。"
+msgstr "手工补全数据库没覆盖的域名归属。<b>这里只决定「归属」，不是改道开关</b>：归属定了之后由 dnsmasq 与 dnsproxy 分流，且<b>仍然参与健康检测</b> —— 首选链不通、另一条链通时照样自动改道。<br/>格式：只接受域名（含 <code>xn--</code> 形式），不接受通配符、IP、URL。"
+
+msgid "国内域名（归属直连）"
+msgstr "国内域名（归属直连）"
+
+msgid "这些域名的归属记为国内 → 首选走国内 dnsproxy 实例（直连出口），解析结果同时写入 <code>china</code> IP 集。"
+msgstr "这些域名的归属记为国内 → 首选走国内 dnsproxy 实例（直连出口），解析结果同时写入 <code>china</code> IP 集。"
+
+msgid "同上，但归属记为国外 → 首选走国外 dnsproxy 实例（经 <code>:1234</code> 代理出口），解析结果写入 <code>blacklist</code> IP 集。"
+msgstr "同上，但归属记为国外 → 首选走国外 dnsproxy 实例（经 <code>:1234</code> 代理出口），解析结果写入 <code>blacklist</code> IP 集。"
+
+msgid "国外域名（归属代理）"
+msgstr "国外域名（归属代理）"
+
+msgid "这些域名的归属记为国外。同样<b>参与健康检测与自动改道</b>。"
+msgstr "这些域名的归属记为国外。同样<b>参与健康检测与自动改道</b>。"
+
+msgid "归属来源"
+msgstr "归属来源"
+
+msgid "自定义补全"
+msgstr "自定义补全"
+
+msgid "数据库 / 未覆盖"
+msgstr "数据库 / 未覆盖"
+
+msgid "重建分流规则并生效"
+msgstr "重建分流规则并生效"
+
+msgid "把当前配置重建为分流片段与动态上游文件，并重启 dnsmasq 让静态规则生效。<br/><b>会有约 3 秒解析中断</b> —— 静态片段通过 conf-dir 加载，实测 reload（SIGHUP）不会重读它，只能 restart。<br/>与底部「保存」的区别：保存只写配置，本按钮才让改动真正生效。"
+msgstr "把当前配置重建为分流片段与动态上游文件，并重启 dnsmasq 让静态规则生效。<br/><b>会有约 3 秒解析中断</b> —— 静态片段通过 conf-dir 加载，实测 reload（SIGHUP）不会重读它，只能 restart。<br/>与底部「保存」的区别：保存只写配置，本按钮才让改动真正生效。"
+
+msgid "应用失败："
+msgstr "应用失败："
+
+msgid "已应用（dnsmasq 已重启，静态片段生效）"
+msgstr "已应用（dnsmasq 已重启，静态片段生效）"

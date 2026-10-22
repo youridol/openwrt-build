@@ -106,11 +106,16 @@ local TAB_LABELS = {
 }
 
 -- section 标题 → tab
+--
+-- ⚠️ 键必须与 m:section() 的标题**逐字一致**（translate 后）。
+--   两个自定义域名 section 现在的标题不同了（国内 / 国外），
+--   否则页面上会出现两个同名块，且本表也只能映射到其中一个。
 local SECTION_TAB = {
 	[translate("当前状态")]      = "overview",
 
 	-- 域名 tab（v0.13.0）：自定义列表 + 判定链路 + 状态导图 + 改道表
-	[translate("自定义域名")]    = "domains",
+	[translate("自定义域名 · 国内（补全归属）")] = "domains",
+	[translate("自定义域名 · 国外（补全归属）")] = "domains",
 	[translate("判定链路")]      = "domains",
 	[translate("改道状态")]      = "domains",
 	[translate("改道明细")]      = "domains",
@@ -640,34 +645,46 @@ local function validate_domain(value)
 	return v
 end
 
--- ── 自定义域名 ────────────────────────────────────────────────────
+-- ── 自定义域名（数据库补全）──────────────────────────────────────
 --
--- 两个 list 分开放在两个 NamedSection 里，而不是一个 section 两个 list：
---   UCI 里它们是两个独立的 config 段（domestic / foreign），
---   放进同一个 NamedSection 会让写回时互相覆盖。
-s = m:section(NamedSection, "dom_domestic", "domains", translate("自定义域名"),
-	translate("手工指定域名走哪条链。<b>自定义优先于名单</b>：" ..
-		"写在这里的域名不再受 gfw 名单影响，也<b>不参与自动改道</b> —— " ..
-		"你写的就是最终答案。<br/>" ..
+-- 定位（v0.14.0 语义矫正，务必按这个理解改代码）：
+--
+--   这里是**补全数据库没覆盖的域名归属**，不是「手动改道开关」。
+--   写进来的域名只做一件事：告诉框架「它的归属是哪条链」。
+--   之后由 dnsmasq（server=/域名/）+ dnsproxy（两个实例）按归属分流，
+--   并且**仍然参与健康检测与自动改道** —— 首选链不通、另一条通时照样改道。
+--
+--   旧文案写的是「不参与自动改道，你写的就是最终答案」，那是错的：
+--   它让用户显式补全归属的域名反而失去了自动恢复能力。
+--
+-- 为什么是两个 NamedSection 而不是一个 section 两个 list：
+--   UCI 里它们是两个独立的 config 段（dom_domestic / dom_foreign），
+--   放进同一个 NamedSection 写回时会互相覆盖。
+--   但**标题必须能区分**，否则页面上会出现两个一模一样的「自定义域名」。
+s = m:section(NamedSection, "dom_domestic", "domains",
+	translate("自定义域名 · 国内（补全归属）"),
+	translate("手工补全数据库没覆盖的域名归属。<b>这里只决定「归属」，不是改道开关</b>：" ..
+		"归属定了之后由 dnsmasq 与 dnsproxy 分流，且<b>仍然参与健康检测</b> —— " ..
+		"首选链不通、另一条链通时照样自动改道。<br/>" ..
 		"格式：只接受域名（含 <code>xn--</code> 形式），不接受通配符、IP、URL。"))
 s.addremove = false
 
-o = s:option(DynamicList, "domain", translate("国内域名（走直连）"),
-	translate("这些域名交给国内 dnsproxy 实例（直连出口），" ..
-		"解析结果同时写入 <code>china</code> IP 集，保证后续流量也直连。"))
+o = s:option(DynamicList, "domain", translate("国内域名（归属直连）"),
+	translate("这些域名的归属记为国内 → 首选走国内 dnsproxy 实例（直连出口），" ..
+		"解析结果同时写入 <code>china</code> IP 集。"))
 o.datatype = "string"
 o.rmempty = true
 o.placeholder = "www.baidu.com"
 o.validate = validate_domain
 
-s = m:section(NamedSection, "dom_foreign", "domains", translate("自定义域名"),
-	translate("手工指定域名走哪条链。<b>自定义优先于名单</b>：" ..
-		"写在这里的域名不再受 gfw 名单影响，也<b>不参与自动改道</b>。"))
+s = m:section(NamedSection, "dom_foreign", "domains",
+	translate("自定义域名 · 国外（补全归属）"),
+	translate("同上，但归属记为国外 → 首选走国外 dnsproxy 实例" ..
+		"（经 <code>:1234</code> 代理出口），解析结果写入 <code>blacklist</code> IP 集。"))
 s.addremove = false
 
-o = s:option(DynamicList, "domain", translate("国外域名（走代理）"),
-	translate("这些域名交给国外 dnsproxy 实例（经 <code>:1234</code> 代理出口），" ..
-		"解析结果写入 <code>blacklist</code> IP 集，保证后续流量进代理。"))
+o = s:option(DynamicList, "domain", translate("国外域名（归属代理）"),
+	translate("这些域名的归属记为国外。同样<b>参与健康检测与自动改道</b>。"))
 o.datatype = "string"
 o.rmempty = true
 o.placeholder = "www.google.com"
@@ -836,9 +853,6 @@ function o.cfgvalue()
 	elseif decision == "both-bad" then
 		DECISION_TONE = "bad"
 		DECISION_LABEL = translate("双链故障")
-	elseif decision == "fixed" then
-		DECISION_TONE = "info"
-		DECISION_LABEL = translate("固定归属，不改道")
 	elseif decision == "reject" then
 		DECISION_TONE = "bad"
 		DECISION_LABEL = translate("拒绝")
@@ -870,10 +884,10 @@ function o.cfgvalue()
 			'<code>' .. esc(e["ANSWER_DOMESTIC"] ~= "" and e["ANSWER_DOMESTIC"] or "—") .. '</code>'),
 		kv(translate("答案 · 代理"),
 			'<code>' .. esc(e["ANSWER_FOREIGN"] ~= "" and e["ANSWER_FOREIGN"] or "—") .. '</code>'),
-		kv(translate("参与改道"),
-			e["FIXED"] == "1"
-				and ('<span class="dc-badge dc-badge--info">' .. translate("否（自定义固定）") .. '</span>')
-				or ('<span class="dc-badge dc-badge--ok">' .. translate("是") .. '</span>')),
+		kv(translate("归属来源"),
+			e["CUSTOM"] == "1"
+				and ('<span class="dc-badge dc-badge--info">' .. translate("自定义补全") .. '</span>')
+				or ('<span class="dc-badge dc-badge--mute">' .. translate("数据库 / 未覆盖") .. '</span>')),
 		kv(translate("判定"),
 			string.format('<span class="dc-badge dc-badge--%s">%s</span>',
 				DECISION_TONE, esc(DECISION_LABEL))),
@@ -1003,12 +1017,12 @@ function o.cfgvalue()
 	local CHAIN = { domestic = translate("直连"), foreign = translate("代理") }
 	local STATE_TONE = {
 		["ok"] = "ok", ["degraded"] = "warn", ["rerouted"] = "warn",
-		["both-bad"] = "bad", ["fixed"] = "info", ["unknown"] = "mute",
+		["both-bad"] = "bad", ["unknown"] = "mute",
 	}
 	local STATE_LABEL = {
 		["ok"] = translate("正常"), ["degraded"] = translate("降级中"),
 		["rerouted"] = translate("已改道"), ["both-bad"] = translate("双链故障"),
-		["fixed"] = translate("固定归属"), ["unknown"] = translate("未探测"),
+		["unknown"] = translate("未探测"),
 	}
 
 	local trs = {}
@@ -1109,14 +1123,26 @@ o.default = "60"
 o:depends("enabled", "1")
 
 -- ── 域名操作 ──────────────────────────────────────────────────────
+--
+-- ⚠️ 按钮命名必须与页面底部 CBI 自动生成的「保存 / 保存并应用」区分开。
+--
+--   CBI 会在页面底部自动生成两个按钮（来自 Map 模板，无法移除）：
+--     · 保存        → 只写 UCI
+--     · 保存并应用  → 写 UCI + 调本 Map 的 apply_on_parse
+--   而本 section 的这个按钮做的是**另一件事**：重建分流片段 + 重启 dnsmasq。
+--
+--   v0.14.0 之前它也叫「保存并应用」，于是页面上出现两个同名按钮
+--   （实测 duplicates: [["保存并应用", 2]]），用户无法判断该点哪个。
+--   现在改名为「重建分流规则并生效」，语义唯一。
 s = m:section(TypedSection, "dnschain", translate("域名操作"))
 s.anonymous = true
 s.addremove = false
 
-o = s:option(Button, "_apply_domains", translate("保存并应用"),
-	translate("重建分流片段与动态上游文件，并重启 dnsmasq 让静态规则生效。" ..
+o = s:option(Button, "_apply_domains", translate("重建分流规则并生效"),
+	translate("把当前配置重建为分流片段与动态上游文件，并重启 dnsmasq 让静态规则生效。" ..
 		"<br/><b>会有约 3 秒解析中断</b> —— 静态片段通过 conf-dir 加载，" ..
-		"实测 reload（SIGHUP）不会重读它，只能 restart。"))
+		"实测 reload（SIGHUP）不会重读它，只能 restart。" ..
+		"<br/>与底部「保存」的区别：保存只写配置，本按钮才让改动真正生效。"))
 o.inputstyle = "apply"
 function o.write(self, section)
 	local out = ds.apply_domains()
@@ -1143,14 +1169,19 @@ function o.write(self, section)
 	setmsg("✓ " .. translate("已清空") .. "\n" .. (out or ""))
 end
 
-o = s:option(Button, "_check_domains", translate("校验自定义列表"),
-	translate("检查两个列表里有没有非法域名、以及同一个域名是否同时出现在两边。"))
-o.inputstyle = "reload"
-function o.write(self, section)
-	local ok, out = ds.check_domains()
-	ds.invalidate()
-	setmsg((ok and "✓ " or "✗ ") .. translate("校验结果") .. "\n" .. (out or ""))
-end
+-- ⚠️ 「校验自定义列表」按钮已移除（v0.14.0 去重）。
+--
+--   理由：格式校验已经在**保存时**做了两道 ——
+--     · 页面 validate_domain()（输入框失焦即报错，手误立刻可见）
+--     · dc_domain_valid()（兜住 uci set / 备份恢复等绕过页面的路径）
+--   再放一个「事后校验」按钮，用户点它得到的结论与保存时的校验
+--   完全一致，属于重复入口。
+--
+--   真正需要「事后体检」的场景（配置被外部改坏、域名同时出现在两边）
+--   已由「诊断」tab 的「立即重新自检」覆盖 —— 那里是完整的 20 项检查，
+--   比单看域名列表更全面。保留两个入口只会让人不知道该点哪个。
+--
+--   注意：ds.check_domains() 仍保留在模型层，自检会调用它。
 
 ------------------------------------------------------------------------
 -- Tab「解析」：上游 + 双栈 + 端口 + 缓存
@@ -1730,5 +1761,39 @@ end
 ------------------------------------------------------------------------
 
 emit_tab_meta(m)
+
+------------------------------------------------------------------------
+-- 底部「保存并应用」与「保存」的语义区分
+--
+-- CBI 的 Map 模板会在页面底部自动生成两个按钮：
+--   保存        → 只写 UCI（cbi-map.htm 的 save 动作）
+--   保存并应用  → 写 UCI 后调用本 Map 的 apply_on_parse（若已定义）
+--
+-- 本页原来**没有**定义 apply_on_parse，于是「保存并应用」实际等于
+-- 「保存」—— 两个按钮做同一件事，用户点「保存并应用」后以为分流
+-- 已经生效，但静态片段并没有重建，页面上「待应用」的徽标还在。
+-- 这是 v0.14.0 全链路审查发现的真实缺陷。
+--
+-- 现在补上：apply_on_parse 调 ds.apply_domains()（重建分流片段 +
+-- 必要时重启 dnsmasq），让「保存并应用」真的「应用」。
+--
+-- 注意 apply_domains 内部已经做了「静态片段未变则不动 dnsmasq」的
+-- 判断（MD5 比对），所以只改阈值之类的无关字段时不会白白断 3 秒。
+function m.apply_on_parse(...)
+	-- 先让 CBI 完成默认的解析与写盘，再执行应用动作。
+	-- 顺序不能反：apply_domains 读的是已落盘的 UCI 值。
+	local rv
+	if Map.apply_on_parse then
+		rv = Map.apply_on_parse(...)
+	end
+	local ok, out = pcall(ds.apply_domains)
+	ds.invalidate()
+	if not ok then
+		m.message = translate("应用失败：") .. tostring(out)
+	elseif out and out:find("DNSMASQ=restarted") then
+		m.message = translate("已应用（dnsmasq 已重启，静态片段生效）")
+	end
+	return rv
+end
 
 return m

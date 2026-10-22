@@ -656,9 +656,33 @@ dc_list_normalize() {
 # 为什么要回落而不是「空就是空」：空列表意味着永不探测、页面永远
 # 显示「无数据」，用户会以为功能坏了。基准集是「国内外各 4 个」
 # 的稳定站点，能代表两条链的通断。
-# ------------------------------------------------------------
-DNSCHAIN_WATCH_SEED="www.baidu.com www.taobao.com www.qq.com www.163.com
-www.google.com www.youtube.com github.com www.wikipedia.org"
+#
+# ⚠️ 必须**每行一个域名**（v0.14.0 修）。
+#
+#   旧写法是：
+#     DNSCHAIN_WATCH_SEED="a.com b.com c.com
+#                          d.com e.com"
+#     printf '%s\n' "$DNSCHAIN_WATCH_SEED" | while read -r d; ...
+#
+#   `printf '%s\n' "$VAR"` 把整个变量当成**一个参数**，
+#   于是 8 个域名被压成 2 行（按变量里的字面换行），
+#   再 `read -r d` 读到的每一「行」其实是 4 个域名用空格连起来的串。
+#   后果：dc_watch_list 输出 2 行、每行含多个域名，
+#   而静态片段的排除用的是 `grep -Fvxf <watch文件>`（逐行精确匹配），
+#   于是 github.com 等域名**排除不掉**，同时出现在静态片段与
+#   servers-file 里 → dnsmasq 把两条 server= 当候选 →
+#   改道退化成随机走一条。自检第 18 项正是查这个，实测 FAIL。
+#
+#   现在用多行字面量 + `printf '%s\n' $VAR`（不加引号，靠词分割 +
+#   每行已是独立词），并显式逐个输出，语义明确。
+DNSCHAIN_WATCH_SEED="www.baidu.com
+www.taobao.com
+www.qq.com
+www.163.com
+www.google.com
+www.youtube.com
+github.com
+www.wikipedia.org"
 
 dc_watch_list() {
 	local d out
@@ -670,11 +694,14 @@ dc_watch_list() {
 		echo "$d"
 	done | sort -u)
 
-	[ -n "$out" ] || out=$(printf '%s\n' "$DNSCHAIN_WATCH_SEED" \
-		| while read -r d; do
-			[ -n "$d" ] || continue
-			echo "$d"
-		done | sort -u)
+	if [ -z "$out" ]; then
+		# 基准集：逐词输出，保证一行一个域名
+		out=$(printf '%s\n' $DNSCHAIN_WATCH_SEED \
+			| while read -r d; do
+				[ -n "$d" ] || continue
+				echo "$d"
+			done | sort -u)
+	fi
 
 	printf '%s\n' "$out"
 }
@@ -777,12 +804,44 @@ dc_domain_preferred() {
 	esac
 }
 
-# 该域名是否「用户固定」，即不参与自动改道
-dc_domain_fixed() {
+# ------------------------------------------------------------
+# 自定义列表的定位：**补全数据库归属**，不是改道开关
+#
+# ⚠️ v0.14.0 语义矫正（此前实现是错的）。
+#
+#   旧实现把自定义域名当成「固定」：命中就写 health 的 fixed 状态，
+#   **完全不参与健康检测与自动改道**。理由写的是「你写的就是最终答案」。
+#
+#   但那与需求相矛盾。需求的原文是：
+#     · 自定义输入框「只作为补全追加到数据库而不是直接改道」，
+#       由 dnsmasq 和 dnsproxy 判断如何分流；
+#     · 「针对国内外数据库未覆盖的域名，实现链路健康检测与自动改道」。
+#
+#   两句话合起来的意思是：
+#     自定义列表的作用是**告诉框架「这个域名的归属是哪条链」** ——
+#     补上数据库没覆盖的那一块。归属定了，首选链也就定了；
+#     但**首选链不等于最终链路** —— 如果首选链探测不通、另一条通，
+#     仍然要改道。否则「补全归属」就变成了「绕过健康检测」。
+#
+#   所以现在：
+#     · dc_domain_class 仍然优先返回 custom-*（补全归属，优先级最高）
+#     · dc_domain_preferred 据此给出首选链
+#     · 健康检测与改道对**所有**观测域名一视同仁，不再有 fixed 例外
+#
+#   保留这个函数只是为了兼容旧调用点，语义改为「用户显式指定了归属」
+#   —— 它**不再**意味着「不参与改道」。
+# ------------------------------------------------------------
+dc_domain_custom() {
 	case "$(dc_domain_class "$1")" in
 		custom-domestic|custom-foreign) return 0 ;;
 		*) return 1 ;;
 	esac
+}
+
+# 兼容旧名（供尚未迁移的调用点使用）。
+# 语义已变：现在只表示「归属由用户显式补全」，**不再**跳过改道。
+dc_domain_fixed() {
+	dc_domain_custom "$1"
 }
 
 # ------------------------------------------------------------
@@ -1320,7 +1379,7 @@ dc_health_cycle() {
 	local enabled eport fport tmo retries fail_thr ok_thr dwell
 	local d pref other active fail ok last res r_pref r_other
 	local now decision changed
-	local n_ok n_switch n_bad n_skip
+	local n_ok n_switch n_bad n_wait
 
 	enabled=$(dc_get main enabled 1)
 	[ "$enabled" = "1" ] || { echo "SKIP 框架未启用"; return 0; }
@@ -1342,7 +1401,7 @@ dc_health_cycle() {
 
 	now=$(date +%s 2>/dev/null || echo 0)
 	changed=0
-	n_ok=0; n_switch=0; n_bad=0; n_skip=0
+	n_ok=0; n_switch=0; n_bad=0; n_wait=0
 
 	for d in $(dc_watch_list); do
 		[ -n "$d" ] || continue
@@ -1361,13 +1420,15 @@ dc_health_cycle() {
 		[ -n "$ok" ] || ok=0
 		[ -n "$last" ] || last=0
 
-		# 用户固定的域名：只记录健康，不改道
-		if dc_domain_fixed "$d"; then
-			res=$(dc_probe_chain "$d" "$active" "$tmo" "$retries")
-			dc_health_write "$d" "$pref" "$active" 0 0 "$now" "fixed:$res"
-			n_skip=$((n_skip + 1))
-			continue
-		fi
+		# 自定义补全的域名**同样参与**健康检测与改道（v0.14.0 语义矫正）。
+		#
+		# 这里曾经有一段 `if dc_domain_fixed "$d"; then ... continue`，
+		# 把自定义域名直接跳过、只记录健康。那是错的：
+		# 自定义列表的作用是补全「归属」，归属只决定**首选**链，
+		# 而首选链不通时仍应改道。跳过改道等于让用户显式写下的域名
+		# 反而失去了自动恢复能力 —— 与需求 2/3 直接冲突。
+		#
+		# 现在所有观测域名走同一套判定，不设例外。
 
 		r_pref=$(dc_probe_chain "$d" "$pref" "$tmo" "$retries")
 
@@ -1431,7 +1492,7 @@ dc_health_cycle() {
 				# 只累加 ok 计数，保留原 last
 				dc_health_write_keep_last "$d" "$pref" "$other" 0 "$ok" \
 					"recover-wait:$r_pref"
-				n_skip=$((n_skip + 1))
+				n_wait=$((n_wait + 1))
 			fi
 		else
 			dc_health_write "$d" "$pref" "$other" 0 0 "$now" "fallback:$r_pref"
@@ -1448,8 +1509,9 @@ dc_health_cycle() {
 		esac
 	fi
 
-	printf 'CYCLE ok=%s switch=%s bad=%s skip=%s\n' \
-		"$n_ok" "$n_switch" "$n_bad" "$n_skip"
+	# wait = 回切等待中（首选链已恢复但未满足 recover_threshold）
+	printf 'CYCLE ok=%s switch=%s bad=%s wait=%s\n' \
+		"$n_ok" "$n_switch" "$n_bad" "$n_wait"
 	return 0
 }
 
@@ -1512,13 +1574,13 @@ dc_probe_chain() {
 # 决策解释（页面「归属判定」用它把结论摊开给人看）
 #
 # 输出 KEY=VALUE，一行一个，便于 Lua 侧逐行解析：
-#   CLASS / PREFERRED / ACTIVE / WATCH / FIXED
+#   CLASS / PREFERRED / ACTIVE / WATCH / CUSTOM
 #   PROBE_DOMESTIC / PROBE_FOREIGN / ANSWER_DOMESTIC / ANSWER_FOREIGN
 #   DECISION / REASON
 # ------------------------------------------------------------
 dc_explain_domain() {
 	local d cls pref active other tmo retries r_dom r_for a_dom a_for
-	local watch fixed decision reason dom_up for_up
+	local watch custom decision reason dom_up for_up
 
 	d=$(dc_domain_normalize "$1")
 	cls=$(dc_domain_class "$d")
@@ -1543,13 +1605,15 @@ dc_explain_domain() {
 	watch=0
 	dc_watch_list | grep -Fqx "$d" && watch=1
 
-	fixed=0
-	dc_domain_fixed "$d" && fixed=1
+	# CUSTOM=1 只表示「归属由用户在自定义列表里显式补全」，
+	# **不再**表示「不参与改道」（v0.14.0 语义矫正）。
+	custom=0
+	dc_domain_custom "$d" && custom=1
 
 	echo "PREFERRED=${pref}"
 	echo "ACTIVE=${active}"
 	echo "WATCH=${watch}"
-	echo "FIXED=${fixed}"
+	echo "CUSTOM=${custom}"
 
 	tmo=$(dc_get health timeout 2)
 	retries=$(dc_get health retries 2)
@@ -1569,15 +1633,17 @@ dc_explain_domain() {
 	# 页面上的解释与守护进程的实际动作对不上，是最坏的一类不一致：
 	# 用户按解释去排障，却发现系统干的是另一件事。
 	# 所以这里也以「首选链」为基准，而不是「先看国内通不通」。
+	#
+	# ⚠️ v0.14.0：这里曾经有一条 `if fixed → decision=fixed` 的短路，
+	# 把自定义域名直接判为「不改道」。那与 dc_health_cycle 现在的行为
+	# 矛盾（后者对所有域名都判定改道）。已删除 —— 自定义域名与其它
+	# 域名走完全相同的判定路径，只是 preferred 的来源不同。
 	dom_up=0
 	for_up=0
 	case "$r_dom" in OK|EMPTY) dom_up=1 ;; esac
 	case "$r_for" in OK|EMPTY) for_up=1 ;; esac
 
-	if [ "$fixed" = "1" ]; then
-		decision="fixed"
-		reason="自定义列表已固定走 ${pref}，不参与自动改道"
-	elif [ "$pref" = "foreign" ]; then
+	if [ "$pref" = "foreign" ]; then
 		if [ "$for_up" = "1" ]; then
 			if [ "$dom_up" = "1" ] && [ -n "$a_dom" ] && [ -n "$a_for" ] && [ "$a_dom" != "$a_for" ]; then
 				decision="keep-foreign"

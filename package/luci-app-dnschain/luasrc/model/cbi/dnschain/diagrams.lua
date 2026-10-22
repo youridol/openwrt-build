@@ -529,8 +529,17 @@ end
 --
 -- rows：dnschain-health status 的 ROW 行（见 dnschain.lua health_rows）
 -- summary：SUM 行（可选，只用于总数）
------------------------------------------------------------------------
-local STATUS_ORDER = { "ok", "degraded", "rerouted", "both-bad", "fixed", "unknown" }
+--
+-- ⚠️ v0.14.0：原来的 "fixed" 档（「固定归属 / 不参与改道」）已删除。
+--
+--   自定义列表的定位改成了「补全数据库归属」—— 它只决定**首选**链，
+--   仍然参与健康检测与自动改道。于是「固定不改道」这个状态不再存在，
+--   再画一档会让页面说一套、运行时做另一套。
+--
+--   自定义域名现在归入正常的 ok / degraded / rerouted / both-bad 档，
+--   由 class 字段（custom-*）体现「归属来自用户补全」。
+-- -----------------------------------------------------------------------
+local STATUS_ORDER = { "ok", "degraded", "rerouted", "both-bad", "unknown" }
 
 local STATUS_META = {
 	["ok"] = {
@@ -552,11 +561,6 @@ local STATUS_META = {
 		title = translate("双链故障"),
 		tone = "bad",
 		hint = translate("两条链都不通 → 先查 dnsproxy 与代理"),
-	},
-	["fixed"] = {
-		title = translate("固定归属"),
-		tone = "info",
-		hint = translate("自定义列表已指定，不参与改道"),
 	},
 	["unknown"] = {
 		title = translate("未探测"),

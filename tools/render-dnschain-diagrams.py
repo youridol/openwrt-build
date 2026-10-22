@@ -412,10 +412,10 @@ def sample_rows():
     return [
         {"domain": "www.baidu.com", "class": "custom-domestic", "pref": "domestic",
          "active": "domestic", "fail": 0, "ok": 0, "last": 1700000000,
-         "result": "OK", "state": "fixed"},
+         "result": "OK", "state": "ok"},
         {"domain": "www.google.com", "class": "custom-foreign", "pref": "foreign",
          "active": "foreign", "fail": 0, "ok": 0, "last": 1700000000,
-         "result": "fixed:OK", "state": "fixed"},
+         "result": "switch:OK->OK", "state": "rerouted"},
         {"domain": "github.com", "class": "db-foreign", "pref": "foreign",
          "active": "domestic", "fail": 0, "ok": 0, "last": 1700000000,
          "result": "switch:TIMEOUT->OK", "state": "rerouted"},
@@ -484,13 +484,13 @@ def main():
     check_hint_wrapped("改道状态图", status)
 
     # 状态图的档位数随数据变，用实际渲染出的行数算布局
-    n_status_rows = 6   # sample_rows 覆盖 ok/degraded/rerouted/both-bad/fixed/unknown
+    n_status_rows = 5   # sample_rows 覆盖 ok/degraded/rerouted/both-bad/unknown
     slayout = D.status_layout(L.eval("{ [1] = true, [2] = true, [3] = true, [4] = true, [5] = true, [6] = true }"))
     check_note_clearance("改道状态图", status, slayout)
     check_text_fits_boxes("改道状态图", status, slayout)
 
     # 状态图必须覆盖全部六档（数据里六档都有）
-    for st in ["正常", "降级中", "已改道", "双链故障", "固定归属"]:
+    for st in ["正常", "降级中", "已改道", "双链故障", "未探测"]:
         if st in status:
             ok("状态图含「%s」档" % st)
         else:

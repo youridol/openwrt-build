@@ -205,6 +205,70 @@ if body_of "$LIB" | grep -q 'r_other'; then
 else
 	fail "改道判定没有探测另一条链"
 fi
+
+# ── v0.14.0 语义矫正：自定义列表是「补全归属」，不是「改道开关」 ──
+#
+# 需求原文：自定义输入框「只作为补全追加到数据库而不是直接改道」，
+# 且「针对数据库未覆盖的域名，实现链路健康检测与自动改道」。
+# 合起来 = 补全只决定首选链，仍然参与改道。
+#
+# 旧实现把自定义域名当 fixed，命中就 continue 跳过改道 —— 下面两条
+# 断言专门防止它回来。
+if body_of "$LIB" | grep -q 'if dc_domain_fixed "$d"; then'; then
+	fail "改道循环里仍有「自定义域名跳过改道」的分支（与需求 2/3 冲突）"
+else
+	pass "改道循环对所有观测域名一视同仁（无 fixed 例外）"
+fi
+
+# health_cycle 里不得出现 fixed: 结果前缀（那是「跳过改道」的标记）
+if body_of "$LIB" | grep -q '"fixed:\$res"'; then
+	fail "仍在写 fixed: 健康结果（表示跳过改道）"
+else
+	pass "不再写 fixed: 健康结果"
+fi
+
+# dc_explain_domain 不得把自定义域名短路成「不改道」
+if body_of "$LIB" | grep -q 'decision="fixed"'; then
+	fail "解释逻辑仍把自定义域名短路成 fixed（页面会与实际行为矛盾）"
+else
+	pass "解释逻辑与改道循环走同一套判定"
+fi
+
+# status 的档位里不得再有 fixed（否则自定义域名的真实状态被吞掉）
+if grep -q '"fixed"' "$HEALTH"; then
+	fail "dnschain-health status 仍有 fixed 档（会吞掉自定义域名的真实状态）"
+else
+	pass "dnschain-health status 无 fixed 档"
+fi
+if grep -q 'custom=' "$HEALTH"; then
+	pass "汇总用 custom= 标注归属来源（而非占一档状态）"
+else
+	fail "汇总缺 custom= 标注"
+fi
+
+# ── 观测基准集必须「一行一个域名」──
+#
+# v0.14.0 实测踩过：种子集写成两行字面量，而输出用了
+# `printf '%s\n' "$VAR"`（整个变量当**一个**参数）→ 8 个域名被压成
+# 2 行、每行 4 个用空格连起来 → dc_watch_list 输出 2 行多域名 →
+# 静态片段用 `grep -Fvxf`（逐行精确匹配）排除时**排除不掉** →
+# 观测域名同时出现在静态片段与 servers-file →
+# dnsmasq 把两条 server= 当候选 → 改道退化成随机走一条。
+# 自检第 18 项就是查这个，实测曾 FAIL（PASS=19 FAIL=1）。
+if body_of "$LIB" | grep -q "printf '%s\\\\n' \$DNSCHAIN_WATCH_SEED"; then
+	pass "基准观测集逐词输出（保证一行一个域名）"
+else
+	fail "基准观测集输出方式会把多个域名压成一行（静态片段排除会失效）"
+fi
+
+# 种子集里不得出现「一行多个域名」的写法
+seed_multi=$(body_of "$LIB" | awk '/^DNSCHAIN_WATCH_SEED=/,/^"/' \
+	| grep -cE '^[a-z0-9.-]+\.[a-z]{2,} +[a-z0-9.-]+\.[a-z]{2,}')
+if [ "$seed_multi" -eq 0 ]; then
+	pass "基准集每行只有一个域名"
+else
+	fail "基准集有 $seed_multi 行含多个域名（会被当成一个 pattern）"
+fi
 if body_of "$LIB" | grep -q 'both-bad'; then
 	pass "双链都不通时标记 both-bad（不改道）"
 else
@@ -457,7 +521,7 @@ else
 fi
 
 # 状态导图必须分五档，且问题档带「查什么」
-for st in '正常' '降级中' '已改道' '双链故障' '固定归属'; do
+for st in '正常' '降级中' '已改道' '双链故障' '未探测'; do
 	if body_of "$DIA" | grep -q "title = translate(\"$st\")"; then
 		pass "状态导图含档位「$st」"
 	else

@@ -47,24 +47,37 @@ cmd_explain() {
 #
 # 输出两段：
 #   ROW domain|class|pref|active|fail|ok|last|result|chain_state
-#   SUM total=<n> normal=<n> rerouted=<n> both_bad=<n> fixed=<n>
+#   SUM total=<n> normal=<n> rerouted=<n> both_bad=<n> custom=<n>
 #
 # chain_state 是给页面画状态图用的粗粒度结论：
 #   ok        当前链可达，无需改道
 #   degraded  首选链已开始失败，但还没到改道阈值
 #   rerouted  已改道到另一条链
 #   both-bad  两条链都不通
-#   fixed     自定义固定，不参与改道
+#   custom    归属由自定义列表补全（**不是**状态，是归属来源的标注）
 #   unknown   还没有探测数据
 #
 # degraded 必须单独一档：把它算成 ok 会让「连续失败 1 次」在页面上
 # 完全看不出来，而这正是故障最早期、最该被看见的时刻。
+#
+# ⚠️ v0.14.0 语义矫正：`custom` 不再是一档「状态」。
+#
+#   旧实现把 `dc_domain_fixed` 判在前面（`if fixed → state=fixed`），
+#   于是自定义域名的状态**永远**显示为 fixed，真实的 ok / degraded /
+#   rerouted / both-bad 全被吞掉。这带来两个后果：
+#     · 页面看不出这些域名的链路是否健康（明明在探测）；
+#     · 汇总里的 normal/rerouted/both_bad 少算了它们，
+#       总数对不上，看起来像统计 bug。
+#
+#   现在 `custom` 只作为**归属来源**标注，不影响状态判定 ——
+#   自定义域名和其它域名走同一套状态分类。
+#   汇总里 `custom=<n>` 仍保留，表示「其中 n 个归属是用户补全的」。
 # ------------------------------------------------------------
 cmd_status() {
 	local d cls pref active fail ok last res state
-	local n_total n_ok n_rerouted n_bad n_fixed n_degraded
+	local n_total n_ok n_rerouted n_bad n_custom n_degraded
 
-	n_total=0; n_ok=0; n_rerouted=0; n_bad=0; n_fixed=0; n_degraded=0
+	n_total=0; n_ok=0; n_rerouted=0; n_bad=0; n_custom=0; n_degraded=0
 
 	for d in $(dc_watch_list); do
 		[ -n "$d" ] || continue
@@ -83,10 +96,10 @@ cmd_status() {
 		[ -n "$last" ] || last=0
 		[ -n "$active" ] || active="$pref"
 
-		if dc_domain_fixed "$d"; then
-			state="fixed"
-			n_fixed=$((n_fixed + 1))
-		elif [ -z "$res" ]; then
+		# custom 只计数，不参与下面的状态分类
+		dc_domain_custom "$d" && n_custom=$((n_custom + 1))
+
+		if [ -z "$res" ]; then
 			state="unknown"
 		else
 			case "$res" in
@@ -103,8 +116,10 @@ cmd_status() {
 		n_total=$((n_total + 1))
 	done
 
-	printf 'SUM total=%s normal=%s degraded=%s rerouted=%s both_bad=%s fixed=%s\n' \
-		"$n_total" "$n_ok" "$n_degraded" "$n_rerouted" "$n_bad" "$n_fixed"
+	# custom=<n> 表示「其中 n 个域名的归属是用户补全的」，
+	# 它们是 normal/degraded/rerouted/both_bad 的子集，不单独占一档。
+	printf 'SUM total=%s normal=%s degraded=%s rerouted=%s both_bad=%s custom=%s\n' \
+		"$n_total" "$n_ok" "$n_degraded" "$n_rerouted" "$n_bad" "$n_custom"
 	return 0
 }
 
