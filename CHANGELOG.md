@@ -3,6 +3,801 @@
 本仓库所有功能/配置改动均记录于此。版本判型遵循全局规范（PATCH / MINOR / MAJOR）。
 
 
+## [v0.14.5] - 2026-10-23
+
+### 落实度复查：修 v0.14.4 未真正生效的修复 + 补审 CSS/config
+
+### 落实度复查：修 v0.14.4 未真正生效的修复 + 补审 CSS/config（v0.14.5）
+
+按要求复查「全链路检查是否完全落实」。逐项核验后发现 **v0.14.4 的 M2 修复
+并未真正生效**，另有两处此前未系统审查的区域（CSS 变量、config 键一致性）。
+
+##### 一、[严重] `dc_ssr_mode_for_profile` 改对了逻辑但**写错了 section 名**
+
+v0.14.4 的 M2 把「读不存在的 `main.profile`」改成「读 `ssr.mode`」，
+但配置文件里是 **`config ssr 'compat'`** —— 类型是 `ssr`、**名字是 `compat`**。
+`dc_get <name> <option>` 走 `uci get dnschain.<name>.<option>`，
+所以 `dc_get ssr mode` 查的是「名字为 ssr 的 section」，它不存在 →
+恒返回空 → 恒走兜底 `"0"`。
+
+**即 M2 修复后，页面选「7 — 模块内置 DNS」仍然被静默推翻。**
+
+实测证据：
+```
+uci get dnschain.ssr.mode    = （空）
+uci get dnschain.compat.mode = 7
+compat.mode=7 → dc_ssr_mode_for_profile 返回 0   ← 修复前
+compat.mode=7 → dc_ssr_mode_for_profile 返回 7   ← 修复后
+```
+
+同一错误还有两处（reconcile 一直读不到，恒用默认值 1）：
+- `enforce=$(dc_get ssr enforce 1)`
+- `if [ "$(dc_get ssr require_ipv6 1)" = "1" ]`
+
+修法：三处全部改为 `dc_get compat ...`。
+新增 5 条契约断言锁住（含「禁止出现 `dc_get ssr <opt>`」的反向断言）。
+
+> 教训：**`dc_get` 的第一个参数是 section 名，不是类型**。
+> 本仓库已有同名坑（`config upstream 'cn'` 必须写 `dc_get cn ...`），
+> 这是第二次踩 —— 已在断言里对 `ssr.*` 三处加反向守卫。
+
+##### 二、[中等] CSS 存在无效自定义属性值
+
+```css
+--dc-fg-muted: opacity: 0.65;
+```
+
+自定义属性里不能放 `opacity: 0.65` 这种**声明**，浏览器会把它当字符串；
+真有人 `var(--dc-fg-muted)` 当 opacity 用时得到无效值。
+且 `--dc-fg` 与 `--dc-fg-muted` **全文件零消费者**（Lua/JS 也未引用）。
+
+修法：删掉两个变量并写明理由。弱化文字直接用 `opacity` 属性，不绕变量。
+复查后 CSS 的 18 个变量全部有定义、无悬空引用。
+
+##### 三、[核查] config 47 个键的消费者覆盖
+
+逐键核对 `config` 里 47 个 option/list 的 shell 消费者：
+
+| 类别 | 数量 | 状态 |
+|---|---|---|
+| 有消费者 | 34 | 正常 |
+| list 类型（无值时为空） | 3 | 正常（`dom_*.domain` / `health.watch`） |
+| 有兜底的不存在键 | 1 | `main.profile`（旧配置兼容，代码有默认值） |
+| 已在页面标注「仅作记录」 | 9 | 正常 |
+
+即除本次修的 3 处外，没有发现新的「配了不生效且无提示」的键。
+
+##### 四、复测
+
+```
+本地：dash 8/8、shell 90+23、lua 121、图示 44、契约 126（新增 5）、
+      i18n 426、CI 模拟通过
+路由器：selftest 20/20、:53/:5353/:5336 全 OK、nftset=23714、
+        ss_spec=2、:1234=1、cycle ok=8、零泄漏零残留
+        页面 HTTP 200、157KB、SVG 4、marker 0 重复、Lua 报错 0、响应 2.14s
+        compat.mode=7 → dc_ssr_mode_for_profile 返回 7（修复前恒 0）
+```
+## [v0.14.4] - 2026-10-23
+
+### Lua 层深审：6 项严重 + 9 项中等 + 9 项轻微缺陷修复
+
+### Lua 层深审：6 项严重 + 9 项中等 + 9 项轻微缺陷修复（v0.14.4）
+
+对 4 个 Lua 文件（3595 行）做第三轮审查，逐条用 lupa（真实 Lua）实测验证。
+**24 项报告里 3 项经实测不成立**，未作改动（见末节）。
+
+##### S1 [严重] selftest 名称解析用 `[^—]`，20 项里 7 项失败
+
+```lua
+local name, detail = rest:match("^([^—]+)—%s*(.*)$")
+```
+
+Lua 的字符类按**字节**工作。`—`(U+2014) 的 UTF-8 是 `E2 80 94`，
+写进 `[^—]` 后实际是「排除 E2、80、94 三个字节」。凡名称含
+`一`(E4 B8 80)、`上`(E4 B8 8A)、`下`(E4 B8 8B) 等第三字节为 0x80 的
+常用汉字，匹配**直接失败**。
+
+实测 10 个真实 emit 名称：**7 个失败**（整行进 name、detail 为空），
+3 个「半失败」（name 尾随一个空格）。失败的包括「缓存层唯一」
+「端口所有权无冲突」「改道通道已就绪」—— 诊断页最该看清的几项，
+而 `#items` 仍是 20、`total` 正确，看起来一切正常，只是内容错位。
+
+修法：改用 `find(sep, 1, true)` 做**字节精确**匹配（分隔符是 5 字节的
+`" — "`），找到后按字节位置切。实测 10/10 正确、无尾随空格。
+
+##### S2 [严重] `upstream_port` 把 IPv6 末段当端口
+
+```lua
+local port = hostport:match(":%[?([0-9]+)%]?$")
+```
+
+实测：
+```
+https://[2606:4700::1111]/dns-query  → 1111（应 443）
+tls://[2400:3200::1]                 → 1   （应 853）
+```
+
+后果：`validate_upstreams` 拿这个假端口比对 `ss_spec_output` 端口集。
+不在集合里 → 保存被拒且提示「端口 1111 不在…」，用户看不出问题在哪；
+恰好在集合里 → 该上游被误判合规，实际出向不走代理，国外解析静默失败。
+
+修法：IPv6 的端口只可能出现在 `]:` 之后，先判 `^%[` 再分别取。
+实测 7/7 正确。
+
+##### S3 [严重] `status_map` 静默丢弃未知 state，行数不守恒
+
+`local st = r.state or "unknown"` 只兜 nil。空串与任何未知值
+（如脚本将来新增 `probing`）会落进 `groups` 里一个**不在 `STATUS_ORDER`
+中**的键，而 `present` 只遍历 `STATUS_ORDER`、`n_all` 也只累加那些组
+—— 这些行被**静默丢弃**。
+
+实测：3 行（`ok` / `""` / `weird-state`）只画出 1 个域名，
+根节点也写「观测 1 个」。看起来像「只有 1 个域名需要关注」，无任何提示。
+
+修法：`normalize_state()` 把未知/空值统一归入 `unknown` 档，保证
+「画出的行数 == 输入行数」。实测 3 行全部进图、计数 3。
+
+##### S4 [严重] `status_layout` 与 `status_map` 口径不同 → CI 验错布局
+
+两处不一致：
+1. `status_layout` 用 `pairs(rows)` 数**数据行数**，`status_map` 画
+   **状态档位数**（最多 5 档，`both-bad` 恒占一档）
+2. `NH` 一个硬编码 60，一个 `math.max(60, 21+16+max_hint_lines*14+8)`
+
+实测（5 档各 1 个域名）：`status_map` 实际 viewBox 高 **386**，
+`status_layout` 报 **406** —— 差 20px。`check_note_clearance` 与
+`check_text_fits_boxes` 的断言全部基于这份错值。
+
+修法：抽出 `layout_plan(rows)`，由两者共用。实测三种数据形态
+（5 档/1 档/6 行 3 档）下高度完全一致（471/216/301）。
+
+##### S5 [严重] 「分流规则条数」取错文件
+
+`stats.domains` 读 `foreign-split.conf`，而那是
+「数据库国外 − 自定义国内 − 观测域名」的**纯域名清单**
+（`dnschain.sh` 里明确写了「从 v0.13.0 起不再是 dnsmasq 片段」）。
+真正的 `server=/域名/` 条数在 `dnschain-split.conf`。
+
+实测加 1 个自定义国外域名后：`foreign-split.conf` 仍 23714，
+`dnschain-split.conf` 的 `server=` 变 23715 —— 页面数字偏小，
+标签「条 server=/域名/」名不副实。
+
+另有 `M.split_rule_count()` 读的正是对的文件，但**全仓库零调用点**，
+且它数的是所有行（含注释与 `nftset=`），口径也不对。
+
+修法：`list_stats` 增加 `split_server_lines`（数 `server=` 前缀行），
+`chain_snapshot` 改用它；删掉死函数 `split_rule_count`。
+
+##### S6 [严重] 「保存并应用」4 条分支无反馈，按钮无条件打 ✓
+
+`cmd_apply` 有 5 条正常出口 + 2 条失败出口：
+```
+DNSMASQ=restarted（静态片段已变）
+DNSMASQ=skipped（框架未启用）
+DNSMASQ=skipped（无 init.d/dnsmasq）
+DNSMASQ=sighup（仅观测域名变化）
+DNSMASQ=unchanged（无变化，未动 dnsmasq）
+ERROR=生成分流片段失败 / ERROR=生成自定义列表失败
+```
+而 `apply_on_parse` 只处理 `restarted`，其余 4 条**不设置任何 message**。
+最常见的 `unchanged`（只改阈值、片段未变）用户点保存后看不到任何提示，
+会反复点；框架未启用时更是什么都不显示。
+
+按钮路径反过来，无条件拼 `✓` —— `ERROR` 时显示「✓ 已应用」+ 错误正文。
+
+修法：`apply_message()` 统一解析，按出口给 `✓`/`!`/`✗` 与对应文案，
+`skipped` 还带上具体原因。实测 8/8 分支正确。
+
+##### 中等缺陷（9 项）
+
+| # | 问题 | 处置 |
+|---|---|---|
+| M1 | `validate_domain` 比 `dc_domain_valid` 少 4 条（总长≤253、label≤63、label 首尾非 `-`、TLD 非 `xn--` 须纯字母）→ 页面放行、脚本 `dc_domain_valid \|\| continue` 静默跳过 → 「已录入」却不生效 | 补齐 4 条，保证「页面拒绝集 ⊆ 脚本拒绝集」。实测 10/10 |
+| M2 | 空值分支返回**原始** `value`（可能是 `"  "`）而非归一值 → `rmempty` 不认它为空，空格串被写进 UCI | 改为返回 `v`（空串） |
+| M3 | `validate_upstream` 把「该 section 全部已有值」与本次输入合并后整体判定 → 一行坏就整段报错，包括用户想用来替换坏行的那一行，形成死锁 | 只校验本次 `value` |
+| M4 | 「待应用」徽标比的是 UCI 原始 token 数与生效条数 → 有一个非法域名就永久显示「待应用」 | 改用「合法条数」比较，非法项单独红徽标列出 |
+| M5 | `%w` 不含下划线 → `both_bad=1` 被解析成 `bad = 1`，丢 `both_` 前缀 | 改 `[%w_]+` |
+| M6 | `import_lists` / `reconcile_now` 恒返回 `true` → reconcile 失败时页面仍打 ✓（违反红线 3） | 加 `exec_ok()` 扫描 ERROR/失败 |
+| M7 | `box_lines` 的 `w` 形参从未使用；单个超宽域名（AWS/CloudFront 风格）直接溢出 viewBox 被裁 | 按宽硬切并补 `…`。实测零溢出 |
+| M8 | `sync_dnsmasq_filter_aaaa` 丢弃所有 `sys.exec` 返回值，恒 `return true` → 写失败时开关显示已切换但行为未变 | 返回结构化错误码（数据层不放 UI 文案）+ 写后读回校验 |
+| M9 | 5 个配置项（`cache.enabled`/`filter_https_rr`/`import_interval`/`selftest.interval`/`intercept_doh`）无消费者却无标注；`dnschain-reconcile` 根本没有调度者 | 补「仅作记录」标注；`selftest.interval` 明说「仓库里没有定时调度」 |
+
+##### 轻微缺陷（9 项）
+
+| # | 问题 | 处置 |
+|---|---|---|
+| L1 | `_conclusion` 按**译文子串**判色（`concl:find("未监听")`）→ 非中文界面恒绿，英文界面上「国内 dnsproxy 未监听」显示成绿色 | 改按语义分支给 tone；保留关键字兜底 |
+| L2 | selftest 表格的 `name`/`detail` 未转义（同文件 `r.result`/`r.domain` 都用了 `dg.esc`），而 detail 是脚本 stdout 直通 | 套 `dg.esc` |
+| L3 | `os.date("%H:%M:%S", r.last or 0)` 对 `last=0` 渲染成 `08:00:00`，看起来像真实探测时刻 | `> 0` 才格式化，否则 `—` |
+| L4 | `STATUS_H` 恒 0 且从未被读取（死常量） | 删除 |
+| L5 | `/proc/<pid>/stat` 的 pattern 捕获第 21 字段（应第 22 = starttime），实际取到 `itrealvalue`；`uptime` 还是死变量 | 整段删除并写明理由 |
+| L6 | `M.check_domains` 注释称「自检会调用它」，实际零调用点 | 删除函数 |
+| L7 | 同一页出现「16 项检查」与「20 项检查」两个数字 | 改为 20 |
+| L8 | SVG `aria-label` 未转义（其余动态文本都过了 `esc`） | 套 `esc` |
+| L9 | controller 直接用 `nixio.fs` 而未 `require`，脱离 dispatcher 的环境会抛 nil 索引 | 显式 `require "nixio.fs"` |
+
+##### 实测排除的 3 项（不改）
+
+| 怀疑 | 实测结论 |
+|---|---|
+| S4 的 `render-dnschain-diagrams.py` 传 6 键表报 `h=478` | 那是**测试脚本传错数据**（`{ [1]=true, ... }` 占位表）。改传真实 `sample_rows()` 后与 `status_map` 完全一致 |
+| L1 英文 locale 下判色失效 | 逻辑成立但需真机切 locale 才能观察；已按语义重构，不再依赖译文 |
+| L8 翻译里是否真有双引号 | 当前中文文案无 `"`，属预防性加固 |
+
+##### 验证
+
+```
+本地：dash 8/8、shell 90+23、lua 121（新增 33 条）、图示 44（新增 6 条）、
+      契约 121、i18n 426、CI 模拟通过
+路由器：页面 HTTP 200、160KB、SVG 4、marker 0 重复、Lua 报错 0、
+        「16 项检查」已改 20、响应 1.86s
+```
+
+> **环境说明**：本轮验收时该路由器上的 SSR-Plus 处于
+> `global_server=nil` 状态（配置文件里没有任何 `servers` 节点，
+> `/etc/config/shadowsocksr` 仅 72 行、9 个 section，无订阅 URL），
+> 因此自检第 13 项「代理与分流在位」FAIL。这是**环境既有状态**
+> （AGENTS §4.2 记录的已知故障模式），与本次 Lua 改动无关 ——
+> 本轮改动只涉及页面渲染与数据读取，不可能删除 UCI 节点。
+> dnschain 框架本身正常：`:5353` 国内 OK、`:53` 国内外均 OK、
+> `nftset=23714`、cycle 自动把 4 个国外域名改道到直连（正确行为）。
+## [v0.14.3] - 2026-10-22
+
+### 运行时 shell 层深审：6 项严重 + 9 项中等缺陷修复
+
+### 运行时 shell 层深审：6 项严重 + 9 项中等缺陷修复（v0.14.3）
+
+对 `files/` 下 6 个运行时脚本（共 3887 行）做第二轮只读审查，
+逐条在路由器上实测验证后修复。**29 项报告里有 3 项经实测不成立，
+未作改动**（见末节）。
+
+##### S1 [严重] 健康探测取锁后提前返回不释放 → 改道功能永久停摆
+
+`dc_health_cycle` 原顺序是「取锁 → 检查实例就绪 → 不就绪就 `return 0`」，
+而那条 `return` **不释放锁**。
+
+daemon 是常驻进程、`$$` 恒定不变，于是：
+- 某轮撞上 dnsproxy 未监听（开机时序 / dnsproxy 被 procd 重启 / 手动 stop-start）
+  → 锁写下且永不删除
+- 后续每轮 `mkdir` 失败 → 读到 holder pid → `/proc/<pid>` 存在（就是自己）
+  → 打印「SKIP 已有一轮探测在跑」→ **永久跳过**
+
+结果：**改道功能从此完全停止**，而日志里是「正常 SKIP」、页面只是状态不再更新。
+
+实测复现（同一进程连跑 3 轮）：
+```
+第 1 轮: SKIP 本地 dnsproxy 实例未就绪（:5353 / :59999）
+   锁: 残留  pid=1641
+第 2 轮: SKIP 已有一轮探测在跑（pid=1641）
+第 3 轮: SKIP 已有一轮探测在跑（pid=1641）
+```
+
+修法：把实例就绪检查**移到取锁之前** —— 不就绪时根本没取锁，直接返回安全。
+实测修复后三轮都正确判断、锁无残留。
+
+##### S2 [严重] `grep -c || echo 0` 双输出 → nftset 自愈永不触发
+
+`grep -c` 在**无匹配**时既打印 `0`、又返回 rc=1。于是
+`n=$(grep -c PAT f || echo 0)` 得到的是**两行** `"0\n0"`：
+
+```
+$ v=$(grep -c '^nftset=' /tmp/t || echo 0); echo "[$v]"
+[0
+0]
+$ [ "$v" -eq 0 ]; echo $?
+2                     ← 算术比较报错返回假
+```
+
+后果是**判据恒假**，而它恰好只在「计数为 0」时才是关键路径：
+
+- reconcile 的「nftset 行数为 0 → 强制重建」自愈分支**永不执行**
+- `dc_prev_nftset_count` 返回脏值 → 重建窗口兜底也失效
+
+即 v0.14.1 想修的那个「代理链路整条断」故障在收敛路径上依然不自愈。
+
+修法：新增 `dc_count_lines`（awk 实现，恒输出单个整数、rc 恒 0），
+替换全仓库 6 处同类写法。
+
+##### S3 [严重] 一次配置应用重启 dnsmasq 3 次（约 9 秒中断）
+
+`reload_service` 的调用链是：
+```
+reload_service → reload_dnsmasq          （第 1 次）
+              → stop → stop_service → reload_dnsmasq（第 2 次）
+              → start → start_service → reload_dnsmasq（第 3 次）
+```
+实测一次 `/etc/init.d/dnschain reload` 期间 dnsmasq 主进程出现
+**4 个不同 PID**（6576→7704→7873→9467）。AGENTS §4.4 实测 restart 约
+3 秒完全不可用 → 一次保存断 9 秒以上。
+
+更糟的是第 2 次发生在 `stop_service` 已把分流片段写成「服务已停止」注释之后、
+`start` 重建之前 —— 那几秒 dnsmasq 跑在**没有分流片段**的状态下，
+所有国外域名走默认上游。
+
+修法：用标记文件 `/var/run/dnschain/.dnsmasq-dirty` 抑制中间步骤，
+末尾统一重启一次。
+**不能用环境变量**：procd 的 stop/start 会重新 exec，变量跨不过去
+（实测用环境变量只能减到 2 次）。
+
+##### S4 [严重] 首刷默认值把 serversfile 指到 ujail 白名单外
+
+`99-zz-dnschain:151` 写死 `/var/etc/dnschain/watch.servers`，
+而库常量与 init 的 `update_serversfile` 都用 `/var/run/dnsmasq/watch.servers`。
+
+平时 init 启动时会纠正，所以看不出来；但服务未启用、`preflight` 失败、
+或用户首刷后先看页面再启动服务时，UCI 里就是那个错路径 ——
+dnsmasq 以 uid 453 运行、读不到该目录，**既不报错也不生效**，
+改道静默失效（正是 AGENTS 约束 26 描述的症状）。
+
+修法：改为引用库常量（子 shell 取值，避免污染本脚本），并加区间校验。
+
+##### S5 [严重] stop 后 dnsmasq 仍按旧的 watch.servers 改道到已停端口
+
+`stop_service` 清掉了 health 状态、把两个片段改成注释，但**没清 `watch.servers`**，
+也没撤 `serversfile`，随后还 restart 了 dnsmasq。
+
+而 `/var/run/dnsmasq/watch.servers` 是 tmpfs 文件、不会随 stop 消失。
+stop 后重启 dnsmasq 会**重新读取**它 —— 里面若有
+`server=/github.com/127.0.0.1#5336` 而 `:5336` 已无人监听，
+这些观测域名就变成稳定解析失败。用户看到的是「关掉框架后 github 打不开了」，
+而日志干净。
+
+修法：`stop_service` 里把它清成注释占位（不删除，否则 dnsmasq 启动时读不到
+serversfile 会报错），**然后**再 restart dnsmasq —— 顺序不能反。
+
+##### S6 [严重] `dc_run_timeout` 每次成功调用泄漏一个 `.done` 文件
+
+完成标记文件只在入口 `rm -f`，但成功返回的两处都只 `wait` + `echo 0` + `return 0`，
+从不删除标记文件；而 `mktemp` 每次给新路径，入口那次删不到别人的。
+
+实测：两次 `dc_dns_class` 泄漏 2 个文件。
+健康 cycle 一轮 8 域名 × 2 链 × 最多 3 次重试 ≈ 48 次，
+daemon 每 60 秒一轮 → **每天约 7 万个空文件**堆进 tmpfs
+（/tmp 与 /var 同属内存盘），最终 `mktemp` 失败 → 探测全返回 FAIL
+→ 误判成双链都挂、页面标 both-bad。
+
+修法：成功返回前删掉标记文件。实测 10 次探测 + 完整 cycle 后零泄漏。
+
+##### 中等缺陷（9 项，全部实测确认后修复）
+
+| # | 问题 | 处置 |
+|---|---|---|
+| M2 | `dc_ssr_mode_for_profile` 读不存在的 `main.profile` → 恒返回 `"0"`；页面能选 `ssr.mode`（0/7）却**无人读**，用户选「7」被静默推翻 | 改为读 `ssr.mode`，保留 `main.profile=coexist` 兼容 |
+| M3 | 11 个页面配置项**零消费者**（`cache.size`/`lists.black_source`/`via_proxy`/`cert_verify`/`auto_rollback` 等），用户改了不生效且无从察觉 | `cache.size` → 写 `dhcp.cachesize`（uci-defaults + reconcile 双路）；`lists.black_source` → 接入归属判定；其余在页面明示「仅作记录」 |
+| M4 | 自检第 3 项对 `/var/etc/dnsmasq.conf.*` 通配，多份文件时 `grep -c` 输出 `路径:计数`，`head -1` 取到带路径的行 → 恒 FAIL | 改为从 dnsmasq 进程 argv 取真正在用的 `-C` 路径 |
+| M5 | `dc_gen_watch_servers` 建的是 `$DNSCHAIN_RUN_DIR`，却把文件 `mv` 到 `/var/run/dnsmasq/` → 后者不存在时整条启动失败 | 改为建目标文件所在目录，失败时把具体路径打进日志 |
+| M6 | `reconcile_intercept` 用 `grep '^6,'` 只匹配行首 → DNS 不是第一项时永不删除旧的明文 DNS 下发，客户机绕过整个框架 | 改为按项匹配（`tr ' ' '\n'` 后逐项判） |
+| M7 | `dc_gen_upstream_file` 不检查 `dc_gen_db_domains` 返回码，数据库缺失时静默产出 0 字节文件并报成功 | 显式检查两次，失败时写明原因（名单未就绪/生成失败） |
+| M8 | 关联数组分支（`declare -A`）在 BusyBox ash 下是死代码，且 `declare` 属 bash 专有，与「POSIX sh 兼容」声明冲突 | 删除该分支，只留 `grep -Fxf` 批量匹配一条实现 |
+| M9 | `main()` 丢弃 `reconcile_intercept` 的返回码，且该函数恒 `return 0` → commit/restart 失败时收敛器仍以 0 退出，页面「一键归一」永远报成功 | 函数内失败置非 0，`main` 取 rc |
+| M1 | 怀疑 `dc_dns_first_addr` 把 nslookup 的 Server 地址行当答案 | **实测不成立**：返回的是真实 IPv6 地址，未含 `:端口`。**未改动** |
+
+##### 清理（10 项死代码与过时注释）
+
+`DNSCHAIN_ETC_DIR`（定义后从未使用）、`dc_domain_fixed`（v0.14.0 语义矫正后的
+兼容壳，名字反而误导）、`verbose`（死变量）、`M.watch_servers_file`（无调用者
+且路径已漂移）、`dc_lists_fingerprint` 内层重复判断、`cmd_apply` 硬编码路径、
+自检指纹硬编码 gfw 路径、库头注释「禁止 local」（与全文实际用法矛盾）、
+自检头注释声称有定时任务（仓库里无任何调度）。
+
+##### 实测排除的 3 项（不改，避免无依据改动）
+
+| 怀疑 | 实测结论 |
+|---|---|
+| M1 `dc_dns_first_addr` 把 Server 行当答案 | 返回 `240e:ff:e020:99b:0:ff:b099:cff1`，是真实答案，未中招 |
+| M4 自检第 3 项恒 FAIL | 当前只有 1 份 `dnsmasq.conf.*`，未触发；但隐患真实，已按「取当前生效文件」加固 |
+| M8 `declare -A` 是否有支持 | `sh -c 'eval "declare -A x=()"'` 返回非 0 → 确认 ash 不支持，该分支确为死代码 |
+
+##### 验证
+
+```
+本地：dash 8/8、shell 90+23、lua 88、图示 38、契约 121、i18n 412、CI 模拟通过
+路由器：selftest 20/20、五条需求 54/54、页面 2.03s
+        :53/:5353/:5336 全 OK、nftset=23714、ss_spec=2
+        .done 零泄漏、锁无残留、serversfile 正确、cachesize 一致
+        nftset 归零自愈端到端验证通过（检测→重建→重启→链路 OK）
+```
+## [v0.14.2] - 2026-10-22
+
+### 全链路严谨审查：7 项缺陷修复 + 文档对齐
+
+### 全链路严谨审查：7 项缺陷修复 + 文档对齐（v0.14.2）
+
+按要求逐条梳理每个功能链路、以代码与运行结果为依据审查，
+覆盖隐性/显性 bug、边界条件、异常处理、数据一致性、视觉/UI/图表/交互。
+共确认 **7 项缺陷**（2 项严重），另清理 3 处死代码与 1 处重复实现。
+
+##### 一、[严重] 页面「清空全部缓存」完全无效
+
+`flush_cache()` 在 Lua 侧用 `pidof dnsmasq | awk '{print $1}'` 取 PID，
+而 `pidof dnsmasq` 返回 **3 个** PID，第一个是 **ujail 辅助子进程**：
+
+```
+PID 21400  wchan=anon_pipe_read   fds=5   socket:53=0    ← 被选中（错）
+PID 21368  wchan=poll_schedule…   fds=36  socket:53=25   ← 真正干活的
+PID 21331  wchan=do_epoll_wait    fds=7   socket:53=1
+```
+
+对它 SIGHUP 是**空操作** —— 按钮点了完全无效，页面却照样报
+「已清空 dnsmasq 缓存（零中断）」。这是典型的静默失效。
+
+而库里的 `dc_flush_cache` 早已用 `dc_dnsmasq_pid`（按 `:53` socket inode
+反查）正确实现，却**没有 CLI 入口**，成了死代码 —— 同一功能写了两份，
+其中一份是错的。
+
+修法：补 `dnschain-health flush` 子命令，Lua 只调它。实测输出
+`已发送 SIGHUP 清空 dnsmasq 缓存 (pid=21368)`，dnsmasq 未受影响、`:53` 正常。
+
+##### 二、[严重] 判定链路图渲染两次 → 5 组 marker id 重复
+
+实测页面 HTML：`id="dcrt-a-ok"` 等 **5 个 id 各出现 2 次**。
+
+根因：`dg.route_map()` 被渲染**两次** —— 概览 tab 的「分流决策」与
+域名 tab 的「走法」。CBI 的 tab 是 CSS 隐藏、**不是懒加载**，
+两个 tab 的内容都进同一份 HTML，而 SVG id 是**文档级全局**的。
+
+后果：`url(#dcrt-a-ok)` 全部解析到**第一个**定义。当前两图配色恰好相同
+所以看不出异常，但一旦一处改了色，箭头颜色就静默串掉，浏览器不报错。
+
+修法：`route_map` / `status_map` 支持 `id_prefix` 参数，两处调用分别传
+`dcrt-ov` / `dcrt-dm`。实测修复后 15 个 marker id 全部唯一。
+
+##### 三、[中等] selftest 缓存指纹覆盖不足 → 改配置后 60 秒内报旧结论
+
+原指纹只含端口/进程/`ss_spec`/开关，漏了三类：
+`filter_aaaa`、`ipv6_support`、gfw 行数、上游列表。
+症状是「改完配置看自检，还是旧结论」，用户以为改动没生效。
+
+修法：补全指纹。实测改 `filter_aaaa` 后指纹从 `...|0|1|...` 变为
+`...|1|1|...`，缓存自动失效并重跑（0.30s → 3.16s）。
+
+顺带修掉一个取错 section 名的 bug：`dc_get_list upstream server` 返回空
+（UCI 里是 `config upstream 'cn'` / `'foreign'`，类型是 upstream、
+名字是 cn/foreign），导致上游变化完全检测不到。
+
+##### 四、[中等] tab 切换不处理滚动 → 长 tab 切短 tab 后停在空白处
+
+各 tab 高度差数倍（分流约 3000px、概览约 900px）。`activate()` 只切
+`hidden` 不管滚动，从长 tab 滚到底再切短 tab 时 `scrollY` 仍停在旧值，
+新内容早已在视口上方，屏幕只剩页脚。
+
+修法：新内容顶部若已跑到视口上方，滚回 tab 栏位置（留 8px 边距）；
+只在这种情况下才动，避免打断用户在同高度 tab 间的小幅滚动。
+
+##### 五、[中等] 状态写盘重复实现 + 并发无锁
+
+`dc_health_write` 与 `dc_health_write_keep_last` 各复制了一整段
+「读旧文件 → awk 过滤同域名 → printf 追加 → mv」，只差 `last` 取值。
+两份同样的写盘逻辑，改一处忘另一处就会写出格式不同的状态文件，
+而 `status`/页面都按 7 字段解析。
+
+另：`dc_health_cycle` 无互斥锁。daemon 每 `interval` 秒跑一轮，
+页面「立即探测一轮」随时可触发，并发时后完成的进程会用少了对方新增行的
+副本覆盖 → 状态文件丢行。
+
+修法：
+- 抽出 `dc_health_upsert` 作为唯一写盘实现（瘦身 33 行）
+- 加 `mkdir` 原子锁 + 死锁自动清理（`kill -9` 后锁残留能自愈）
+
+实测 3 个并发 cycle：1 个执行、2 个正确跳过，状态 8 行无重复，锁无残留；
+`kill -9` 中断后下一轮自动清理死锁。
+
+##### 六、[轻微] `preflight` 变量未 `local` + 编号重复
+
+`_dot_bad` 未在函数首行 `local` 列表里 → 污染全局。注释编号有两个「4.」。
+已修正（编号 1~5 连续）。
+
+##### 七、[清理] 死代码与重复
+
+| 项 | 处置 |
+|---|---|
+| `dc_sleep_tick` / `dc_ticks_per_sec` | 删除（紧密轮询改造后已成死代码） |
+| `dc_flush_cache` | 补 CLI 入口后复活（见第一节） |
+| `dnschain_die` | 保留（错误处理基础设施） |
+
+`dnschain.sh` 从 1894 行降到 1861 行。
+
+##### 八、实测排除的「疑似 bug」（不改，避免无依据改动）
+
+| 怀疑 | 实测结论 |
+|---|---|
+| `dc_domain_valid` 用 `set --` 会污染调用者位置参数 | **不会**。POSIX sh 函数有独立位置参数作用域，实测调用前后 `$#` 与 `$1` 不变 |
+| `dc_domain_valid` 改 `IFS` 后中途 `return` 会泄漏 | **不会**。`IFS=.` 与 `IFS=$_oifs` 在连续三行内完成，之后才可能 `return` |
+| 空数据时 `status_map` 产出非法 SVG | **不会**。输出合法（无 NaN/nil） |
+| 超长域名（180 字符）文字溢出框 | **不会**。`wrap_text` 正确换行，溢出 0 处 |
+| 含 `& < >` 的域名破坏 SVG | **不会**。转义正确 |
+| CBI `depends` 目标字段不存在 | **不会**。只有 `enabled`/`auto_attach` 两个目标，都在同 section 且先定义 |
+
+##### 九、文档对齐（用户要求第 3 项）
+
+实测发现 **4 类文档漂移**，全部修正：
+
+| 文档 | 漂移 | 修正 |
+|---|---|---|
+| `AGENTS.md` | 契约断言 99 条（实际 119）、lua 83 条（88）、图示 30 条（38）、自检 16 项（20） | 全部更新；并新增硬约束 33~37（清缓存 PID / 互斥锁 / 单点写盘 / 缓存指纹 / tab 滚动） |
+| `docs/adr/0006` | 场景 E 仍写「状态 fixed:OK，永不改道」—— 正是 v0.14.0 已废除的语义 | 改写为「照常参与改道」并附完整矫正说明与实测轨迹 |
+| `docs/adr/0004` | 两处「自检 16 项」 | 改为 20 项 |
+| `docs/adr/0003` | G5 事务与 §9 步骤里的「16 项自检」 | 改为 20 项 |
+| `docs/adr/0005` | 验证步骤「自检 16 项全绿」 | 改为 20 项 |
+| `GLOSSARY.md` | 「策略过滤器 `:5335` chinadns-ng」「4 跳」「档案 `:5335/:5337`」均已作废；**缺**归属/首选/当前三个核心概念 | 重写为双实例架构；跳数改 3 跳；补 5 个术语（归属/首选/当前/改道/补全归属） |
+
+> CHANGELOG 里历史条目的「16 项」保留 —— 那是当时的事实记录，
+> 不应改写历史。
+
+##### 十、复测
+
+```
+本地：dash 8/8、shell 89+23、lua 88、图示 38、契约 119、i18n 409、CI 模拟通过
+路由器：selftest 20/20、五条需求 54/54、页面响应 2.08s
+        页面结构：SVG 4 个、marker 15 个全唯一、嵌套 form 1 个、Lua 报错 0
+        flush 实测发到 pid=21368（正确），dnsmasq 未受影响
+```
+## [v0.14.1] - 2026-10-22
+
+### 页面响应慢 + 操作 ssrplus 后国外链路断
+
+### 页面响应慢 + 操作 ssrplus 后国外链路断（v0.14.1）
+
+用户报告两个 bug：
+① 切换 `dns_chain` 页面响应时间太长；
+② 操作 ssrplus 页面后国外链路不通，自检第 10/11/13 项 FAIL
+（`国外 A 正确` / `国外 AAAA 保留` / `代理与分流在位`）。
+
+##### 一、国外链路断：nftset 行被静默清空
+
+**根因**：在 SSR-Plus 页面点「保存并应用」时，ssrplus 会重建规则，
+`ss_spec` 表在重建窗口内**短暂消失**。若 `dnschain` 恰好在此窗口跑
+`apply`，`dc_nftset_exists` 对所有集合都返回假 →
+**23714 条 `server=` 照写、但 `nftset=` 一条都不写**。
+
+后果链条（这是最难定位的地方，日志完全干净）：
+
+```
+server=/域名/127.0.0.1#5336    ← 国外域名仍能解析（正常）
+（缺 nftset=）                  ← 解析出的 IP 不进 blacklist 集合
+→ 流量不命中 ss_spec_wan_ac
+→ 不走代理
+→ 国外链路整条断掉
+```
+
+实测证据：`dnschain-health apply` 输出 `SPLIT=23714 0`
+（前半是 server= 条数，后半是 nftset 条数）。
+
+**修法（两层保护）**：
+
+| 层 | 位置 | 行为 |
+|---|---|---|
+| 生成时兜底 | `dc_gen_dnsmasq_split` | 探测不到集合时，若上一版片段**有** nftset 行且 `ss_spec` 整体不在 → 沿用上一版行，记一条警告。区分「SSR-Plus 从未启用」（保持不写）与「正在重建」（保留） |
+| reconcile 自愈 | `dnschain-reconcile` | 重建后若 `ss_spec` 在而 nftset 为 0 → 强制再生成一次；行数下降也告警 |
+
+同时新增 `dc_ss_spec_present()`（查表而非查集合）——
+这是区分「重建中」与「未启用」的唯一可靠判据。
+
+**验证**：删掉 `ss_spec` 后跑 apply，nftset 仍为 23714（兜底生效）；
+恢复后跑 reconcile，自动修复到 23714。
+
+##### 二、页面响应 5.6 秒 → 1.96 秒
+
+逐层定位到 4 个真实瓶颈（每一层都单独实测过）：
+
+| # | 瓶颈 | 实测 | 修法 |
+|---|---|---|---|
+| 1 | `health_rows` 与 `health_summary` **各自**跑一次 `dnschain-health status` | 各 1.67s，白跑两遍 | 新增 `health_status_raw()` 共用一次调用 |
+| 2 | `dc_domain_class` 对每级标签各 `grep` 一次 23715 行名单 | 单域名 0.06s | 改「一次 grep 批量比对所有候选后缀」 |
+| 3 | `dc_run_timeout` 每 tick `sleep 1`（BusyBox sleep 只支持整数） | nslookup 仅 0.02s，却被拖满 1 秒 | 改「紧密轮询 + 每 2000 转才 sleep 1 秒」 |
+| 4 | selftest 20 项含 4 处真实 DNS 查询，页面每次刷新都跑 | 3.5s | 加 60 秒磁盘缓存 + 失效指纹 |
+
+**第 3 条的排查过程值得记**：先怀疑 `sleep 0.1` 可用（OpenWrt 常开
+FANCY_SLEEP），实测 `sleep 0.05` / `sleep 0.1` **都失败**；
+`read -t 0.1` 报 `invalid timeout`；`usleep` 不存在。
+即 **BusyBox 拿不到亚秒粒度**。所以不能靠缩短 tick，
+只能让「快路径不付等待代价」——紧密轮询到命令完成即返回。
+
+##### 三、过程中发现并修掉的 4 个实现级 bug
+
+| bug | 症状 | 根因 |
+|---|---|---|
+| 缓存永不命中 | 第二次仍跑 3.5s | BusyBox **没有 `stat` 命令**，`stat -c %Y` 恒为空 → 改 `date -r` |
+| SUMMARY 行消失 | 验收脚本报「自检有失败: 」（空值） | 改成 `_DC_BODY=$(check_all)` 捕获输出后，漏了 `main` 原本单独打印的 SUMMARY |
+| SUMMARY 全是 0 | `SUMMARY PASS=0 FAIL=0` | `PASS_CNT` 等计数在 `check_all` 的子 shell 里，父 shell 读到 0 → 改从捕获文本统计 |
+| `selftest` 函数被破坏 | `Syntax error: word unexpected` | 用正则批量替换时 PowerShell 把 `$_body` 当变量插值 → 改用 Python 按文本块精确替换 |
+
+##### 四、复测
+
+```
+页面响应（真实登录，3 次）：1.99s / 1.97s / 1.96s   （原 5.6s，-65%）
+自检：首次 2.76s（无缓存）、第二次 0.23s（命中缓存）
+       SUMMARY PASS=20 FAIL=0 SKIP=0，CONCLUSION: 链路正常
+五条需求验收：PASS=54 FAIL=0
+国外链路：:5353 baidu=OK、:5336 google=OK
+          ss_spec=2、nftset=23714
+
+本地：dash 8/8、shell 89+23、lua 88、图示 35、契约 112、i18n 409、CI 模拟通过
+```
+
+**缓存正确性单独验证**（关键：缓存不能掩盖故障）：
+停掉 v2ray → 指纹从 `5353|5336|4040|4041|1|1|1` 变为
+`...|0|0|1` → 缓存自动失效并重跑 → 准确报出用户描述的那三项 FAIL。
+恢复后回到 20/20。
+## [v0.14.0] - 2026-10-22
+
+### 语义矫正（自定义=补全归属）与 UI 去重
+
+### 语义矫正与 UI 去重（v0.14.0）
+
+用户指出两件事：
+① 全链路检查所有功能与页面组件，移除合并重合重复的；
+② 「国内/国外域名」输入框**只作为补全追加到数据库而不是直接改道**，
+由 dnsmasq 与 dnsproxy 判断分流；针对数据库未覆盖的域名实现健康检测
+与自动改道；③ 明确默认策略（国外不通改直连、国内不通改代理）。
+
+##### 一、最关键的矫正：自定义列表不是「改道开关」
+
+旧实现把自定义域名当 `fixed`：命中就写 `fixed:` 状态并 `continue`
+**跳过整个改道判定**。注释写的是「你写的就是最终答案」。
+
+这与需求直接冲突。需求说自定义只「补全归属」，而改道针对
+「数据库未覆盖的域名」—— 补全归属**正是**给未覆盖域名定归属，
+它必须继续参与改道，否则用户显式补全的域名反而失去了自动恢复能力。
+
+| 位置 | 旧行为 | 新行为 |
+|---|---|---|
+| `dc_health_cycle` | 命中自定义 → `continue` 跳过改道 | 与其它域名同一套判定，不设例外 |
+| `dc_domain_fixed` | 表示「不参与改道」 | 改名 `dc_domain_custom`，只表示「归属由用户补全」 |
+| `dc_explain_domain` | `decision=fixed`（不改道） | 走同一套判定；输出 `CUSTOM=1` 标注归属来源 |
+| `dnschain-health status` | `fixed` 独占一档 | 删除该档；自定义域名归入 ok/degraded/rerouted/both-bad，汇总用 `custom=<n>` 标注来源 |
+| 页面「参与改道」行 | 显示「否（自定义固定）」 | 改为「归属来源：自定义补全 / 数据库·未覆盖」 |
+
+**为什么旧实现的问题比「行为不对」更严重**：`fixed` 档抢在探测结果之前
+判定，于是自定义域名的真实状态被永久吞掉 —— 页面看不出它是否健康，
+汇总的 normal/rerouted/both_bad 也少算了它们，总数对不上。
+
+##### 二、实测中发现并修掉的真实缺陷：观测基准集被压成一行
+
+矫正后自检第 18 项 FAIL（`PASS=19 FAIL=1`）：
+`github.com` 同时出现在静态片段与 `servers-file` 里。
+
+根因在 `dc_watch_list` 的种子集回退：
+
+```sh
+DNSCHAIN_WATCH_SEED="a.com b.com c.com d.com
+                     e.com f.com g.com h.com"
+printf '%s\n' "$DNSCHAIN_WATCH_SEED" | while read -r d; ...
+```
+
+`printf '%s\n' "$VAR"` 把整个变量当**一个参数** → 8 个域名被压成
+2 行、每行 4 个用空格连起来 → `dc_watch_list` 输出 2 行多域名 →
+静态片段用 `grep -Fvxf`（逐行精确匹配）排除时**排除不掉** →
+同一域名两处 `server=` → dnsmasq 当候选 → **改道退化成随机走一条**。
+
+修法：种子集改多行字面量 + `printf '%s\n' $VAR`（不加引号，逐词输出）。
+实测 SPLIT 从 23715 → 23714（排除掉重复的那个），自检回到 20/20。
+
+##### 三、UI 去重（浏览器逐按钮测量后发现 3 处）
+
+| 重复 | 现象 | 处置 |
+|---|---|---|
+| 两个「自定义域名」section | 标题完全相同，用户分不清哪个是国内 | 改为「自定义域名 · 国内（补全归属）」/「· 国外（补全归属）」，同步 `SECTION_TAB` |
+| 「校验自定义列表」按钮 | 与保存时的两道校验（页面 `validate_domain` + 脚本 `dc_domain_valid`）完全重复 | 删除按钮；`check` 子命令保留（自检第 18 项仍在用） |
+| 两个「保存并应用」 | 页面底部 CBI 自动生成的 + 「域名操作」里的，同名同观感 | 后者改名「重建分流规则并生效」并写明与「保存」的区别 |
+
+##### 四、补上一个真实缺陷：底部「保存并应用」其实等于「保存」
+
+`Map` 未定义 `apply_on_parse`，于是 CBI 底部的「保存并应用」与「保存」
+行为完全相同 —— 用户点「保存并应用」后以为分流已生效，但静态片段
+根本没重建，页面上「待应用」徽标还在。
+
+已补 `m.apply_on_parse`，调 `ds.apply_domains()`。
+其中 MD5 比对保证「只改阈值」这类无关字段时**不会**白断 3 秒
+（实测：改 `timeout` 后 `DNSMASQ=unchanged`，片段 MD5 未变）。
+
+##### 五、端到端实测（自定义域名确实参与改道）
+
+用 `nft` 阻断 `lo → :5353` 制造真实故障，观测域名设为
+`www.baidu.com` 并放进自定义国内列表：
+
+```
+基线      CLASS=custom-domestic  CUSTOM=1   domestic  ok
+注入故障  轮1  domestic   fail=1  probe:TIMEOUT   degraded
+          轮2  foreign    switch:TIMEOUT->OK      rerouted   ← 改道成功
+撤销故障  轮1-2 foreign   recover-wait:OK        rerouted
+          轮3  domestic   recover:OK              ok         ← 回切成功
+```
+
+`min_dwell=120s` 在测试窗口内是把该值临时设为 0 才观察到的 ——
+它是防抖设计，不是阻塞缺陷（复测时把 `recover_threshold` 设为 2、
+`min_dwell` 设为 0 后两轮即回切）。
+
+##### 六、复测
+
+```
+本地：dash 8/8、shell 89+23、lua 88、图示 35、契约 106、i18n 409、JS 通过
+路由器：selftest 20/20、五条需求 54/54、页面渲染 15/15（HTTP 200 / 152 KB）
+
+浏览器实测（真实登录）：
+  可见 section：自定义域名 · 国内（补全归属） / · 国外（补全归属） /
+                判定链路 / 改道状态 / 改道明细 / 观测与阈值 / 域名操作
+  按钮重复：仅剩「保存」×2（CBI 页头+页脚固有，非本包引入）
+```
+## [v0.13.2] - 2026-10-22
+
+### 改道状态导图的文字溢出与显示不全
+
+### 改道状态导图的文字溢出与显示不全（v0.13.2）
+
+用户反馈：「修复改道状态的思维导图样式 bug，内容显示不全和内容显示超出
+边界的 bug」。浏览器逐框测量后确认是**两个独立缺陷**。
+
+**缺陷 1：内容超出边界（文字画到框外）**
+
+`box()` 画完 `<rect>` 就直接写 `<text>`，**从不检查文字宽度**。
+而 SVG 的 `<text>` 既不会自动换行，也不会把框撑大 —— 超宽就直接画到框外。
+
+实测（真实登录、真实 DOM，`getBBox()` 逐条比对）：
+
+```
+「两条链都不通 → 先查 dnsproxy 与代理」
+   文字右缘 390  >  框右缘 370   → 溢出 20px
+```
+
+框宽 `NW2=180` 硬编码，内容区只有 `180 − 24(左内边距) − 12(右)` = **144px**，
+而该 hint 是 19 个全角字符 ≈ 190px。
+
+**缺陷 2：内容显示不全（长清单被截断）**
+
+右侧域名清单按「52 个宽度单位」硬编码折行 —— 那个数字与真实框宽无关。
+框变宽后仍按旧值折，白白浪费空间；框变窄时又会溢出。
+
+**修法：引入文本度量 + 折行 + 按内容算框宽**
+
+| 改动 | 说明 |
+|---|---|
+| 新增 `char_em()` / `text_w()` | 估算像素宽度：CJK 1.0em、ASCII 0.55em、其余 0.6em。偏保守（宁大不小） |
+| 新增 `wrap_text()` | 按像素宽度折行，优先在「、，→；·/」后断开 |
+| 新增 `box_lines()` | 把一段长文本折成多行画进框内 |
+| `NW2` 改为**按最长行计算** | 下限仍 180，但内容更长时自动加宽（实测 189） |
+| `NH` 改为**按 hint 行数计算** | 60 → 73（两行 hint 时） |
+| 清单折行改用 `text_w(…, 11) > NW3` | 与真实框宽挂钩，不再用魔数 52 |
+
+**同时修掉两个实现级 bug（都很隐蔽）**
+
+1. **`wrap_text` 里残留 `i = i + len`**：这段来自更早的 `while` 循环，
+   改成 `for` 后 `i` 从未定义，`len` 也随之失效 → 断点判断永不触发 →
+   **永不折行**。而「不溢出」仍然成立（因为框被撑宽了）——
+   所以只测溢出的断言抓不到它。
+2. **`utf8.codes` 在 Lua 5.1 不存在**：LuCI 在 OpenWrt 上跑的是 **Lua 5.1**，
+   `utf8` 库是 5.3+ 才有。本地 lupa 是 5.4，于是「本地全绿、路由器 500」。
+   改为自带 `utf8_iter()`，不依赖标准库版本。
+
+**为什么原有的几何断言全部通过**
+
+`tools/render-dnschain-diagrams.py` 原来只查三件事：
+节点互不重叠、不超出 viewBox、说明文字不压住节点框。
+**文字溢出框但仍在 viewBox 内**时，三条全部成立 —— 这正是漏网的原因。
+
+**新增两条断言，并各自做了反向验证（用旧参数构造样本，确认会 FAIL）**
+
+| 断言 | 判据 | 反向验证 |
+|---|---|---|
+| `check_text_inside_boxes` | 框内每条 `<text>` 的估算右缘 ≤ 框右缘 − 6px | 旧参数 → 报「超出 32 px」✓ |
+| `check_hint_wrapped` | 存在框内 ≥2 行 10px 文本（证明折行真的生效） | 单行样本 → 报「未折行」✓ |
+
+第二条是必要的：只测溢出的话，**把框加宽到刚好容下长文本也能通过**，
+但那会把宽度预算从右侧域名清单抢走，清单反而被截断。
+
+**复测（2026-10-22）**
+
+```
+本地：dash 8/8、shell 90+23、lua 88、图示 35、契约 99、i18n 413、JS 通过
+路由器：selftest 20/20、五条需求 54/54、页面渲染 15/15
+
+浏览器逐框实测（正余量 = 未溢出）：
+  框 #1 189×73  正常 / 8 个域名 / 首选链路可达       rightGap 100  bottomGap 18
+  框 #2 189×73  双链故障 / 0 个域名 / 两条链都不通 → 先查 dnsproxy （rightGap 18）
+                / 与代理                              bottomGap 5
+  溢出 0 处，超出 viewBox 0 处
+```
+
 ## [v0.13.0] - 2026-10-22
 
 ### 新增 — 域名归属控制与链路健康自动改道
@@ -317,779 +1112,6 @@ OpenWrt 24.10.5 实测才暴露出来的问题。记在这里是因为每一条�
 域名页 SVG：域名判定链路图 720×520 / 改道状态思维导图 760×190
 改道通道    ：已就绪 /var/run/dnsmasq/watch.servers
 自动改道进程：运行中 pid 31483 · 每 60 秒一轮 · 上次探测 26 秒前
-```
-
-#### 十五、改道状态导图的文字溢出与显示不全（v0.13.2）
-
-用户反馈：「修复改道状态的思维导图样式 bug，内容显示不全和内容显示超出
-边界的 bug」。浏览器逐框测量后确认是**两个独立缺陷**。
-
-**缺陷 1：内容超出边界（文字画到框外）**
-
-`box()` 画完 `<rect>` 就直接写 `<text>`，**从不检查文字宽度**。
-而 SVG 的 `<text>` 既不会自动换行，也不会把框撑大 —— 超宽就直接画到框外。
-
-实测（真实登录、真实 DOM，`getBBox()` 逐条比对）：
-
-```
-「两条链都不通 → 先查 dnsproxy 与代理」
-   文字右缘 390  >  框右缘 370   → 溢出 20px
-```
-
-框宽 `NW2=180` 硬编码，内容区只有 `180 − 24(左内边距) − 12(右)` = **144px**，
-而该 hint 是 19 个全角字符 ≈ 190px。
-
-**缺陷 2：内容显示不全（长清单被截断）**
-
-右侧域名清单按「52 个宽度单位」硬编码折行 —— 那个数字与真实框宽无关。
-框变宽后仍按旧值折，白白浪费空间；框变窄时又会溢出。
-
-**修法：引入文本度量 + 折行 + 按内容算框宽**
-
-| 改动 | 说明 |
-|---|---|
-| 新增 `char_em()` / `text_w()` | 估算像素宽度：CJK 1.0em、ASCII 0.55em、其余 0.6em。偏保守（宁大不小） |
-| 新增 `wrap_text()` | 按像素宽度折行，优先在「、，→；·/」后断开 |
-| 新增 `box_lines()` | 把一段长文本折成多行画进框内 |
-| `NW2` 改为**按最长行计算** | 下限仍 180，但内容更长时自动加宽（实测 189） |
-| `NH` 改为**按 hint 行数计算** | 60 → 73（两行 hint 时） |
-| 清单折行改用 `text_w(…, 11) > NW3` | 与真实框宽挂钩，不再用魔数 52 |
-
-**同时修掉两个实现级 bug（都很隐蔽）**
-
-1. **`wrap_text` 里残留 `i = i + len`**：这段来自更早的 `while` 循环，
-   改成 `for` 后 `i` 从未定义，`len` 也随之失效 → 断点判断永不触发 →
-   **永不折行**。而「不溢出」仍然成立（因为框被撑宽了）——
-   所以只测溢出的断言抓不到它。
-2. **`utf8.codes` 在 Lua 5.1 不存在**：LuCI 在 OpenWrt 上跑的是 **Lua 5.1**，
-   `utf8` 库是 5.3+ 才有。本地 lupa 是 5.4，于是「本地全绿、路由器 500」。
-   改为自带 `utf8_iter()`，不依赖标准库版本。
-
-**为什么原有的几何断言全部通过**
-
-`tools/render-dnschain-diagrams.py` 原来只查三件事：
-节点互不重叠、不超出 viewBox、说明文字不压住节点框。
-**文字溢出框但仍在 viewBox 内**时，三条全部成立 —— 这正是漏网的原因。
-
-**新增两条断言，并各自做了反向验证（用旧参数构造样本，确认会 FAIL）**
-
-| 断言 | 判据 | 反向验证 |
-|---|---|---|
-| `check_text_inside_boxes` | 框内每条 `<text>` 的估算右缘 ≤ 框右缘 − 6px | 旧参数 → 报「超出 32 px」✓ |
-| `check_hint_wrapped` | 存在框内 ≥2 行 10px 文本（证明折行真的生效） | 单行样本 → 报「未折行」✓ |
-
-第二条是必要的：只测溢出的话，**把框加宽到刚好容下长文本也能通过**，
-但那会把宽度预算从右侧域名清单抢走，清单反而被截断。
-
-**复测（2026-10-22）**
-
-```
-本地：dash 8/8、shell 90+23、lua 88、图示 35、契约 99、i18n 413、JS 通过
-路由器：selftest 20/20、五条需求 54/54、页面渲染 15/15
-
-浏览器逐框实测（正余量 = 未溢出）：
-  框 #1 189×73  正常 / 8 个域名 / 首选链路可达       rightGap 100  bottomGap 18
-  框 #2 189×73  双链故障 / 0 个域名 / 两条链都不通 → 先查 dnsproxy （rightGap 18）
-                / 与代理                              bottomGap 5
-  溢出 0 处，超出 viewBox 0 处
-```
-
-#### 十六、语义矫正与 UI 去重（v0.14.0）
-
-用户指出两件事：
-① 全链路检查所有功能与页面组件，移除合并重合重复的；
-② 「国内/国外域名」输入框**只作为补全追加到数据库而不是直接改道**，
-由 dnsmasq 与 dnsproxy 判断分流；针对数据库未覆盖的域名实现健康检测
-与自动改道；③ 明确默认策略（国外不通改直连、国内不通改代理）。
-
-##### 一、最关键的矫正：自定义列表不是「改道开关」
-
-旧实现把自定义域名当 `fixed`：命中就写 `fixed:` 状态并 `continue`
-**跳过整个改道判定**。注释写的是「你写的就是最终答案」。
-
-这与需求直接冲突。需求说自定义只「补全归属」，而改道针对
-「数据库未覆盖的域名」—— 补全归属**正是**给未覆盖域名定归属，
-它必须继续参与改道，否则用户显式补全的域名反而失去了自动恢复能力。
-
-| 位置 | 旧行为 | 新行为 |
-|---|---|---|
-| `dc_health_cycle` | 命中自定义 → `continue` 跳过改道 | 与其它域名同一套判定，不设例外 |
-| `dc_domain_fixed` | 表示「不参与改道」 | 改名 `dc_domain_custom`，只表示「归属由用户补全」 |
-| `dc_explain_domain` | `decision=fixed`（不改道） | 走同一套判定；输出 `CUSTOM=1` 标注归属来源 |
-| `dnschain-health status` | `fixed` 独占一档 | 删除该档；自定义域名归入 ok/degraded/rerouted/both-bad，汇总用 `custom=<n>` 标注来源 |
-| 页面「参与改道」行 | 显示「否（自定义固定）」 | 改为「归属来源：自定义补全 / 数据库·未覆盖」 |
-
-**为什么旧实现的问题比「行为不对」更严重**：`fixed` 档抢在探测结果之前
-判定，于是自定义域名的真实状态被永久吞掉 —— 页面看不出它是否健康，
-汇总的 normal/rerouted/both_bad 也少算了它们，总数对不上。
-
-##### 二、实测中发现并修掉的真实缺陷：观测基准集被压成一行
-
-矫正后自检第 18 项 FAIL（`PASS=19 FAIL=1`）：
-`github.com` 同时出现在静态片段与 `servers-file` 里。
-
-根因在 `dc_watch_list` 的种子集回退：
-
-```sh
-DNSCHAIN_WATCH_SEED="a.com b.com c.com d.com
-                     e.com f.com g.com h.com"
-printf '%s\n' "$DNSCHAIN_WATCH_SEED" | while read -r d; ...
-```
-
-`printf '%s\n' "$VAR"` 把整个变量当**一个参数** → 8 个域名被压成
-2 行、每行 4 个用空格连起来 → `dc_watch_list` 输出 2 行多域名 →
-静态片段用 `grep -Fvxf`（逐行精确匹配）排除时**排除不掉** →
-同一域名两处 `server=` → dnsmasq 当候选 → **改道退化成随机走一条**。
-
-修法：种子集改多行字面量 + `printf '%s\n' $VAR`（不加引号，逐词输出）。
-实测 SPLIT 从 23715 → 23714（排除掉重复的那个），自检回到 20/20。
-
-##### 三、UI 去重（浏览器逐按钮测量后发现 3 处）
-
-| 重复 | 现象 | 处置 |
-|---|---|---|
-| 两个「自定义域名」section | 标题完全相同，用户分不清哪个是国内 | 改为「自定义域名 · 国内（补全归属）」/「· 国外（补全归属）」，同步 `SECTION_TAB` |
-| 「校验自定义列表」按钮 | 与保存时的两道校验（页面 `validate_domain` + 脚本 `dc_domain_valid`）完全重复 | 删除按钮；`check` 子命令保留（自检第 18 项仍在用） |
-| 两个「保存并应用」 | 页面底部 CBI 自动生成的 + 「域名操作」里的，同名同观感 | 后者改名「重建分流规则并生效」并写明与「保存」的区别 |
-
-##### 四、补上一个真实缺陷：底部「保存并应用」其实等于「保存」
-
-`Map` 未定义 `apply_on_parse`，于是 CBI 底部的「保存并应用」与「保存」
-行为完全相同 —— 用户点「保存并应用」后以为分流已生效，但静态片段
-根本没重建，页面上「待应用」徽标还在。
-
-已补 `m.apply_on_parse`，调 `ds.apply_domains()`。
-其中 MD5 比对保证「只改阈值」这类无关字段时**不会**白断 3 秒
-（实测：改 `timeout` 后 `DNSMASQ=unchanged`，片段 MD5 未变）。
-
-##### 五、端到端实测（自定义域名确实参与改道）
-
-用 `nft` 阻断 `lo → :5353` 制造真实故障，观测域名设为
-`www.baidu.com` 并放进自定义国内列表：
-
-```
-基线      CLASS=custom-domestic  CUSTOM=1   domestic  ok
-注入故障  轮1  domestic   fail=1  probe:TIMEOUT   degraded
-          轮2  foreign    switch:TIMEOUT->OK      rerouted   ← 改道成功
-撤销故障  轮1-2 foreign   recover-wait:OK        rerouted
-          轮3  domestic   recover:OK              ok         ← 回切成功
-```
-
-`min_dwell=120s` 在测试窗口内是把该值临时设为 0 才观察到的 ——
-它是防抖设计，不是阻塞缺陷（复测时把 `recover_threshold` 设为 2、
-`min_dwell` 设为 0 后两轮即回切）。
-
-##### 六、复测
-
-```
-本地：dash 8/8、shell 89+23、lua 88、图示 35、契约 106、i18n 409、JS 通过
-路由器：selftest 20/20、五条需求 54/54、页面渲染 15/15（HTTP 200 / 152 KB）
-
-浏览器实测（真实登录）：
-  可见 section：自定义域名 · 国内（补全归属） / · 国外（补全归属） /
-                判定链路 / 改道状态 / 改道明细 / 观测与阈值 / 域名操作
-  按钮重复：仅剩「保存」×2（CBI 页头+页脚固有，非本包引入）
-```
-
-#### 十七、页面响应慢 + 操作 ssrplus 后国外链路断（v0.14.1）
-
-用户报告两个 bug：
-① 切换 `dns_chain` 页面响应时间太长；
-② 操作 ssrplus 页面后国外链路不通，自检第 10/11/13 项 FAIL
-（`国外 A 正确` / `国外 AAAA 保留` / `代理与分流在位`）。
-
-##### 一、国外链路断：nftset 行被静默清空
-
-**根因**：在 SSR-Plus 页面点「保存并应用」时，ssrplus 会重建规则，
-`ss_spec` 表在重建窗口内**短暂消失**。若 `dnschain` 恰好在此窗口跑
-`apply`，`dc_nftset_exists` 对所有集合都返回假 →
-**23714 条 `server=` 照写、但 `nftset=` 一条都不写**。
-
-后果链条（这是最难定位的地方，日志完全干净）：
-
-```
-server=/域名/127.0.0.1#5336    ← 国外域名仍能解析（正常）
-（缺 nftset=）                  ← 解析出的 IP 不进 blacklist 集合
-→ 流量不命中 ss_spec_wan_ac
-→ 不走代理
-→ 国外链路整条断掉
-```
-
-实测证据：`dnschain-health apply` 输出 `SPLIT=23714 0`
-（前半是 server= 条数，后半是 nftset 条数）。
-
-**修法（两层保护）**：
-
-| 层 | 位置 | 行为 |
-|---|---|---|
-| 生成时兜底 | `dc_gen_dnsmasq_split` | 探测不到集合时，若上一版片段**有** nftset 行且 `ss_spec` 整体不在 → 沿用上一版行，记一条警告。区分「SSR-Plus 从未启用」（保持不写）与「正在重建」（保留） |
-| reconcile 自愈 | `dnschain-reconcile` | 重建后若 `ss_spec` 在而 nftset 为 0 → 强制再生成一次；行数下降也告警 |
-
-同时新增 `dc_ss_spec_present()`（查表而非查集合）——
-这是区分「重建中」与「未启用」的唯一可靠判据。
-
-**验证**：删掉 `ss_spec` 后跑 apply，nftset 仍为 23714（兜底生效）；
-恢复后跑 reconcile，自动修复到 23714。
-
-##### 二、页面响应 5.6 秒 → 1.96 秒
-
-逐层定位到 4 个真实瓶颈（每一层都单独实测过）：
-
-| # | 瓶颈 | 实测 | 修法 |
-|---|---|---|---|
-| 1 | `health_rows` 与 `health_summary` **各自**跑一次 `dnschain-health status` | 各 1.67s，白跑两遍 | 新增 `health_status_raw()` 共用一次调用 |
-| 2 | `dc_domain_class` 对每级标签各 `grep` 一次 23715 行名单 | 单域名 0.06s | 改「一次 grep 批量比对所有候选后缀」 |
-| 3 | `dc_run_timeout` 每 tick `sleep 1`（BusyBox sleep 只支持整数） | nslookup 仅 0.02s，却被拖满 1 秒 | 改「紧密轮询 + 每 2000 转才 sleep 1 秒」 |
-| 4 | selftest 20 项含 4 处真实 DNS 查询，页面每次刷新都跑 | 3.5s | 加 60 秒磁盘缓存 + 失效指纹 |
-
-**第 3 条的排查过程值得记**：先怀疑 `sleep 0.1` 可用（OpenWrt 常开
-FANCY_SLEEP），实测 `sleep 0.05` / `sleep 0.1` **都失败**；
-`read -t 0.1` 报 `invalid timeout`；`usleep` 不存在。
-即 **BusyBox 拿不到亚秒粒度**。所以不能靠缩短 tick，
-只能让「快路径不付等待代价」——紧密轮询到命令完成即返回。
-
-##### 三、过程中发现并修掉的 4 个实现级 bug
-
-| bug | 症状 | 根因 |
-|---|---|---|
-| 缓存永不命中 | 第二次仍跑 3.5s | BusyBox **没有 `stat` 命令**，`stat -c %Y` 恒为空 → 改 `date -r` |
-| SUMMARY 行消失 | 验收脚本报「自检有失败: 」（空值） | 改成 `_DC_BODY=$(check_all)` 捕获输出后，漏了 `main` 原本单独打印的 SUMMARY |
-| SUMMARY 全是 0 | `SUMMARY PASS=0 FAIL=0` | `PASS_CNT` 等计数在 `check_all` 的子 shell 里，父 shell 读到 0 → 改从捕获文本统计 |
-| `selftest` 函数被破坏 | `Syntax error: word unexpected` | 用正则批量替换时 PowerShell 把 `$_body` 当变量插值 → 改用 Python 按文本块精确替换 |
-
-##### 四、复测
-
-```
-页面响应（真实登录，3 次）：1.99s / 1.97s / 1.96s   （原 5.6s，-65%）
-自检：首次 2.76s（无缓存）、第二次 0.23s（命中缓存）
-       SUMMARY PASS=20 FAIL=0 SKIP=0，CONCLUSION: 链路正常
-五条需求验收：PASS=54 FAIL=0
-国外链路：:5353 baidu=OK、:5336 google=OK
-          ss_spec=2、nftset=23714
-
-本地：dash 8/8、shell 89+23、lua 88、图示 35、契约 112、i18n 409、CI 模拟通过
-```
-
-**缓存正确性单独验证**（关键：缓存不能掩盖故障）：
-停掉 v2ray → 指纹从 `5353|5336|4040|4041|1|1|1` 变为
-`...|0|0|1` → 缓存自动失效并重跑 → 准确报出用户描述的那三项 FAIL。
-恢复后回到 20/20。
-
-#### 二十一、落实度复查：修 v0.14.4 未真正生效的修复 + 补审 CSS/config（v0.14.5）
-
-按要求复查「全链路检查是否完全落实」。逐项核验后发现 **v0.14.4 的 M2 修复
-并未真正生效**，另有两处此前未系统审查的区域（CSS 变量、config 键一致性）。
-
-##### 一、[严重] `dc_ssr_mode_for_profile` 改对了逻辑但**写错了 section 名**
-
-v0.14.4 的 M2 把「读不存在的 `main.profile`」改成「读 `ssr.mode`」，
-但配置文件里是 **`config ssr 'compat'`** —— 类型是 `ssr`、**名字是 `compat`**。
-`dc_get <name> <option>` 走 `uci get dnschain.<name>.<option>`，
-所以 `dc_get ssr mode` 查的是「名字为 ssr 的 section」，它不存在 →
-恒返回空 → 恒走兜底 `"0"`。
-
-**即 M2 修复后，页面选「7 — 模块内置 DNS」仍然被静默推翻。**
-
-实测证据：
-```
-uci get dnschain.ssr.mode    = （空）
-uci get dnschain.compat.mode = 7
-compat.mode=7 → dc_ssr_mode_for_profile 返回 0   ← 修复前
-compat.mode=7 → dc_ssr_mode_for_profile 返回 7   ← 修复后
-```
-
-同一错误还有两处（reconcile 一直读不到，恒用默认值 1）：
-- `enforce=$(dc_get ssr enforce 1)`
-- `if [ "$(dc_get ssr require_ipv6 1)" = "1" ]`
-
-修法：三处全部改为 `dc_get compat ...`。
-新增 5 条契约断言锁住（含「禁止出现 `dc_get ssr <opt>`」的反向断言）。
-
-> 教训：**`dc_get` 的第一个参数是 section 名，不是类型**。
-> 本仓库已有同名坑（`config upstream 'cn'` 必须写 `dc_get cn ...`），
-> 这是第二次踩 —— 已在断言里对 `ssr.*` 三处加反向守卫。
-
-##### 二、[中等] CSS 存在无效自定义属性值
-
-```css
---dc-fg-muted: opacity: 0.65;
-```
-
-自定义属性里不能放 `opacity: 0.65` 这种**声明**，浏览器会把它当字符串；
-真有人 `var(--dc-fg-muted)` 当 opacity 用时得到无效值。
-且 `--dc-fg` 与 `--dc-fg-muted` **全文件零消费者**（Lua/JS 也未引用）。
-
-修法：删掉两个变量并写明理由。弱化文字直接用 `opacity` 属性，不绕变量。
-复查后 CSS 的 18 个变量全部有定义、无悬空引用。
-
-##### 三、[核查] config 47 个键的消费者覆盖
-
-逐键核对 `config` 里 47 个 option/list 的 shell 消费者：
-
-| 类别 | 数量 | 状态 |
-|---|---|---|
-| 有消费者 | 34 | 正常 |
-| list 类型（无值时为空） | 3 | 正常（`dom_*.domain` / `health.watch`） |
-| 有兜底的不存在键 | 1 | `main.profile`（旧配置兼容，代码有默认值） |
-| 已在页面标注「仅作记录」 | 9 | 正常 |
-
-即除本次修的 3 处外，没有发现新的「配了不生效且无提示」的键。
-
-##### 四、复测
-
-```
-本地：dash 8/8、shell 90+23、lua 121、图示 44、契约 126（新增 5）、
-      i18n 426、CI 模拟通过
-路由器：selftest 20/20、:53/:5353/:5336 全 OK、nftset=23714、
-        ss_spec=2、:1234=1、cycle ok=8、零泄漏零残留
-        页面 HTTP 200、157KB、SVG 4、marker 0 重复、Lua 报错 0、响应 2.14s
-        compat.mode=7 → dc_ssr_mode_for_profile 返回 7（修复前恒 0）
-```
-
-#### 二十、Lua 层深审：6 项严重 + 9 项中等 + 9 项轻微缺陷修复（v0.14.4）
-
-对 4 个 Lua 文件（3595 行）做第三轮审查，逐条用 lupa（真实 Lua）实测验证。
-**24 项报告里 3 项经实测不成立**，未作改动（见末节）。
-
-##### S1 [严重] selftest 名称解析用 `[^—]`，20 项里 7 项失败
-
-```lua
-local name, detail = rest:match("^([^—]+)—%s*(.*)$")
-```
-
-Lua 的字符类按**字节**工作。`—`(U+2014) 的 UTF-8 是 `E2 80 94`，
-写进 `[^—]` 后实际是「排除 E2、80、94 三个字节」。凡名称含
-`一`(E4 B8 80)、`上`(E4 B8 8A)、`下`(E4 B8 8B) 等第三字节为 0x80 的
-常用汉字，匹配**直接失败**。
-
-实测 10 个真实 emit 名称：**7 个失败**（整行进 name、detail 为空），
-3 个「半失败」（name 尾随一个空格）。失败的包括「缓存层唯一」
-「端口所有权无冲突」「改道通道已就绪」—— 诊断页最该看清的几项，
-而 `#items` 仍是 20、`total` 正确，看起来一切正常，只是内容错位。
-
-修法：改用 `find(sep, 1, true)` 做**字节精确**匹配（分隔符是 5 字节的
-`" — "`），找到后按字节位置切。实测 10/10 正确、无尾随空格。
-
-##### S2 [严重] `upstream_port` 把 IPv6 末段当端口
-
-```lua
-local port = hostport:match(":%[?([0-9]+)%]?$")
-```
-
-实测：
-```
-https://[2606:4700::1111]/dns-query  → 1111（应 443）
-tls://[2400:3200::1]                 → 1   （应 853）
-```
-
-后果：`validate_upstreams` 拿这个假端口比对 `ss_spec_output` 端口集。
-不在集合里 → 保存被拒且提示「端口 1111 不在…」，用户看不出问题在哪；
-恰好在集合里 → 该上游被误判合规，实际出向不走代理，国外解析静默失败。
-
-修法：IPv6 的端口只可能出现在 `]:` 之后，先判 `^%[` 再分别取。
-实测 7/7 正确。
-
-##### S3 [严重] `status_map` 静默丢弃未知 state，行数不守恒
-
-`local st = r.state or "unknown"` 只兜 nil。空串与任何未知值
-（如脚本将来新增 `probing`）会落进 `groups` 里一个**不在 `STATUS_ORDER`
-中**的键，而 `present` 只遍历 `STATUS_ORDER`、`n_all` 也只累加那些组
-—— 这些行被**静默丢弃**。
-
-实测：3 行（`ok` / `""` / `weird-state`）只画出 1 个域名，
-根节点也写「观测 1 个」。看起来像「只有 1 个域名需要关注」，无任何提示。
-
-修法：`normalize_state()` 把未知/空值统一归入 `unknown` 档，保证
-「画出的行数 == 输入行数」。实测 3 行全部进图、计数 3。
-
-##### S4 [严重] `status_layout` 与 `status_map` 口径不同 → CI 验错布局
-
-两处不一致：
-1. `status_layout` 用 `pairs(rows)` 数**数据行数**，`status_map` 画
-   **状态档位数**（最多 5 档，`both-bad` 恒占一档）
-2. `NH` 一个硬编码 60，一个 `math.max(60, 21+16+max_hint_lines*14+8)`
-
-实测（5 档各 1 个域名）：`status_map` 实际 viewBox 高 **386**，
-`status_layout` 报 **406** —— 差 20px。`check_note_clearance` 与
-`check_text_fits_boxes` 的断言全部基于这份错值。
-
-修法：抽出 `layout_plan(rows)`，由两者共用。实测三种数据形态
-（5 档/1 档/6 行 3 档）下高度完全一致（471/216/301）。
-
-##### S5 [严重] 「分流规则条数」取错文件
-
-`stats.domains` 读 `foreign-split.conf`，而那是
-「数据库国外 − 自定义国内 − 观测域名」的**纯域名清单**
-（`dnschain.sh` 里明确写了「从 v0.13.0 起不再是 dnsmasq 片段」）。
-真正的 `server=/域名/` 条数在 `dnschain-split.conf`。
-
-实测加 1 个自定义国外域名后：`foreign-split.conf` 仍 23714，
-`dnschain-split.conf` 的 `server=` 变 23715 —— 页面数字偏小，
-标签「条 server=/域名/」名不副实。
-
-另有 `M.split_rule_count()` 读的正是对的文件，但**全仓库零调用点**，
-且它数的是所有行（含注释与 `nftset=`），口径也不对。
-
-修法：`list_stats` 增加 `split_server_lines`（数 `server=` 前缀行），
-`chain_snapshot` 改用它；删掉死函数 `split_rule_count`。
-
-##### S6 [严重] 「保存并应用」4 条分支无反馈，按钮无条件打 ✓
-
-`cmd_apply` 有 5 条正常出口 + 2 条失败出口：
-```
-DNSMASQ=restarted（静态片段已变）
-DNSMASQ=skipped（框架未启用）
-DNSMASQ=skipped（无 init.d/dnsmasq）
-DNSMASQ=sighup（仅观测域名变化）
-DNSMASQ=unchanged（无变化，未动 dnsmasq）
-ERROR=生成分流片段失败 / ERROR=生成自定义列表失败
-```
-而 `apply_on_parse` 只处理 `restarted`，其余 4 条**不设置任何 message**。
-最常见的 `unchanged`（只改阈值、片段未变）用户点保存后看不到任何提示，
-会反复点；框架未启用时更是什么都不显示。
-
-按钮路径反过来，无条件拼 `✓` —— `ERROR` 时显示「✓ 已应用」+ 错误正文。
-
-修法：`apply_message()` 统一解析，按出口给 `✓`/`!`/`✗` 与对应文案，
-`skipped` 还带上具体原因。实测 8/8 分支正确。
-
-##### 中等缺陷（9 项）
-
-| # | 问题 | 处置 |
-|---|---|---|
-| M1 | `validate_domain` 比 `dc_domain_valid` 少 4 条（总长≤253、label≤63、label 首尾非 `-`、TLD 非 `xn--` 须纯字母）→ 页面放行、脚本 `dc_domain_valid \|\| continue` 静默跳过 → 「已录入」却不生效 | 补齐 4 条，保证「页面拒绝集 ⊆ 脚本拒绝集」。实测 10/10 |
-| M2 | 空值分支返回**原始** `value`（可能是 `"  "`）而非归一值 → `rmempty` 不认它为空，空格串被写进 UCI | 改为返回 `v`（空串） |
-| M3 | `validate_upstream` 把「该 section 全部已有值」与本次输入合并后整体判定 → 一行坏就整段报错，包括用户想用来替换坏行的那一行，形成死锁 | 只校验本次 `value` |
-| M4 | 「待应用」徽标比的是 UCI 原始 token 数与生效条数 → 有一个非法域名就永久显示「待应用」 | 改用「合法条数」比较，非法项单独红徽标列出 |
-| M5 | `%w` 不含下划线 → `both_bad=1` 被解析成 `bad = 1`，丢 `both_` 前缀 | 改 `[%w_]+` |
-| M6 | `import_lists` / `reconcile_now` 恒返回 `true` → reconcile 失败时页面仍打 ✓（违反红线 3） | 加 `exec_ok()` 扫描 ERROR/失败 |
-| M7 | `box_lines` 的 `w` 形参从未使用；单个超宽域名（AWS/CloudFront 风格）直接溢出 viewBox 被裁 | 按宽硬切并补 `…`。实测零溢出 |
-| M8 | `sync_dnsmasq_filter_aaaa` 丢弃所有 `sys.exec` 返回值，恒 `return true` → 写失败时开关显示已切换但行为未变 | 返回结构化错误码（数据层不放 UI 文案）+ 写后读回校验 |
-| M9 | 5 个配置项（`cache.enabled`/`filter_https_rr`/`import_interval`/`selftest.interval`/`intercept_doh`）无消费者却无标注；`dnschain-reconcile` 根本没有调度者 | 补「仅作记录」标注；`selftest.interval` 明说「仓库里没有定时调度」 |
-
-##### 轻微缺陷（9 项）
-
-| # | 问题 | 处置 |
-|---|---|---|
-| L1 | `_conclusion` 按**译文子串**判色（`concl:find("未监听")`）→ 非中文界面恒绿，英文界面上「国内 dnsproxy 未监听」显示成绿色 | 改按语义分支给 tone；保留关键字兜底 |
-| L2 | selftest 表格的 `name`/`detail` 未转义（同文件 `r.result`/`r.domain` 都用了 `dg.esc`），而 detail 是脚本 stdout 直通 | 套 `dg.esc` |
-| L3 | `os.date("%H:%M:%S", r.last or 0)` 对 `last=0` 渲染成 `08:00:00`，看起来像真实探测时刻 | `> 0` 才格式化，否则 `—` |
-| L4 | `STATUS_H` 恒 0 且从未被读取（死常量） | 删除 |
-| L5 | `/proc/<pid>/stat` 的 pattern 捕获第 21 字段（应第 22 = starttime），实际取到 `itrealvalue`；`uptime` 还是死变量 | 整段删除并写明理由 |
-| L6 | `M.check_domains` 注释称「自检会调用它」，实际零调用点 | 删除函数 |
-| L7 | 同一页出现「16 项检查」与「20 项检查」两个数字 | 改为 20 |
-| L8 | SVG `aria-label` 未转义（其余动态文本都过了 `esc`） | 套 `esc` |
-| L9 | controller 直接用 `nixio.fs` 而未 `require`，脱离 dispatcher 的环境会抛 nil 索引 | 显式 `require "nixio.fs"` |
-
-##### 实测排除的 3 项（不改）
-
-| 怀疑 | 实测结论 |
-|---|---|
-| S4 的 `render-dnschain-diagrams.py` 传 6 键表报 `h=478` | 那是**测试脚本传错数据**（`{ [1]=true, ... }` 占位表）。改传真实 `sample_rows()` 后与 `status_map` 完全一致 |
-| L1 英文 locale 下判色失效 | 逻辑成立但需真机切 locale 才能观察；已按语义重构，不再依赖译文 |
-| L8 翻译里是否真有双引号 | 当前中文文案无 `"`，属预防性加固 |
-
-##### 验证
-
-```
-本地：dash 8/8、shell 90+23、lua 121（新增 33 条）、图示 44（新增 6 条）、
-      契约 121、i18n 426、CI 模拟通过
-路由器：页面 HTTP 200、160KB、SVG 4、marker 0 重复、Lua 报错 0、
-        「16 项检查」已改 20、响应 1.86s
-```
-
-> **环境说明**：本轮验收时该路由器上的 SSR-Plus 处于
-> `global_server=nil` 状态（配置文件里没有任何 `servers` 节点，
-> `/etc/config/shadowsocksr` 仅 72 行、9 个 section，无订阅 URL），
-> 因此自检第 13 项「代理与分流在位」FAIL。这是**环境既有状态**
-> （AGENTS §4.2 记录的已知故障模式），与本次 Lua 改动无关 ——
-> 本轮改动只涉及页面渲染与数据读取，不可能删除 UCI 节点。
-> dnschain 框架本身正常：`:5353` 国内 OK、`:53` 国内外均 OK、
-> `nftset=23714`、cycle 自动把 4 个国外域名改道到直连（正确行为）。
-
-#### 十九、运行时 shell 层深审：6 项严重 + 9 项中等缺陷修复（v0.14.3）
-
-对 `files/` 下 6 个运行时脚本（共 3887 行）做第二轮只读审查，
-逐条在路由器上实测验证后修复。**29 项报告里有 3 项经实测不成立，
-未作改动**（见末节）。
-
-##### S1 [严重] 健康探测取锁后提前返回不释放 → 改道功能永久停摆
-
-`dc_health_cycle` 原顺序是「取锁 → 检查实例就绪 → 不就绪就 `return 0`」，
-而那条 `return` **不释放锁**。
-
-daemon 是常驻进程、`$$` 恒定不变，于是：
-- 某轮撞上 dnsproxy 未监听（开机时序 / dnsproxy 被 procd 重启 / 手动 stop-start）
-  → 锁写下且永不删除
-- 后续每轮 `mkdir` 失败 → 读到 holder pid → `/proc/<pid>` 存在（就是自己）
-  → 打印「SKIP 已有一轮探测在跑」→ **永久跳过**
-
-结果：**改道功能从此完全停止**，而日志里是「正常 SKIP」、页面只是状态不再更新。
-
-实测复现（同一进程连跑 3 轮）：
-```
-第 1 轮: SKIP 本地 dnsproxy 实例未就绪（:5353 / :59999）
-   锁: 残留  pid=1641
-第 2 轮: SKIP 已有一轮探测在跑（pid=1641）
-第 3 轮: SKIP 已有一轮探测在跑（pid=1641）
-```
-
-修法：把实例就绪检查**移到取锁之前** —— 不就绪时根本没取锁，直接返回安全。
-实测修复后三轮都正确判断、锁无残留。
-
-##### S2 [严重] `grep -c || echo 0` 双输出 → nftset 自愈永不触发
-
-`grep -c` 在**无匹配**时既打印 `0`、又返回 rc=1。于是
-`n=$(grep -c PAT f || echo 0)` 得到的是**两行** `"0\n0"`：
-
-```
-$ v=$(grep -c '^nftset=' /tmp/t || echo 0); echo "[$v]"
-[0
-0]
-$ [ "$v" -eq 0 ]; echo $?
-2                     ← 算术比较报错返回假
-```
-
-后果是**判据恒假**，而它恰好只在「计数为 0」时才是关键路径：
-
-- reconcile 的「nftset 行数为 0 → 强制重建」自愈分支**永不执行**
-- `dc_prev_nftset_count` 返回脏值 → 重建窗口兜底也失效
-
-即 v0.14.1 想修的那个「代理链路整条断」故障在收敛路径上依然不自愈。
-
-修法：新增 `dc_count_lines`（awk 实现，恒输出单个整数、rc 恒 0），
-替换全仓库 6 处同类写法。
-
-##### S3 [严重] 一次配置应用重启 dnsmasq 3 次（约 9 秒中断）
-
-`reload_service` 的调用链是：
-```
-reload_service → reload_dnsmasq          （第 1 次）
-              → stop → stop_service → reload_dnsmasq（第 2 次）
-              → start → start_service → reload_dnsmasq（第 3 次）
-```
-实测一次 `/etc/init.d/dnschain reload` 期间 dnsmasq 主进程出现
-**4 个不同 PID**（6576→7704→7873→9467）。AGENTS §4.4 实测 restart 约
-3 秒完全不可用 → 一次保存断 9 秒以上。
-
-更糟的是第 2 次发生在 `stop_service` 已把分流片段写成「服务已停止」注释之后、
-`start` 重建之前 —— 那几秒 dnsmasq 跑在**没有分流片段**的状态下，
-所有国外域名走默认上游。
-
-修法：用标记文件 `/var/run/dnschain/.dnsmasq-dirty` 抑制中间步骤，
-末尾统一重启一次。
-**不能用环境变量**：procd 的 stop/start 会重新 exec，变量跨不过去
-（实测用环境变量只能减到 2 次）。
-
-##### S4 [严重] 首刷默认值把 serversfile 指到 ujail 白名单外
-
-`99-zz-dnschain:151` 写死 `/var/etc/dnschain/watch.servers`，
-而库常量与 init 的 `update_serversfile` 都用 `/var/run/dnsmasq/watch.servers`。
-
-平时 init 启动时会纠正，所以看不出来；但服务未启用、`preflight` 失败、
-或用户首刷后先看页面再启动服务时，UCI 里就是那个错路径 ——
-dnsmasq 以 uid 453 运行、读不到该目录，**既不报错也不生效**，
-改道静默失效（正是 AGENTS 约束 26 描述的症状）。
-
-修法：改为引用库常量（子 shell 取值，避免污染本脚本），并加区间校验。
-
-##### S5 [严重] stop 后 dnsmasq 仍按旧的 watch.servers 改道到已停端口
-
-`stop_service` 清掉了 health 状态、把两个片段改成注释，但**没清 `watch.servers`**，
-也没撤 `serversfile`，随后还 restart 了 dnsmasq。
-
-而 `/var/run/dnsmasq/watch.servers` 是 tmpfs 文件、不会随 stop 消失。
-stop 后重启 dnsmasq 会**重新读取**它 —— 里面若有
-`server=/github.com/127.0.0.1#5336` 而 `:5336` 已无人监听，
-这些观测域名就变成稳定解析失败。用户看到的是「关掉框架后 github 打不开了」，
-而日志干净。
-
-修法：`stop_service` 里把它清成注释占位（不删除，否则 dnsmasq 启动时读不到
-serversfile 会报错），**然后**再 restart dnsmasq —— 顺序不能反。
-
-##### S6 [严重] `dc_run_timeout` 每次成功调用泄漏一个 `.done` 文件
-
-完成标记文件只在入口 `rm -f`，但成功返回的两处都只 `wait` + `echo 0` + `return 0`，
-从不删除标记文件；而 `mktemp` 每次给新路径，入口那次删不到别人的。
-
-实测：两次 `dc_dns_class` 泄漏 2 个文件。
-健康 cycle 一轮 8 域名 × 2 链 × 最多 3 次重试 ≈ 48 次，
-daemon 每 60 秒一轮 → **每天约 7 万个空文件**堆进 tmpfs
-（/tmp 与 /var 同属内存盘），最终 `mktemp` 失败 → 探测全返回 FAIL
-→ 误判成双链都挂、页面标 both-bad。
-
-修法：成功返回前删掉标记文件。实测 10 次探测 + 完整 cycle 后零泄漏。
-
-##### 中等缺陷（9 项，全部实测确认后修复）
-
-| # | 问题 | 处置 |
-|---|---|---|
-| M2 | `dc_ssr_mode_for_profile` 读不存在的 `main.profile` → 恒返回 `"0"`；页面能选 `ssr.mode`（0/7）却**无人读**，用户选「7」被静默推翻 | 改为读 `ssr.mode`，保留 `main.profile=coexist` 兼容 |
-| M3 | 11 个页面配置项**零消费者**（`cache.size`/`lists.black_source`/`via_proxy`/`cert_verify`/`auto_rollback` 等），用户改了不生效且无从察觉 | `cache.size` → 写 `dhcp.cachesize`（uci-defaults + reconcile 双路）；`lists.black_source` → 接入归属判定；其余在页面明示「仅作记录」 |
-| M4 | 自检第 3 项对 `/var/etc/dnsmasq.conf.*` 通配，多份文件时 `grep -c` 输出 `路径:计数`，`head -1` 取到带路径的行 → 恒 FAIL | 改为从 dnsmasq 进程 argv 取真正在用的 `-C` 路径 |
-| M5 | `dc_gen_watch_servers` 建的是 `$DNSCHAIN_RUN_DIR`，却把文件 `mv` 到 `/var/run/dnsmasq/` → 后者不存在时整条启动失败 | 改为建目标文件所在目录，失败时把具体路径打进日志 |
-| M6 | `reconcile_intercept` 用 `grep '^6,'` 只匹配行首 → DNS 不是第一项时永不删除旧的明文 DNS 下发，客户机绕过整个框架 | 改为按项匹配（`tr ' ' '\n'` 后逐项判） |
-| M7 | `dc_gen_upstream_file` 不检查 `dc_gen_db_domains` 返回码，数据库缺失时静默产出 0 字节文件并报成功 | 显式检查两次，失败时写明原因（名单未就绪/生成失败） |
-| M8 | 关联数组分支（`declare -A`）在 BusyBox ash 下是死代码，且 `declare` 属 bash 专有，与「POSIX sh 兼容」声明冲突 | 删除该分支，只留 `grep -Fxf` 批量匹配一条实现 |
-| M9 | `main()` 丢弃 `reconcile_intercept` 的返回码，且该函数恒 `return 0` → commit/restart 失败时收敛器仍以 0 退出，页面「一键归一」永远报成功 | 函数内失败置非 0，`main` 取 rc |
-| M1 | 怀疑 `dc_dns_first_addr` 把 nslookup 的 Server 地址行当答案 | **实测不成立**：返回的是真实 IPv6 地址，未含 `:端口`。**未改动** |
-
-##### 清理（10 项死代码与过时注释）
-
-`DNSCHAIN_ETC_DIR`（定义后从未使用）、`dc_domain_fixed`（v0.14.0 语义矫正后的
-兼容壳，名字反而误导）、`verbose`（死变量）、`M.watch_servers_file`（无调用者
-且路径已漂移）、`dc_lists_fingerprint` 内层重复判断、`cmd_apply` 硬编码路径、
-自检指纹硬编码 gfw 路径、库头注释「禁止 local」（与全文实际用法矛盾）、
-自检头注释声称有定时任务（仓库里无任何调度）。
-
-##### 实测排除的 3 项（不改，避免无依据改动）
-
-| 怀疑 | 实测结论 |
-|---|---|
-| M1 `dc_dns_first_addr` 把 Server 行当答案 | 返回 `240e:ff:e020:99b:0:ff:b099:cff1`，是真实答案，未中招 |
-| M4 自检第 3 项恒 FAIL | 当前只有 1 份 `dnsmasq.conf.*`，未触发；但隐患真实，已按「取当前生效文件」加固 |
-| M8 `declare -A` 是否有支持 | `sh -c 'eval "declare -A x=()"'` 返回非 0 → 确认 ash 不支持，该分支确为死代码 |
-
-##### 验证
-
-```
-本地：dash 8/8、shell 90+23、lua 88、图示 38、契约 121、i18n 412、CI 模拟通过
-路由器：selftest 20/20、五条需求 54/54、页面 2.03s
-        :53/:5353/:5336 全 OK、nftset=23714、ss_spec=2
-        .done 零泄漏、锁无残留、serversfile 正确、cachesize 一致
-        nftset 归零自愈端到端验证通过（检测→重建→重启→链路 OK）
-```
-
-#### 十八、全链路严谨审查：7 项缺陷修复 + 文档对齐（v0.14.2）
-
-按要求逐条梳理每个功能链路、以代码与运行结果为依据审查，
-覆盖隐性/显性 bug、边界条件、异常处理、数据一致性、视觉/UI/图表/交互。
-共确认 **7 项缺陷**（2 项严重），另清理 3 处死代码与 1 处重复实现。
-
-##### 一、[严重] 页面「清空全部缓存」完全无效
-
-`flush_cache()` 在 Lua 侧用 `pidof dnsmasq | awk '{print $1}'` 取 PID，
-而 `pidof dnsmasq` 返回 **3 个** PID，第一个是 **ujail 辅助子进程**：
-
-```
-PID 21400  wchan=anon_pipe_read   fds=5   socket:53=0    ← 被选中（错）
-PID 21368  wchan=poll_schedule…   fds=36  socket:53=25   ← 真正干活的
-PID 21331  wchan=do_epoll_wait    fds=7   socket:53=1
-```
-
-对它 SIGHUP 是**空操作** —— 按钮点了完全无效，页面却照样报
-「已清空 dnsmasq 缓存（零中断）」。这是典型的静默失效。
-
-而库里的 `dc_flush_cache` 早已用 `dc_dnsmasq_pid`（按 `:53` socket inode
-反查）正确实现，却**没有 CLI 入口**，成了死代码 —— 同一功能写了两份，
-其中一份是错的。
-
-修法：补 `dnschain-health flush` 子命令，Lua 只调它。实测输出
-`已发送 SIGHUP 清空 dnsmasq 缓存 (pid=21368)`，dnsmasq 未受影响、`:53` 正常。
-
-##### 二、[严重] 判定链路图渲染两次 → 5 组 marker id 重复
-
-实测页面 HTML：`id="dcrt-a-ok"` 等 **5 个 id 各出现 2 次**。
-
-根因：`dg.route_map()` 被渲染**两次** —— 概览 tab 的「分流决策」与
-域名 tab 的「走法」。CBI 的 tab 是 CSS 隐藏、**不是懒加载**，
-两个 tab 的内容都进同一份 HTML，而 SVG id 是**文档级全局**的。
-
-后果：`url(#dcrt-a-ok)` 全部解析到**第一个**定义。当前两图配色恰好相同
-所以看不出异常，但一旦一处改了色，箭头颜色就静默串掉，浏览器不报错。
-
-修法：`route_map` / `status_map` 支持 `id_prefix` 参数，两处调用分别传
-`dcrt-ov` / `dcrt-dm`。实测修复后 15 个 marker id 全部唯一。
-
-##### 三、[中等] selftest 缓存指纹覆盖不足 → 改配置后 60 秒内报旧结论
-
-原指纹只含端口/进程/`ss_spec`/开关，漏了三类：
-`filter_aaaa`、`ipv6_support`、gfw 行数、上游列表。
-症状是「改完配置看自检，还是旧结论」，用户以为改动没生效。
-
-修法：补全指纹。实测改 `filter_aaaa` 后指纹从 `...|0|1|...` 变为
-`...|1|1|...`，缓存自动失效并重跑（0.30s → 3.16s）。
-
-顺带修掉一个取错 section 名的 bug：`dc_get_list upstream server` 返回空
-（UCI 里是 `config upstream 'cn'` / `'foreign'`，类型是 upstream、
-名字是 cn/foreign），导致上游变化完全检测不到。
-
-##### 四、[中等] tab 切换不处理滚动 → 长 tab 切短 tab 后停在空白处
-
-各 tab 高度差数倍（分流约 3000px、概览约 900px）。`activate()` 只切
-`hidden` 不管滚动，从长 tab 滚到底再切短 tab 时 `scrollY` 仍停在旧值，
-新内容早已在视口上方，屏幕只剩页脚。
-
-修法：新内容顶部若已跑到视口上方，滚回 tab 栏位置（留 8px 边距）；
-只在这种情况下才动，避免打断用户在同高度 tab 间的小幅滚动。
-
-##### 五、[中等] 状态写盘重复实现 + 并发无锁
-
-`dc_health_write` 与 `dc_health_write_keep_last` 各复制了一整段
-「读旧文件 → awk 过滤同域名 → printf 追加 → mv」，只差 `last` 取值。
-两份同样的写盘逻辑，改一处忘另一处就会写出格式不同的状态文件，
-而 `status`/页面都按 7 字段解析。
-
-另：`dc_health_cycle` 无互斥锁。daemon 每 `interval` 秒跑一轮，
-页面「立即探测一轮」随时可触发，并发时后完成的进程会用少了对方新增行的
-副本覆盖 → 状态文件丢行。
-
-修法：
-- 抽出 `dc_health_upsert` 作为唯一写盘实现（瘦身 33 行）
-- 加 `mkdir` 原子锁 + 死锁自动清理（`kill -9` 后锁残留能自愈）
-
-实测 3 个并发 cycle：1 个执行、2 个正确跳过，状态 8 行无重复，锁无残留；
-`kill -9` 中断后下一轮自动清理死锁。
-
-##### 六、[轻微] `preflight` 变量未 `local` + 编号重复
-
-`_dot_bad` 未在函数首行 `local` 列表里 → 污染全局。注释编号有两个「4.」。
-已修正（编号 1~5 连续）。
-
-##### 七、[清理] 死代码与重复
-
-| 项 | 处置 |
-|---|---|
-| `dc_sleep_tick` / `dc_ticks_per_sec` | 删除（紧密轮询改造后已成死代码） |
-| `dc_flush_cache` | 补 CLI 入口后复活（见第一节） |
-| `dnschain_die` | 保留（错误处理基础设施） |
-
-`dnschain.sh` 从 1894 行降到 1861 行。
-
-##### 八、实测排除的「疑似 bug」（不改，避免无依据改动）
-
-| 怀疑 | 实测结论 |
-|---|---|
-| `dc_domain_valid` 用 `set --` 会污染调用者位置参数 | **不会**。POSIX sh 函数有独立位置参数作用域，实测调用前后 `$#` 与 `$1` 不变 |
-| `dc_domain_valid` 改 `IFS` 后中途 `return` 会泄漏 | **不会**。`IFS=.` 与 `IFS=$_oifs` 在连续三行内完成，之后才可能 `return` |
-| 空数据时 `status_map` 产出非法 SVG | **不会**。输出合法（无 NaN/nil） |
-| 超长域名（180 字符）文字溢出框 | **不会**。`wrap_text` 正确换行，溢出 0 处 |
-| 含 `& < >` 的域名破坏 SVG | **不会**。转义正确 |
-| CBI `depends` 目标字段不存在 | **不会**。只有 `enabled`/`auto_attach` 两个目标，都在同 section 且先定义 |
-
-##### 九、文档对齐（用户要求第 3 项）
-
-实测发现 **4 类文档漂移**，全部修正：
-
-| 文档 | 漂移 | 修正 |
-|---|---|---|
-| `AGENTS.md` | 契约断言 99 条（实际 119）、lua 83 条（88）、图示 30 条（38）、自检 16 项（20） | 全部更新；并新增硬约束 33~37（清缓存 PID / 互斥锁 / 单点写盘 / 缓存指纹 / tab 滚动） |
-| `docs/adr/0006` | 场景 E 仍写「状态 fixed:OK，永不改道」—— 正是 v0.14.0 已废除的语义 | 改写为「照常参与改道」并附完整矫正说明与实测轨迹 |
-| `docs/adr/0004` | 两处「自检 16 项」 | 改为 20 项 |
-| `docs/adr/0003` | G5 事务与 §9 步骤里的「16 项自检」 | 改为 20 项 |
-| `docs/adr/0005` | 验证步骤「自检 16 项全绿」 | 改为 20 项 |
-| `GLOSSARY.md` | 「策略过滤器 `:5335` chinadns-ng」「4 跳」「档案 `:5335/:5337`」均已作废；**缺**归属/首选/当前三个核心概念 | 重写为双实例架构；跳数改 3 跳；补 5 个术语（归属/首选/当前/改道/补全归属） |
-
-> CHANGELOG 里历史条目的「16 项」保留 —— 那是当时的事实记录，
-> 不应改写历史。
-
-##### 十、复测
-
-```
-本地：dash 8/8、shell 89+23、lua 88、图示 38、契约 119、i18n 409、CI 模拟通过
-路由器：selftest 20/20、五条需求 54/54、页面响应 2.08s
-        页面结构：SVG 4 个、marker 15 个全唯一、嵌套 form 1 个、Lua 报错 0
-        flush 实测发到 pid=21368（正确），dnsmasq 未受影响
 ```
 
 ## [v0.12.5] - 2026-10-22

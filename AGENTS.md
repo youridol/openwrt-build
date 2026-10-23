@@ -20,7 +20,7 @@
 | `patches/luci-app-trafficctl/*.patch` | trafficctl 相对上游的差分记录（**不参与构建**，供跟进上游 + CI 一致性校验） | 由 `tools/regen-trafficctl-patches.py` 生成，勿手改 |
 | `tools/sync-trafficctl.sh` | 升级 trafficctl 到指定上游 tag（覆盖包目录 + 重算 patch + 回放校验） | 直接用 |
 | `tools/check-trafficctl-i18n.py` | 校验中文翻译覆盖率；`--write-pot` 重生成 pot 模板 | 直接用 |
-| `tools/verify-dnschain-domains.sh` | 域名归属与自动改道的 121 条契约断言（CI 与本地同一份） | 直接用 |
+| `tools/verify-dnschain-domains.sh` | 域名归属与自动改道的 126 条契约断言（CI 与本地同一份） | 直接用 |
 | `tools/check-dnschain-lua.py` | 用 lupa（真实 Lua）跑语法 + 模型 + **真实渲染页面每个 `cfgvalue()`** | 直接用 |
 | `tools/render-dnschain-diagrams.py` | 两张思维导图的纯几何校验 + 输出可打开的 HTML 预览 | 直接用 |
 | `tools/extract-dnschain-i18n.py` | 提取 `translate()` 中文并比对 PO（`--write` 追加缺失） | 直接用 |
@@ -84,209 +84,22 @@
    并在提交前先 `nft -c -f` 只校验。
 
 9. **`package/luci-app-trafficctl/` 是 vendored 副本，改它必须同步 patch。**
-   这项包**不靠 patch 构建**（CI 直接 `cp -r` 整个目录），但它的改动必须固化：
-   - 改完 `package/` 下的任何文件后，**必须**跑
-     `python3 tools/regen-trafficctl-patches.py <上游包目录>` 重算 patch，
-     否则 CI 的 `Verify luci-app-trafficctl local invariants` 会因
-     「patch 重放结果 ≠ vendored 包」而 `exit 1`。
-   - 升级上游用 `sh tools/sync-trafficctl.sh <tag>`（会覆盖包目录并重算 patch）。
-   - **六项本地改动必须保留**（被覆盖会静默失效，界面不报错、构建也成功）：
-     1. `root/usr/local/bin/trafficctl-bytes-nft.sh` 的重写 —— 上游至今用本内核
-        不支持的 `flags dynamic` map + `update @bytes_in`，且只挂 forward 单钩子；
-        丢掉它 → **速率列恒为 `—`**。详见红线 7/8 与第 4 节。
-     2. `Makefile` 的 `LUCI_DEPENDS` 去掉 `+hostapd-utils` —— 该符号只在选中
-        hostapd/wpad 变体时存在，x86_64 无 WiFi → 不可满足 → kconfig 把整包
-        连同 `luci-i18n-trafficctl-zh-cn` 一起从 `.config` 丢弃。
-        丢掉这个修正 → **界面变英文、i18n 断言失败**（构建不报错，症状隐蔽）。
-     3. `status.js`/`status.css`/`menu.d`/`config`/`rpcd` 的刷新与 tab 改动 ——
-        丢掉它 → **冷启动不再自动刷新**、或设置区冒出内层 tab。
-        页面级 tab 为**设备 | 设置 | 端口转发**
-        （v0.7.0 起 Telegram tab 已全链路移除，见红线 9 第 3 条补充）。
-        **轮询必须防重入**（`setInterval(tick, …)` + `queryInFlight` + `document.hidden`）：
-        一次 `summary` 实测 1.5–1.9 秒，而档位可设 1 秒，退回
-        `setInterval(runQuery, …)` 会让请求层层堆积、rpcd 不断 fork 子脚本、
-        路由器 load 飙到三位数、页面最终 `XHR request timed out`。
-     4. `po/zh-cn/luci-app-trafficctl.po` —— 丢掉它 → **中文界面变英文**。
-     5. `host.js` + `trafficctl-device.sh` 的**主机实时连接详情页**（v0.5.0）——
-        丢掉它 → 概览「流量排行」与设备表 IP 的链接 404。要留意三点：
-        - 详情页路由 `admin/status/trafficctl/host/*` 在 `menu.d` 里**不设 `title`**：
-          可直达、可收藏、可后退，但**不进侧边栏**（`ui.menu.getChildren` 会跳过
-          无 title 的节点）。给它加回 title 就会多出一个点不开的菜单项。
-        - `trafficctl-device.sh` 读的是 conntrack 的**第二个**（回复方向）元组，
-          否则源端口与「外网地址」全空、且上下行会变成同一个数。
-        - 13 列在 shadcn 主题下必须由 `.tc-host-table` 自己用 grid 定列：
-          该主题下 LuCI 的 `.table/.tr/.th` 是 `display:block`，表头会竖着堆成一列
-          （既有设备表当前也是这个表现，本次未改动其布局）。
-     6. `settings.js` + `common.js` 的**设置独立 tab**（v0.6.0；布局于 v0.6.2 再调整）
-        —— 配置项整体从设备页迁到 `admin/status/trafficctl/settings`；两页共用
-        `resources/trafficctl/common.js`（rpc 声明、localStorage 选项、
-        开关/chip/折叠卡片控件）。丢掉它 → 配置重新挤回设备页，或两页各持一份
-        定义而渐渐不一致。易错点：
-        - **`common.js` 必须 `return baseclass.extend({…})`**。LuCI 前端 require
-          在 `luci.js` 里对工厂返回值做 `Class.isSubclass(_class)` 断言，返回普通对象
-          直接抛 `TypeError: "…" factory yields invalid constructor`，整页加载失败。
-          require 返回的是实例，故调用方写 `T.fmtBytes(...)` 成立。
-        - **软件卸载的橙黄横幅必须保持移除**（`mkOffloadBanner` 对 `software` /
-          `software-counter` 直接 `return null`）；但**硬件卸载的告警必须保留**，
-          那说的是该模式下 conntrack 字节计数器确实不更新、速率会显示为 0。
-        - **每个视图都要自己注入 `status.css`**（`status.js` / `settings.js` /
-          `host.js` / `portfw.js`）。LuCI 只自动加载与**视图同名**的样式，而
-          htdocs 下没有 `settings.css`。漏注入时页面不报错，
-          只是所有 `tc-*` 类失效（卡片无边框、chip 无底色）。
-        - **设备页与设置页不得各持一份同名配置档位（v0.6.2 起方向）**：
-          `pollIntervalPick` / `avgWindowPick` / `avgMethodPick` / `refreshPick` /
-          `defaultsBtn` 必须存在于 **`status.js`**（设备表上方），且**不得**在
-          `settings.js` 留副本 —— 两处各一份时同一档位会显示不同默认值。
-          （v0.6.0~v0.6.1 曾短暂相反，见 CHANGELOG。）
-        - **设备页操作区是三块并进同一张卡片的**：设备选择（`.tc-picker-row`，
-          块内 `flex-wrap: nowrap`）、切断（`.tc-cut--embedded`）、
-          View & Table（`.tc-rate-panel__tail`）。并块时**必须用占位容器**
-          （`actionSlot` / `scopeSlot` / `panelTail`）：被并进来的块往往在文件**下方**
-          才构造，直接引用会因 `var` 提升拿到 `undefined` —— 轻则页面出现字面的
-          "undefined"，重则 `appendChild` 抛错导致整页空白（两样都踩过）。
-          v0.6.9 起 `scopeSlot` 已随「目标/共享/网段」一并删除（picker 行只剩
-          「所有设备 | 搜索框」）。
-        `tools/verify-trafficctl-invariants.sh` 已对以上各点加断言。
-        - **设备表是「两行式」的（v0.6.3）**：`ip`（IP 上 / MAC 下）、
-          `_tydev`（类型上 / 厂商下）、`_actions`（详情上 / 限制下）三列各含
-          两个子元素。要留意四点（都是实测踩出来的）：
-          - 两行靠子元素**块级**成立。`.table.tc-table .td` 是 `table-cell`，
-            `.tc-cell-stack` 的 flex 列布局会被覆盖，故子元素若都是 `<a>`
-            （inline）会并成一行 —— `.tc-actions a` 必须显式 `display:block`。
-          - 表格必须 `table-layout:fixed`。`auto` 布局下 `width` 只是建议：
-            数字列被拉成几百像素空槽，同时「操作」列被压到放不下两个链接
-            → 整表溢出（实测 153px）。**列宽由 JS 的列预算给**（见下方
-            v0.6.6 那条），不要写回 CSS 百分比。
-          - **默认隐藏列只能有一处声明**：模块级 `TC_COL_DEFAULT_HIDDEN` +
-            `isColHidden()`。列定义里再写 `hide:true` 就是两份真相，必然漂移。
-          - 列开关**必须写显式布尔，不能 `delete`**：`delete` 后
-            `isColHidden` 回落到默认隐藏，表现为「勾是勾了、表格里却没有这一列」。
-        - **设备厂商来自固件内 `luci-app-oui`**（100KB 厂商库，实测能查
-          Xiaomi/Midea/Huawei/TCL/TP-Link）。它只导出 `decorate`，**没有公开的
-          `lookup`** —— 用一个游离节点让 `decorate` 写 `title` 再读回。
-          `oui.js` 未被任何视图加载过时需按需 `<script>` 载入一次；
-          取不到厂商保持占位「—」，不可抛错（它是附加信息，不该让表格挂掉）。
-          CI 未显式启用该包，靠固件里已存在；换目标平台时先确认它仍在。
-        - **分页切片前必须先排序**（`sortSummaryRows`，与表内同一套规则），
-          否则第一页不是真正的最快设备。分页只在「所有设备」模式出现。
-        - **参照图若来自别的系统**（如爱快），先逐列核对数据源再动手：
-          本机无 WiFi 硬件（`iw dev` 返回 0 个接口），故「连接AP / SSID」
-          两列没有来源；后端也不产出在线时长（无 `first_seen`）。
-        - **四组档位收在 ☰ 菜单里（v0.6.4；类名于 v0.6.6 改为通用 `tc-menu*`）**：
-          `tc-menu` + `tc-menu-btn` + `tc-menu-panel`（面板默认 `tc-hidden`）。
-          浮层绝对定位，展开时设备表不跳动；点别处 / Esc / 再点按钮收起，
-          面板内点击不收起。两个 `document` 监听器**必须具名挂到实例并在
-          `handleTeardown` 摘除**，否则切 tab 后仍在收点击、闭包抓着已移除的 DOM。
-        - **冷启动轮询默认 1 秒，三处必须一致**（v0.6.4）：前端
-          `common.js` 的 `siteDefaults.pollInterval`、UCI
-          `root/etc/config/trafficctl` 的 `option poll_interval`、rpcd
-          `luci.trafficctl` 的 `${poll:-N}` 兜底。任一不同 → 界面与路由器下发值
-          漂移。三处都有断言。
-        - **字节轮询必须防重入**（v0.6.4 加固）：`pollBytes` / `pollDrops` /
-          `pollShapeStats` 各有 `*InFlight` 闸，且 `.catch` 里也要解锁 ——
-          只 `.then` 解锁会在一次请求失败后让轮询永久停摆。1 秒档位下单次 RPC
-          最坏实测 1.9s，无闸时 30 秒内重叠 3 次（≥2 并发）。
-          实测方法：`performance.getEntriesByType('resource')` 过滤 `/ubus/`，
-          比对相邻请求的 `startTime` 与 `startTime+duration` 是否交叠；
-          **测量窗口不要跨页面加载**，否则会把首屏那一次正常并发算成重叠。
-        - **表格居中限定在 `.tc-table--center` 作用域（v0.6.5）**：三处真正的
-          表格（设备表 / 连接表 / 分组表）带该类，**扩展统计面板不带** ——
-          它是「标签 — 数值」两栏行，居中就读不成列表。两条易错：
-          - 两行式单元格（`.tc-cell-stack`）的子项对齐由容器 `align-items`
-            决定，**只设 `.td { text-align }` 管不到**，必须另加
-            `align-items: center`，否则 IP/MAC 与类型/厂商两列会左贴。
-          - **不要改全局的 `.tc-right` / `.tc-center`**（表格之外也在用），
-            一律限定在 `.tc-table--center` 内。
-          断言只数 `class':` 开头的真实代码行并要求**恰好 3 处** ——
-          直接 grep 类名会把注释行也算进去（实测虚报成 4 处）。
-        - **按钮组与弹出面板（v0.6.6）**：`tc-menu-group`（右对齐的按钮组）>
-          `tc-menu`（按钮 + 浮层）> `tc-menu-btn` + `tc-menu-panel`。
-          两个菜单共用 `mkPopupMenu()` 工厂：顺序固定为**可见列 | ☰**，
-          且**同一时刻只允许一个面板展开**（两个浮层贴着同一按钮组，同时开
-          会互相盖住）。类名是通用的，**不再叫 `tc-speed-menu*`** —— 改名后
-          旧断言会永远失败，同步更新 `tools/verify-trafficctl-invariants.sh`。
-        - **视图开关直接展示，不裹折叠卡片（v0.6.6）**：`tc-view-toggles`
-          常驻速率限制卡片尾部。v0.6.9 起该行只剩「扩展统计 / 反向DNS」
-          （统计 / 连接 / 活动日志三个开关已移除、恒开，见下）。
-          开关藏在折叠区里的症状是「内容不见了却不知道开关在哪」。
-        - **列表宽按每列最小预算算，不要写回 CSS 百分比（v0.6.6）**：
-          `COL_MIN_PX` 给每列一个像素预算，总和即表的 `min-width`，
-          各列百分比按「预算/总和」以**内联样式**写到表头。CSS 百分比是
-          「占表宽的比例」，列一多就被摊薄 —— 实测 20 列时图表/限制/丢弃/队列
-          被压到 **11px**、MAC 折成三行。两处共存必然矛盾（内联赢），
-          故 CSS 里那批写死的列宽已删除，并有断言禁止它回来。
-        - **统计条与上联概览在同一张卡片里（v0.6.7）**：`overviewCard`
-          （`.tc-overview`）内含 `statsDiv`（抬头行）+ `overviewDiv`
-          （`.tc-ov-body`，即概览本体）。三条易错：
-          - **定义顺序**：`statsDiv` 必须**先**定义，否则 `E(..., [statsDiv, …])`
-            因 var 提升拿到 `undefined` → 整页空白（本仓库踩过两次，已加断言）。
-          - **两个开关独立**（统计 / 概览），卡片只是外壳：可见性由
-            `updateOverviewCard()` 按「至少一个子块**有内容**且未关掉」决定。
-            判据必须含 `firstChild` —— 子块首帧是空的，只看 `tc-hidden`
-            会画出一个**空边框**。
-          - **`statsDiv.className` 是整体赋值**（`'alert-message info'`），会把
-            `tc-hidden` 一起丢掉 → 关掉「统计」后下次轮询又显示出来。
-            必须先记下隐藏态、赋完再还原（`renderSummary` 与单设备分支各一处）。
-        - **上联图按容器实宽重绘，别用 CSS 拉伸（v0.6.7）**：图带 `viewBox`，
-          `width:100%` 会把坐标轴与刻度文字一起放大。故按 `graphWidth`
-          （容器实宽 − padding − border，用 `getComputedStyle` 读）重绘，
-          并监听 `resize`（只在宽度变化 ≥2px 时重画，否则拖窗口会每帧重建表格行）。
-          监听器具名挂到实例、在 `handleTeardown` 摘除。
-        - **例行轮询不得写状态行（v0.6.7）**：`runAll` / `runSingle` 走
-          `setRoutineStatus()` —— 只在**失败**时显示，成功时只清自己的旧错误。
-          此前每秒写「扫描中…/✓ 完成」，1 秒档位下一直闪，是噪声不是信息。
-          **动作类反馈（限速/切断/WiFi）仍必须走 `setStatus()`** 并逐字保留：
-          那些是用户主动触发、必须看到结果的操作；全改成静默会让「切断成功」
-          也没有提示。两者分工有断言守住。
-        - **按钮组与表格之间要有行距**：`.tc-menu-group` 的 `margin: 8px 0 12px`。
-          表格自身没有上边距，只写上边距会让按钮贴住表头（实测间距曾为 0）。
-        - **可见列是复选框，且只列「未显示」的列（v0.6.8）**：清单
-          （`colChipDefs`）**恰好等于 `TC_COL_DEFAULT_HIDDEN`**，不含默认显示的列 ——
-          默认就看得见的列再给个开关，只会让人以为「没勾上就是没有」。
-          断言按此校验（相等 + 每个 key 都在 `cols` 里 + 默认列不得混入）。
-          `cols` 与清单**不再要求键集相等**（旧断言已改）。
-        - **列开关必须写显式布尔，两个方向都写**（v0.6.8 起是
-          `self._hiddenCols[ct.key] = !cb.checked`）：`delete` 会让
-          `isColHidden` 回落默认隐藏，表现为「勾是勾了、表格里却没有这一列」
-          （已用运行时语义复现验证）。
-        - **默认显示列（v0.6.8）**：IP/MAC、连接数、四个速率列、类型厂商、名称、
-          操作、**TCP、UDP、互联网、限制**（共 13 列）默认可见。后四个是 v0.6.8
-          从隐藏提升为显示的，断言会逐个校验它们不在 `TC_COL_DEFAULT_HIDDEN` 里。
-        - **概览常显、无开关、在速率限制之上（v0.6.8）**：`showOverview` 选项已作废，
-          `pollIfaces` / `renderOverview` / `resize` 三处判据**只看 `isAllMode()`**。
-          渲染顺序上 `overviewCard` 必须在 `rateLimitRow` **之前**（读数是先看的、
-          操作是后改的）。改这块时注意两处断言坑（都踩过）：
-          - `grep '^\t\t…'` 用单引号时 `\t` 是**字面反斜杠 t**，不是制表符 →
-            断言永远匹配不到。改用 awk 的 `[ \t]` 字符类。
-          - 改写法后要同步相关断言（如 `= false` → `= !cb.checked`），
-            否则旧断言永远失败、变成噪声。
-        - **三个视图开关已移除、恒开（v0.6.9）**：`showStats` / `showConns` /
-          `showActivity` 作废；开关行只剩「扩展统计 / 反向DNS」。
-          两个易漏点：
-          - **活动日志的内容要首屏主动加载**：原先那一步挂在开关回调里，
-            开关移除后没人触发，整段永远空白。
-          - 容器不得再带初始 `tc-hidden` 门。
-        - **限速入口在设备表行内，不在卡片里（v0.6.9）**：卡片里的速率档位行
-          与「目标/共享/网段」已删除。点某行「限制」打开 `tc-limit-popup`，
-          目标取自 `_limitIp`（由 `mkLimitPopup`/`openLimitPopup` 设置）。
-          **`scopeInput` 已删除**，不要在别处引用。
-          - 弹层挂在 `document.body`，必须随 `handleTeardown` 摘 DOM 与两个
-            `document` 监听器。
-          - **定位要先显示再量 `offsetHeight`**：弹层高度随内容变化（自定义行、
-            上行分栏可展开），用固定估值会把它放到视口外（实测 192px 高、
-            只剩 40px 空间）。下方放不下且上方更宽裕时翻到行上方。
-        - **「已有的网段限制」列表必须保留**（`renderSubnetLimits`）：它是既有
-          全局限速**唯一**可见、可删的地方。删掉它，此前设过全网/网段限速的人
-          再也去不掉那条规则。
-        - **`upRow` 曾经是孤儿节点**：构造后从未挂进 DOM，「上下行分别设置」
-          按钮切换的是一个游离节点，点了永远看不到输入框。v0.6.9 已挂进弹层。
-          改这块时确保它仍在某个渲染树里。
-   新增/修改该包的中文字符串后，跑 `python3 tools/check-trafficctl-i18n.py`
-     （缺失会失败；用 `--write-pot` 同步模板）。**新增的视图/共用文件要一并加进
-     `tools/check-trafficctl-i18n.py` 的 `JS_FILES`**，否则该页的中文缺译
-     不会被校验发现（表现为页面中英混排）。当前已列入 `status.js` / `portfw.js` /
-     `host.js` / `settings.js` / `common.js`。
+   改完 `package/` 下任何文件后**必须**跑
+   `python3 tools/regen-trafficctl-patches.py <上游包目录>` 重算 patch，
+   否则 CI 的 `Verify luci-app-trafficctl local invariants` 会 `exit 1`。
+   升级上游用 `sh tools/sync-trafficctl.sh <tag>`。
 
+   **六项本地改动必须保留**（被覆盖会静默失效，界面不报错、构建也成功）：
+   ① `trafficctl-bytes-nft.sh` 重写（丢掉 → 速率列恒 `—`）；
+   ② `Makefile` 去掉 `+hostapd-utils`（丢掉 → 整包被 kconfig 丢弃、界面变英文）；
+   ③ `status.js`/`status.css`/`menu.d`/`config`/`rpcd` 的刷新与 tab 改动；
+   ④ `po/zh-cn/*.po`（丢掉 → 中文界面变英文）；
+   ⑤ `host.js` + `trafficctl-device.sh` 主机连接详情页；
+   ⑥ `settings.js` + `common.js` 设置独立 tab。
+
+   **每条的具体易错点、实测数据与断言位置见
+   [`patches/luci-app-trafficctl/README.md`](patches/luci-app-trafficctl/README.md)
+   的「本地改动清单」一节** —— 那是本条的完整版，改 trafficctl 前必读。
 ---
 
 ## 3. 构建链路关键点（改 CI 前必读）
@@ -416,7 +229,7 @@ dnsmasq:53（唯一缓存 + 唯一分流层）
 ### 4.0.1 ⚠️ 域名归属与自动改道的硬约束（v0.13.0）
 
 > 设计依据：[`docs/adr/0006-domain-routing-and-reroute.md`](docs/adr/0006-domain-routing-and-reroute.md)。
-> 落地校验：`sh tools/verify-dnschain-domains.sh`（121 条断言，CI 会跑）。
+> 落地校验：`sh tools/verify-dnschain-domains.sh`（126 条断言，CI 会跑）。
 
 先记住三个概念，混了就必然改错：
 
@@ -477,7 +290,7 @@ dnsmasq:53（唯一缓存 + 唯一分流层）
 **新增/修改这一块后必须跑**（CI 同一份逻辑）：
 
 ```sh
-sh tools/verify-dnschain-domains.sh          # 121 条契约断言
+sh tools/verify-dnschain-domains.sh          # 126 条契约断言
 python3 tools/check-dnschain-lua.py          # 121 条：语法 + 模型 + 真实渲染页面
 python3 tools/render-dnschain-diagrams.py    # 44 条：图示纯几何
 python3 tools/extract-dnschain-i18n.py       # 中文文案完整性（缺译会中英混排）
@@ -939,169 +752,45 @@ MosDNS 的 `reject 0` 返回的是 `rcode=0` + `ancount=0`（合法答复：明�
 
 ## 9. 当前未决 / 风险
 
-- **[已解决] `filter_aaaa` 语义冲突**：v0.4.0 起仓库值与路由器在线值统一为 `'1'`，
-  依据见第 5 节与 `docs/adr/0001-filter-aaaa-semantics.md`。
-- **[已处理] 本机排查脚本防误提交**：`.gitignore` 已排除本机工具（含明文口令）、
-  一次性排障报告与编译产物；`.gitattributes` 已加 `*.ps1 text eol=lf`。
-  该文件是安全网而非免检牌——提交前仍须确认 `git status`。
-- **[已处理] `v0.3.5` 无 tag**：HEAD 早已含 v0.3.5 的修复提交但从未打 tag；
-  v0.4.0 未补打该 tag（仅本地标签现状，不影响代码）。
-- **[已解决] mosdns 模板的 `reject` 前置**：v0.4.0 已新增
-  `files/etc/ssrplus/mosdns-config.yaml` overlay 并加 CI 契约校验。
-  **硬约束：`upstreams:` 必须留在第 14 行**（init 脚本用
-  `awk -v line=14 'NR == line+1 {print text} 1'` 注入上游），因此该文件的
-  说明性注释只能写在末尾，顶部不得增删任何行。
-- **[已解决] `rps_flow_cnt` 的清零点**：确认为 `/usr/libexec/network/packet-steering.uc`
-  第 80–86 行——UCI `network.@globals[0].steering_flows` 未设置时，默认值
-  `local_flows=0` 被无条件写入；其 `service_triggers` 含 `interface.*` raw trigger，
-  接口事件会再次清零。**若日后需要它非零，应设 `network.globals.steering_flows`
-  （上游 UCI 开关），不要改 `rc.local`。**
-- **[生成路径已查明，待批准] dnsmasq 日志与 Apple 域名的明文 DNS**（审计 §10 D13/D17）：
-  两项都**不能用 overlay 硬覆盖**，原因已查清（详见 `docs/audit/2026-10-09-network-audit.md`
-  末尾「2026-10-10 复核」一节）：
-  - `log-facility=/dev/null` 由 LEDE 上游
-    `package/lean/default-settings/files/zzz-default-settings` 每次构建
-    `sed -i '/log-facility/d'` 再 `echo` 写入 —— overlay 会被再追加一行。
-    正确做法是 UCI `dhcp.@dnsmasq[0].logfacility`（init 脚本第 944 行转成命令行参数，
-    命令行优先于 conf-file）。
+**只列真正未决的。已解决的历史条目见本节末尾的归档说明。**
+
+- **[待批准] dnsmasq 日志与 Apple 域名的明文 DNS**（审计 §10 D13/D17）：
+  两项都**不能用 overlay 硬覆盖**，生成路径已查明：
+  - `log-facility=/dev/null` 由 LEDE 上游 `zzz-default-settings` 每次构建
+    `sed -i '/log-facility/d'` 再 `echo` 写入 → overlay 会被再追加一行。
+    正确做法是 UCI `dhcp.@dnsmasq[0].logfacility`（init 脚本转命令行参数，优先于 conf-file）。
   - `applechina.conf` 的 173 条明文 `114.114.114.114` 由
-    `/etc/init.d/shadowsocksr` 第 1442–1453 行处理。**陷阱**：把 `apple_dns` 设成
-    `127.0.0.1#5353` **不幂等** —— `old_appledns` 只用 `grep -oE` 抽 IP、丢掉端口，
-    二次启动会叠成 `127.0.0.1#5353#5353`。推荐做法是 overlay 该文件且**不设**
-    `apple_dns`（此时那段 `if [ -n "$new_appledns" ]` 整体跳过，文件原样拷入）。
-  - `whitelist_forward.conf` 已**不是**问题：当前 6 行且形状为
-    `nftset=/域名/4#inet#ss_spec#whitelist_domain`（fw4 正确写法），上游升级后自行改掉。
-  改动这两项属「修改 DNS 配置」，**须先申请批准**。
-- **[已解决] `package/luci-app-trafficctl` 的 vendored 副本维护**（v0.4.7，升级到 1.21.4）：
-  改为「**vendored 包 + patch 差分 + 同步脚本 + CI 断言**」四件套，不再依赖人工记忆。
-  - `patches/luci-app-trafficctl/` 记录相对上游的全部差分，`UPSTREAM` 记录基线 tag。
-  - 改功能就改 `package/` 下的文件，改完跑
-    `python3 tools/regen-trafficctl-patches.py <上游包目录>` 让 patch 跟上；
-    升级上游跑 `sh tools/sync-trafficctl.sh <tag>`。
-  - CI 步骤 `Verify luci-app-trafficctl local invariants` 会从 `UPSTREAM` 记录的 tag
-    **真实克隆上游、重放全部 patch、要求与 vendored 包逐字节一致**，
-    并断言本地改动仍在（nft 后端语法/三钩子/`@lan`、`LUCI_DEPENDS` 不含
-    hostapd-utils、`optRefresh` 与 `1s` 档位、**Telegram 已全链路移除**、
-    中文翻译完整性）。
-  全部断言集中在 `tools/verify-trafficctl-invariants.sh`（本地可复跑，
-  与 CI 同一份逻辑；`TCTL_UPSTREAM_LOCAL=<上游包目录>` 可离线运行）。
-  **必须保留的本地改动**（被覆盖会静默失效，不会报错）：
-  1. 重写 `root/usr/local/bin/trafficctl-bytes-nft.sh` —— 上游**至今未修**，
-     仍用本内核不支持的 `flags dynamic` map + `update @bytes_in` 且只挂 forward 单钩子
-     （见红线 7/8 与第 4 节的「代理流量走 INPUT/OUTPUT」）。丢掉它 → **速率列恒为 `—`**。
-  2. `Makefile` 去掉 `LUCI_DEPENDS` 里的 `+hostapd-utils` —— 见第 3 节。
-     丢掉它 → **整包与中文包一起被 kconfig 丢弃，界面变英文**（构建不报错）。
-  3. `status.js` / `status.css` / `menu.d` / `config` / `rpcd` 的
-     刷新与 tab 改动 —— 默认 5 秒自动刷新、1s/2s 档位、`refresh_interval` 端到端
-     接线、页面级 tab 为**设备 | 设置 | 端口转发**。
-     丢掉它 → **冷启动不再自动刷新**、或设置区冒出内层 tab（两级 tab 让人分不清层级）。
-  4. `po/zh-cn/luci-app-trafficctl.po` —— 丢掉它 → **中文界面变英文**。
-  5. `host.js` + `trafficctl-device.sh` 的**主机实时连接详情页**（v0.5.0，见红线 9）——
-     丢掉它 → 概览「流量排行」与设备表 IP 的链接 404。
-  6. `settings.js` + `common.js` 的**设置独立 tab**（v0.6.0；布局于 v0.6.2 再调整）
-     —— 配置项从设备页迁到 `admin/status/trafficctl/settings`，两页共用
-     `resources/trafficctl/common.js`；同时移除软件卸载的橙黄横幅。
-     丢掉它 → 配置重新挤回设备页、横幅复现，或两页各持一份定义。
-     v0.6.2 起设备页操作区收拢为一张卡片（设备选择 + 目标 + 档位 + 切断 +
-     View & Table），「表格与速率」档位则从设置页迁回**设备页设备表上方**
-     （见红线 9 第 6 项与 CHANGELOG v0.6.2 的说明）。
-     v0.6.3 起设备表为**两行式**（IP/MAC、类型/厂商、操作各一列两行）、
-     16 列压到 9 列、新增「累计上行/下行」与「设备厂商」（OUI）、底部有分页条 ——
-     详见红线 9 第 6 项的补充与 CHANGELOG v0.6.3。
-     v0.6.4 起四组档位（轮询/窗口/方法/刷新）收进 ☰ 菜单（默认收起），
-     冷启动轮询默认 2s → 1s（前端 / UCI / rpcd 三处一致），
-     三类字节轮询加防重入闸 —— 详见红线 9 第 6 项的补充与 CHANGELOG v0.6.4。
-     v0.6.9 起设备页操作区进一步简化（picker 行只剩「所有设备 | 搜索框」、
-     三个视图开关移除恒开），限速入口移进设备表每行的「限制」弹层。
-     v0.7.0 起 **Telegram 全链路移除**（视图 / menu.d / acl.d / rpcd 三方法 /
-     init.d 服务 / 两个脚本 / UCI 段 / hotplug 通知 / 日志分类开关），
-     并把三个被复用的 `tg-*` 类名改为中性的 `tc-*`。
-- **[v0.7.0 起] `luci-app-trafficctl` 的 patch 生成器支持「删除文件」。**
-  `tools/regen-trafficctl-patches.py` 的分组此前只支持「改/加文件」，而移除
-  Telegram 必须删掉实现（`init.d` + 两个脚本）。现在四元组
-  `(patch, desc, files, deletes)` 的第二份清单会被 `unlink` 后再 `git add -A`，
-  于是 patch 里出现 `deleted file mode`，套用时真正删除。
-  **两条约束**：
-  - 删除清单里只能写**上游存在**的文件。`telegram.js` 是本仓库新增的视图
-    （上游没有），对它做「删除上游不存在的文件」会让 `git apply` 直接失败 ——
-    它只需不再出现在 0002 的新增清单里，重放后自然不存在。
-  - 改动 `package/` 后 100755/100644 的索引计数会变，`verify-trafficctl-invariants.sh`
-    里的硬编码数字（现为 **26**）要同步更新，否则断言会误报「执行位丢了」。
-- **[已解决] 上游依赖把整包拖下水（v0.4.7 起潜伏，v0.4.9 修）**：
-  上游 1.21.4 的 `LUCI_DEPENDS` 含 `+hostapd-utils`，而该包在 lede 里是
-  `DEPENDS:=@<某个 hostapd/wpad 变体>` + `VARIANT:=*` —— 只有选中 hostapd/wpad
-  变体时符号才存在。本目标 x86_64 无 WiFi → 不可满足 → kconfig 把
-  `luci-app-trafficctl` 整包判为不可选，连带 `luci-i18n-trafficctl-zh-cn`
-  （`DEPENDS:=$(PKG_NAME)`）一起从 `.config` 消失。
-  **排查这类问题的方法**：不要在日志里 grep「符号是否存在」（CI 不 dump 整个
-  `.config`，`is not set` 行又没有 `=`，很容易误判）。正确做法是
-  **对比「已知能通过的旧版本」与「现在」的差异**，或直接在 CI 里
-  `grep -E 'trafficctl' .config` 把全部相关行打出来。
-- **[已解决] CI 守卫的依赖断言曾把正常情况判成失败**（v0.4.7 首次构建，v0.4.8 修）：
-  我曾把 `hostapd-utils` 断言为「必须 `=y`」，但上游 `hostapd/Makefile` 里它的
-  `DEPENDS` 是 `@` 加 `HOSTAPD_PROVIDERS` 列表 —— **只有选中某个 hostapd/wpad
-  变体时该符号才存在**。x86_64 目标无 WiFi 硬件，符号合理地不存在 → 构建失败。
-  教训：**断言一个 `CONFIG_PACKAGE_*` 之前，先确认该符号在当前目标上确实存在**；
-  硬件相关的包只能「报告状态」，不能「必须 =y」。
-- **[已解决] patch 里的伪 mode 变更**（v0.4.8）：regen 脚本在临时目录建 git 仓库，
-  而上游 clone 在 Windows 挂载点（`/mnt/c`）被 DrvFs 一律报告为 `0777`，于是
-  `git add -A` 记成 `100755`，与应有的索引模式不符（上游权威
-  **29 × 100755 + 11 × 100644**），套用时打印
-  `warning: xxx has type 100755, expected 100644`。
-  处置：regen 以**本仓库 git 索引**为权威模式表，在 `git add` 之前 `os.chmod`。
-  排查同类问题的入手点：`grep -h '^old mode\|^new mode' patches/luci-app-trafficctl/*.patch`
-  应为空。
-- **[已修复] trafficctl 速率恒为 `—`**（v0.4.5）：原 `trafficctl-bytes-nft.sh` 用了
-  本内核不支持的 nftables 语法且错误被 `2>/dev/null` 吞掉，只剩空链；
-  且只挂 forward 链、看不到 REDIRECT 后的代理流量。
-  详见 CHANGELOG v0.4.5 与红线 7/8。
-- **[已解决并实测] 所有 Release 曾经都是空的（v0.4.5~v0.4.11，v0.4.12 修）**：
-  这个问题有**两个叠加的根因**，互相掩盖，只看最后那句错误提示会一直找错方向：
+    `/etc/init.d/shadowsocksr` 处理。**陷阱**：把 `apple_dns` 设成 `127.0.0.1#5353`
+    **不幂等** —— `old_appledns` 用 `grep -oE` 抽 IP、丢掉端口，二次启动叠成
+    `127.0.0.1#5353#5353`。推荐 overlay 该文件且**不设** `apple_dns`。
+  - `whitelist_forward.conf` 已不是问题（当前 6 行、fw4 正确写法）。
+  改动属「修改 DNS 配置」，**须先申请批准**。详见
+  `docs/audit/2026-10-09-network-audit.md` 末尾「2026-10-10 复核」。
 
-  1. **`gh` 无法确定仓库** —— `Upload firmware to GitHub Release` 步骤的
-     `working-directory` 是**工作区根**，而本工作流把代码签出到
-     `openwrt-build/` 与 `lede/` **子目录**，根目录**没有 `.git`**，于是报
-     `failed to run git: fatal: not a git repository`。
-     而当时的等待循环 `if gh release view … >/dev/null 2>&1; then break; fi`
-     把**任何**失败都当成「Release 还没创建」→ 硬错误被吞、白等 60s，
-     最后抛出误导性的「Release 不存在（release.yml 未运行？）」。
-     **修法**：显式 `GH_REPO: ${{ github.repository }}`；等待循环区分
-     「未找到」与硬错误。
+- **[风险] 上行吞吐无法测量**：本机无可用上传端点（公共镜像 PUT 返回 405），
+  trafficctl 的上行速率列只能靠 conntrack 字节差，冷启动首帧为 `—`。
 
-  2. **工作流令牌权限不足**（v0.4.12 才找到）—— 修好第 1 条后，上传仍然被拒：
-     `HTTP 403: Resource not accessible by integration`。
-     原因是本仓库默认工作流令牌权限为 **read**
-     （`gh api repos/<o>/<r>/actions/permissions/workflow`
-     → `{"default_workflow_permissions":"read"}`），而
-     **`build-openwrt.yml` 没有声明 `permissions`**，于是拿不到写权限。
-     对照组：`release.yml` 自己声明了 `permissions: contents: write`，
-     所以它能建 Release —— **两个工作流的令牌是各自独立申请的**。
-     **修法**：`build-openwrt.yml` 顶层加 `permissions: contents: write`。
+- **[风险] NAT1（fullcone）与软件 flow offloading 的交互无一手来源**：
+  本机实测二者同时开启时 fullcone 仍生效，但上游未文档化该组合，升级后需复测。
 
-  另加了**兜底断言**：上传后 Release 上至少要有一个 `.img.gz`，否则 `exit 1`。
+- **[约束] `mosdns-config.yaml` 的 `upstreams:` 必须留在第 14 行**
+  （init 脚本用 `awk -v line=14` 注入上游）→ 说明性注释只能写在末尾，
+  顶部不得增删任何行。该文件现由 `files/etc/ssrplus/` overlay 提供。
 
-  **教训**：
-  - `gh` 命令在 CI 里必须能确定仓库（`GH_REPO` 或 `--repo`），
-    否则在非 git 目录下必失败。
-  - 「等待某资源就绪」的循环不能把**所有**错误都当作「还没好」，
-    否则真实错误被静默吞掉，只在最后抛一句与根因无关的提示。
-  - 写 Release assets 需要 `permissions: contents: write`；
-    仓库默认可能是 read，**不要假设默认够用**。
-  - 发版这类动作要加**结果断言**（产物数 ≥ 1），不能只看步骤是否退出 0。
-- **[已处理] CI 触发条件**：`on.push` 已加 `paths-ignore`
-  （`**.md`/`docs/**`/`.gitignore`/`LICENSE`），纯文档推送不再白跑 3.5 小时。
-  依据是 GitHub 官方文档原文 *"Path filters are not evaluated for pushes of tags."*
-  —— **只对分支推送生效**，推 tag 仍照常触发，不影响发版。
-  改这段属于「出错会静默失效」的一类（例如误把 tags 一起忽略 → 发版永不触发），
-  改完必须用 PyYAML 解析 `on:` 块，逐项确认 `branches`/`tags`/`workflow_dispatch`/
-  `schedule` 都在，且没有同时声明 `paths` 与 `paths-ignore`（GitHub 不允许共存）。
-- **[风险] 上行吞吐无法测量**：本机无可用上传端点（公共镜像 PUT 返回 405，
-  且未安装测速工具）。SQM 的上行效果目前只能通过「上行饱和时 ping 抬升」间接验证。
-- **[风险] NAT1（fullcone）与软件 flow offloading 的交互无一手来源**：本机实测二者
-  已并存生效（`xt_FULLCONENAT` 与 `xt_FLOWOFFLOAD` 同时被引用），但跨流量形态的
-  保持情况仍需刷机后实测。
+### 已归档的历史条目
 
----
+以下条目曾在此节，均已解决，细节见 `CHANGELOG.md` 对应版本段：
+
+| 条目 | 解决版本 |
+|---|---|
+| `filter_aaaa` 语义冲突 | v0.4.0（后被 v0.10.0 反转，见 §5） |
+| 本机排查脚本防误提交 | `.gitignore` + `.gitattributes` |
+| `v0.3.5` 无 tag | 仅本地标签现状，不影响代码 |
+| mosdns 模板 `reject` 前置 | v0.4.0 |
+| `rps_flow_cnt` 清零点 | 确认为 `packet-steering.uc`；需非零时设 `network.globals.steering_flows` |
+| trafficctl vendored 维护 / patch 生成器 / 速率恒 `—` / 上游依赖拖累 / CI 守卫误判 / 伪 mode 变更 | v0.4.5~v0.4.9，见红线 9 与 `patches/luci-app-trafficctl/README.md` |
+| 所有 Release 曾经都是空的 | v0.4.12 |
+| CI 触发条件 | `on.push.paths-ignore` |
 
 ## 附：本机排查工具（勿提交）
 

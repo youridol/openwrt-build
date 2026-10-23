@@ -33,12 +33,6 @@ dnschain_log() {
 	echo "dnschain: $*"
 }
 
-dnschain_die() {
-	logger -t dnschain "ERROR: $*"
-	echo "dnschain: ERROR: $*" >&2
-	exit 1
-}
-
 # ------------------------------------------------------------
 # 读取配置（带默认值）
 # 用法: dc_get <section> <option> <default>
