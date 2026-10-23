@@ -30,7 +30,7 @@
 | P2-10 `tcp_timestamps = 0` | 已处理 | `sysctl.conf` 改为保持内核默认 1 |
 | P2-11 steam 反复回源 | 观察项 | 本次未复现 |
 | P2-12 对外监听面 | 未变 | 属环境事实，非缺陷 |
-| P2-13 dnsmasq 日志被静默丢弃 | **仍未做** | 生成路径已查明（上游 `zzz-default-settings` 每次覆盖），正确做法是 UCI `dhcp.@dnsmasq[0].logfacility`；**待批准** |
+| P2-13 dnsmasq 日志被静默丢弃 | **已修（v0.14.8）** | 上游 `zzz-default-settings` 写 `log-facility=/dev/null`，生成的配置 `conf-file=` 引用它。⚠️ **不能用 UCI `logfacility`**（会与 conf-file 重复 → dnsmasq 起不来）、也不能用 `/dev/log`（ujail 未挂载）。唯一可用是 `log-facility=syslog`，已落在 `99-gaming-optimize` §6.9 + 收敛器自愈 |
 | P2-14 `whitelist_forward.conf` 无效冗余 | 已消解 | 仓库不再 overlay 该文件，用上游默认（已是 fw4 正确写法） |
 | 工程-13 `.gitattributes` 缺 `*.ps1` | 已处理 | 已加 `*.ps1 text eol=lf` |
 | 工程-14 AGENTS.md 三处失实 | 已处理 | 后续版本多次校正 |

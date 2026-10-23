@@ -20,7 +20,7 @@
 | `patches/luci-app-trafficctl/*.patch` | trafficctl 相对上游的差分记录（**不参与构建**，供跟进上游 + CI 一致性校验） | 由 `tools/regen-trafficctl-patches.py` 生成，勿手改 |
 | `tools/sync-trafficctl.sh` | 升级 trafficctl 到指定上游 tag（覆盖包目录 + 重算 patch + 回放校验） | 直接用 |
 | `tools/check-trafficctl-i18n.py` | 校验中文翻译覆盖率；`--write-pot` 重生成 pot 模板 | 直接用 |
-| `tools/verify-dnschain-domains.sh` | 域名归属与自动改道的 126 条契约断言（CI 与本地同一份） | 直接用 |
+| `tools/verify-dnschain-domains.sh` | 域名归属与自动改道的 129 条契约断言（CI 与本地同一份） | 直接用 |
 | `tools/check-dnschain-lua.py` | 用 lupa（真实 Lua）跑语法 + 模型 + **真实渲染页面每个 `cfgvalue()`** | 直接用 |
 | `tools/render-dnschain-diagrams.py` | 两张思维导图的纯几何校验 + 输出可打开的 HTML 预览 | 直接用 |
 | `tools/extract-dnschain-i18n.py` | 提取 `translate()` 中文并比对 PO（`--write` 追加缺失） | 直接用 |
@@ -233,7 +233,7 @@ dnsmasq:53（唯一缓存 + 唯一分流层）
 ### 4.0.1 ⚠️ 域名归属与自动改道的硬约束（v0.13.0）
 
 > 设计依据：[`docs/adr/0006-domain-routing-and-reroute.md`](docs/adr/0006-domain-routing-and-reroute.md)。
-> 落地校验：`sh tools/verify-dnschain-domains.sh`（126 条断言，CI 会跑）。
+> 落地校验：`sh tools/verify-dnschain-domains.sh`（129 条断言，CI 会跑）。
 
 先记住三个概念，混了就必然改错：
 
@@ -294,7 +294,7 @@ dnsmasq:53（唯一缓存 + 唯一分流层）
 **新增/修改这一块后必须跑**（CI 同一份逻辑）：
 
 ```sh
-sh tools/verify-dnschain-domains.sh          # 126 条契约断言
+sh tools/verify-dnschain-domains.sh          # 129 条契约断言
 python3 tools/check-dnschain-lua.py          # 121 条：语法 + 模型 + 真实渲染页面
 python3 tools/render-dnschain-diagrams.py    # 44 条：图示纯几何
 python3 tools/extract-dnschain-i18n.py       # 中文文案完整性（缺译会中英混排）
@@ -758,18 +758,28 @@ MosDNS 的 `reject 0` 返回的是 `rcode=0` + `ancount=0`（合法答复：明�
 
 **只列真正未决的。已解决的历史条目见本节末尾的归档说明。**
 
-- **[待批准] dnsmasq 日志与 Apple 域名的明文 DNS**（审计 §10 D13/D17）：
-  两项都**不能用 overlay 硬覆盖**，生成路径已查明：
-  - `log-facility=/dev/null` 由 LEDE 上游 `zzz-default-settings` 每次构建
-    `sed -i '/log-facility/d'` 再 `echo` 写入 → overlay 会被再追加一行。
-    正确做法是 UCI `dhcp.@dnsmasq[0].logfacility`（init 脚本转命令行参数，优先于 conf-file）。
-  - `applechina.conf` 的 173 条明文 `114.114.114.114` 由
-    `/etc/init.d/shadowsocksr` 处理。**陷阱**：把 `apple_dns` 设成 `127.0.0.1#5353`
-    **不幂等** —— `old_appledns` 用 `grep -oE` 抽 IP、丢掉端口，二次启动叠成
-    `127.0.0.1#5353#5353`。推荐 overlay 该文件且**不设** `apple_dns`。
-  - `whitelist_forward.conf` 已不是问题（当前 6 行、fw4 正确写法）。
-  改动属「修改 DNS 配置」，**须先申请批准**。详见
-  `docs/audit/2026-10-09-network-audit.md` 末尾「2026-10-10 复核」。
+- **[已修 v0.14.8] dnsmasq 日志曾全部丢失**（审计 P2-13）。
+  根因：上游 `99-default-settings` 每次构建把 `/etc/dnsmasq.conf` 写成
+  `log-facility=/dev/null`，而生成的配置 `conf-file=` 引用它 → 日志进黑洞。
+  实测 `logqueries=1` 但 `logread | grep -c 'dnsmasq\['` 恒为 0。
+
+  ⚠️ **三种「看起来对」的修法都失败，已实测排除，勿再试**：
+
+  | 修法 | 结果 |
+  |---|---|
+  | UCI `dhcp.@dnsmasq[0].logfacility` | **dnsmasq 起不来**：`illegal repeated keyword` —— `init.d/dnsmasq:944` 的 `append_parm` 会再写一条，与 conf-file 重复 |
+  | `log-facility=/dev/log` | **起不来**：`cannot open log /dev/log` —— socket 存在但 ujail 未挂载 |
+  | `log-facility=/tmp/dnsmasq.log` | 能启动但**不写文件**（沙箱只允许白名单路径） |
+  | **`log-facility=syslog`** | **唯一可用** |
+
+  修法两处：`99-gaming-optimize` §6.9（幂等）+ `dnschain-reconcile` 每次收敛自愈
+  （防被上游覆盖）。收敛器只在真改过时才重启 dnsmasq。
+
+- **[风险] `applechina.conf` 的明文 DNS 已解决，但 `apple_dns` 仍不能设**：
+  仓库 overlay 里 175 行全部指向 `127.0.0.1#5353`（唯一含 `114.114.114.114`
+  的是说明历史的注释）。**陷阱**：把 `apple_dns` 设成 `127.0.0.1#5353`
+  **不幂等** —— `old_appledns` 用 `grep -oE` 抽 IP、丢掉端口，二次启动叠成
+  `127.0.0.1#5353#5353`。当前 `apple_dns` 为空是**正确状态**，不要填。
 
 - **[风险] 上行吞吐无法测量**：本机无可用上传端点（公共镜像 PUT 返回 405），
   trafficctl 的上行速率列只能靠 conntrack 字节差，冷启动首帧为 `—`。

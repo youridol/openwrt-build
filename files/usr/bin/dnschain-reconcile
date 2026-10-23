@@ -210,6 +210,29 @@ reconcile_invariants() {
 	uci -q commit dhcp
 	uci -q commit dnsproxy
 
+	# ---- dnsmasq 日志（v0.14.8）----
+	#
+	# 上游 `99-default-settings` 每次构建把 `/etc/dnsmasq.conf` 写成
+	# `log-facility=/dev/null`，而生成的配置又 `conf-file=` 引用它 →
+	# **dnsmasq 日志全部丢弃**（实测 logqueries=1 但 logread 里恒为 0）。
+	#
+	# 不能用 UCI `dhcp.@dnsmasq[0].logfacility` 修：init.d/dnsmasq 的
+	# `append_parm logfacility` 会再写一条，与 conf-file 里的重复 →
+	# `illegal repeated keyword` → dnsmasq **起不来**（实测复现两次）。
+	# 也不能用 `/dev/log`（ujail 未挂载该 socket）。
+	# 实测可用的是 `syslog`。
+	#
+	# uci-defaults 只在刷机后跑一次，这里每次收敛都校正，防被覆盖。
+	if [ -f /etc/dnsmasq.conf ]; then
+		if ! grep -q '^log-facility=syslog$' /etc/dnsmasq.conf 2>/dev/null; then
+			sed -i '/^log-facility=/d' /etc/dnsmasq.conf 2>/dev/null
+			echo 'log-facility=syslog' >> /etc/dnsmasq.conf
+			dnschain_log "已修正 /etc/dnsmasq.conf 的 log-facility=/dev/null（日志原本全丢）"
+			# 只有真正改过才需要重启，避免每次收敛都断一下
+			DNSCHAIN_LOG_CHANGED=1
+		fi
+	fi
+
 	return $rc
 }
 
@@ -360,6 +383,13 @@ main() {
 	if [ -n "$DNSCHAIN_SPLIT_CHANGED" ]; then
 		DNSCHAIN_SPLIT_CHANGED=""
 		dnschain_log "分流片段已重建，重启 dnsmasq 使其生效"
+		/etc/init.d/dnsmasq restart >/dev/null 2>&1 || rc=1
+	fi
+
+	# 日志配置刚被自愈改过 → 同样必须重启才生效
+	if [ -n "$DNSCHAIN_LOG_CHANGED" ]; then
+		DNSCHAIN_LOG_CHANGED=""
+		dnschain_log "dnsmasq 日志配置已修正，重启使其生效"
 		/etc/init.d/dnsmasq restart >/dev/null 2>&1 || rc=1
 	fi
 

@@ -33,6 +33,7 @@ CSS=package/luci-app-dnschain/htdocs/luci-static/resources/dnschain/dnschain.css
 JS=package/luci-app-dnschain/htdocs/luci-static/resources/dnschain/dnschain.js
 PO=package/luci-app-dnschain/po/zh-cn/luci-app-dnschain.po
 UCI_DEF=files/etc/uci-defaults/99-zz-dnschain
+GAMING=files/etc/uci-defaults/99-gaming-optimize
 RECONCILE=files/usr/bin/dnschain-reconcile
 
 pass() { echo "OK   $1"; }
@@ -696,6 +697,38 @@ if grep -q 'cmd_flush' "$HEALTH" 2>/dev/null; then
 	pass "dnschain-health 有 flush 子命令"
 else
 	fail "dnschain-health 缺 flush 子命令（dc_flush_cache 会成死代码）"
+fi
+
+# ── dnsmasq 日志不能是 /dev/null（v0.14.8）──
+#
+# 上游 `99-default-settings` 每次构建把 /etc/dnsmasq.conf 写成
+# log-facility=/dev/null，而生成的配置 conf-file= 引用它 → 日志全丢。
+# 实测 logqueries=1 但 logread 里 dnsmasq 恒为 0 条。
+#
+# ⚠️ 不能用 UCI dhcp.@dnsmasq[0].logfacility 修：init.d/dnsmasq 会再写一条，
+# 与 conf-file 里的重复 → `illegal repeated keyword` → dnsmasq 起不来。
+# 也不能用 /dev/log（ujail 未挂载）。可用的是 syslog。
+# ⚠️ 必须先剥注释再判（AGENTS §6 第 6 条）：这两段代码里都有
+#    「不能用 UCI logfacility / 不能用 /dev/log」的说明性注释，
+#    直接 grep 会命中注释，让断言永久误报。
+_udef_code=$(sed 's/#.*//' "$GAMING" 2>/dev/null)
+_recon_code=$(sed 's/#.*//' "$RECONCILE" 2>/dev/null)
+
+if printf '%s\n' "$_udef_code" | grep -q "log-facility=syslog"; then
+	pass "uci-defaults 把 dnsmasq 日志改为 syslog"
+else
+	fail "uci-defaults 未修正 dnsmasq 日志（/dev/null 会丢弃全部日志）"
+fi
+if printf '%s\n' "$_recon_code" | grep -q "log-facility=syslog"; then
+	pass "收敛器会自愈 dnsmasq 日志配置"
+else
+	fail "收敛器未自愈 dnsmasq 日志配置（被上游覆盖后日志再丢）"
+fi
+# 反向断言：不得用 UCI logfacility（会与 conf-file 重复导致 dnsmasq 起不来）
+if printf '%s\n' "$_udef_code" "$_recon_code" | grep -q "dnsmasq\[0\]\.logfacility"; then
+	fail "用了 UCI logfacility —— 会与 conf-file 重复导致 dnsmasq 起不来"
+else
+	pass "未用 UCI logfacility（避免重复关键字）"
 fi
 
 # ── section 名必须与 config 里的**名字**一致（不是类型）（v0.14.5）──

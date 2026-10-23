@@ -799,6 +799,41 @@ uci set shadowsocksr.@global[0].filter_aaaa='1' \
 log "ssr-plus: filter_aaaa=1 (reject set = domains routed through proxy)"
 
 # ─────────────────────────────────────────────
+# 6.9 dnsmasq 日志：从 /dev/null 改为 syslog
+# ─────────────────────────────────────────────
+#
+# 根因（2026-10-23 实测）：
+#   上游 `99-default-settings:59-60` 每次构建执行
+#       sed -i '/log-facility/d' /etc/dnsmasq.conf
+#       echo "log-facility=/dev/null" >> /etc/dnsmasq.conf
+#   而生成的 `/var/etc/dnsmasq.conf.*` 第 2 行是
+#       conf-file=/etc/dnsmasq.conf
+#   于是那行被加载 → **dnsmasq 的日志全部丢弃**。
+#   实测：`logqueries=1` 但 `logread | grep -c dnsmasq` 恒为 0。
+#
+# ⚠️ 三种「看起来对」的修法都失败，已逐一实测排除：
+#   ① UCI `dhcp.@dnsmasq[0].logfacility` —— init.d/dnsmasq:944 的
+#      `append_parm logfacility --log-facility` 会**再写一条**
+#      `log-facility=...` 进生成文件，与 conf-file 里的重复 →
+#      `illegal repeated keyword at line 13` → **FAILED to start up**
+#      （实测复现两次，dnsmasq 完全起不来，全屋断 DNS）
+#   ② `log-facility=/dev/log` —— 该 socket 存在，但 ujail 沙箱未挂载它 →
+#      `cannot open log /dev/log: No such device or address` → 同样起不来
+#   ③ `log-facility=/tmp/dnsmasq.log` —— 能启动，但**不写文件**
+#      （沙箱只允许写白名单路径），日志照样丢
+#
+#   可用的是 `log-facility=syslog`：dnsmasq 正常启动，日志进 logread。
+#   实测发 2 次查询后 logread 新增 30 条，含完整查询详情：
+#     `dnsmasq[1]: 10 192.168.3.238/54385 reply xxx is <CNAME>`
+#
+# 幂等：先删该行再加，重复执行不会叠加。
+if grep -q '^log-facility=' /etc/dnsmasq.conf 2>/dev/null; then
+	sed -i '/^log-facility=/d' /etc/dnsmasq.conf
+fi
+echo 'log-facility=syslog' >> /etc/dnsmasq.conf
+log "dnsmasq: log-facility=syslog（原 /dev/null 导致日志全丢）"
+
+# ─────────────────────────────────────────────
 # 7. 提交全部 UCI 配置
 # ─────────────────────────────────────────────
 uci commit firewall
