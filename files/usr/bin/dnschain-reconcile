@@ -405,6 +405,28 @@ main() {
 		/etc/init.d/dnsmasq restart >/dev/null 2>&1 || rc=1
 	fi
 
+	# --------------------------------------------------------
+	# 重放分诊结果（v0.16.0）
+	#
+	# 为什么每轮都要跑：nft 的 `china` / `blacklist` 集合由上游
+	# SSR-Plus 在每次 start 时重建（`ssr-rules` 里 `flush set` +
+	# 重新灌入），分诊增补的元素会被清掉。
+	#
+	# 实测（2026-10-24）：清掉后 cdn.staticsfile.org 立刻 000，
+	# 重放后恢复 200 / 114541 字节。
+	#
+	# apply 只读持久化记录、不做探测，开销是几个 nft 调用。
+	# --------------------------------------------------------
+	if [ -x /usr/bin/dnschain-triage ]; then
+		local tri_n
+		tri_n=$(/usr/bin/dnschain-triage apply 2>/dev/null \
+			| sed -n 's/^SUMMARY applied=//p')
+		case "$tri_n" in
+			''|0) : ;;
+			*) dnschain_log "已重放 ${tri_n} 条分诊结果" ;;
+		esac
+	fi
+
 	if [ "$rc" -ne 0 ]; then
 		dnschain_log "收敛完成，但有错误（见上方日志）"
 		return 1

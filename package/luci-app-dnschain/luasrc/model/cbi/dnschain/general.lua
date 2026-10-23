@@ -96,13 +96,12 @@ end
 ------------------------------------------------------------------------
 
 local TAB_LABELS = {
-	overview = translate("概览"),
+	overview = translate("概览与诊断"),
 	domains  = translate("域名"),
 	resolve  = translate("解析"),
 	split    = translate("分流"),
 	proxy    = translate("代理"),
 	dhcp     = translate("DHCP"),
-	diag     = translate("诊断"),
 }
 
 -- section 标题 → tab
@@ -110,8 +109,33 @@ local TAB_LABELS = {
 -- ⚠️ 键必须与 m:section() 的标题**逐字一致**（translate 后）。
 --   两个自定义域名 section 现在的标题不同了（国内 / 国外），
 --   否则页面上会出现两个同名块，且本表也只能映射到其中一个。
+--
+-- ── v0.15.0：概览与诊断合并 ────────────────────────────────────
+--
+-- 用户要求「概览 tab 和诊断合并在一页显示，严格查重重复功能移除」。
+-- 合并前两个 tab 的内容重叠严重：
+--
+--   概览：结论徽标 / 解析链路图 / 分流决策图 / 链路指标 / 组件状态表
+--   诊断：自检 20 项表格 / 两个配置项 / 5 个操作按钮
+--
+-- 重复项与处置：
+--
+--   ① 「结论徽标」与「自检 20 项」都来自 ds.selftest()，
+--      展示的是同一次采集的两种视图（一句话 vs 逐项）。
+--      → 保留两者但放同一 tab：徽标在顶部给结论，表格在下给证据。
+--        请求级缓存保证 selftest 只跑一次（ds.cached）。
+--   ② 概览里的「分流决策」图与「域名」tab 里的判定链路图
+--      是**同一个函数 dg.route_map()** 渲染两次 —— 真正的重复。
+--      → 删掉概览这份，只在「域名」tab 保留（那里还有单域名解释配套）。
+--   ③ 「组件状态表」与「自检第 1–7 项」信息部分重叠，但前者是
+--      端口/进程的实时快照、后者是端到端判定，视角不同，都保留。
+--
+-- 合并后 tab 由 7 个减为 6 个，「诊断」不再是独立 tab。
 local SECTION_TAB = {
+	-- 概览与诊断（合并）
 	[translate("当前状态")]      = "overview",
+	[translate("自检")]          = "overview",
+	[translate("操作")]          = "overview",
 
 	-- 域名 tab（v0.13.0）：自定义列表 + 判定链路 + 状态导图 + 改道表
 	[translate("自定义域名 · 国内（补全归属）")] = "domains",
@@ -119,6 +143,7 @@ local SECTION_TAB = {
 	[translate("判定链路")]      = "domains",
 	[translate("改道状态")]      = "domains",
 	[translate("改道明细")]      = "domains",
+	[translate("分诊结果")]      = "domains",
 	[translate("观测与阈值")]    = "domains",
 	[translate("域名操作")]      = "domains",
 
@@ -134,9 +159,6 @@ local SECTION_TAB = {
 	[translate("拦截与框架开关")] = "proxy",
 
 	[translate("DHCP 下发 DNS（明文）")] = "dhcp",
-
-	[translate("自检")]          = "diag",
-	[translate("操作")]          = "diag",
 }
 
 --- 输出 tab 元数据 + 加载静态资源
@@ -179,11 +201,33 @@ local function emit_tab_meta(map)
 		end
 
 		local base = luci.config.main.resourcebase or "/luci-static/resources"
+
+		-- ── 静态资源加版本号（v0.16.2 修）────────────────────────
+		--
+		-- 为什么必须加：这两个文件不带查询参数时，浏览器会按
+		-- LuCI 的默认 Cache-Control 长期缓存。实测踩过：
+		--
+		--   改了 dnschain.js 的 countBadges()，文件已部署到
+		--   /www/luci-static/…（fetch 带 nocache 能读到新内容），
+		--   但页面**仍执行旧版** —— tab 徽标继续显示「10」，
+		--   而用 DOM 模拟新逻辑却得出正确结果（counted=0）。
+		--   换页面 URL 加 ?cachebust=1 也不生效（资源 URL 没变）。
+		--
+		--   这种失效最难查：服务端文件是对的、逻辑是对的、
+		--   只有浏览器跑的是旧的 —— 会让人误以为代码没生效。
+		--
+		-- ⚠️ 版本号用 **包版本**（PKG_VERSION），不用文件 mtime。
+		--   试过 nixio.fs.stat / luci.fs.stat 两条路，都会让本地校验器
+		--   （tools/check-dnschain-lua.py）的桩缺失而整个文件加载失败
+		--   （实测 PASS 从 132 掉到 78，报 "general.lua 能加载 FAIL"）。
+		--   包版本是常量、无依赖，且语义正好 —— 「包升级了，资源该重拉」。
+		local ver = "?v=1.3.3"
+
 		return string.format(
-			'<link rel="stylesheet" href="%s/dnschain/dnschain.css">' ..
-			'<script defer src="%s/dnschain/dnschain.js"></script>' ..
+			'<link rel="stylesheet" href="%s/dnschain/dnschain.css%s">' ..
+			'<script defer src="%s/dnschain/dnschain.js%s"></script>' ..
 			'<span data-dc-meta="1"%s%s></span>',
-			base, base,
+			base, ver, base, ver,
 			attr("data-dc-section-tab", table.concat(parts, ",")),
 			attr("data-dc-labels", table.concat(labels, ",")))
 	end
@@ -312,26 +356,14 @@ function o.cfgvalue()
 		'role="img" aria-label="%s">',
 		W, H, W, H, translate("DNS 解析链路图"))
 
-	-- 箭头标记：按状态色各定义一个。
-	-- 不能只定义一个固定灰色 —— 那样红/绿连线配灰箭头，看起来像没连上。
-	local function marker(id, color)
-		return string.format(
-			'<marker id="%s" viewBox="0 0 10 10" refX="9" refY="5" ' ..
-			'markerWidth="7" markerHeight="7" orient="auto-start-reverse">' ..
-			'<path d="M 0 0 L 10 5 L 0 10 z" fill="%s"/></marker>', id, color)
-	end
-	p[#p + 1] = '<defs>' ..
-		marker("dc-a-ok", "var(--dc-ok)") ..
-		marker("dc-a-warn", "var(--dc-warn)") ..
-		marker("dc-a-bad", "var(--dc-bad)") ..
-		'</defs>'
-
-	--- 按状态色选箭头 id
-	local function arrow(color)
-		if color == "var(--dc-warn)" then return "url(#dc-a-warn)" end
-		if color == "var(--dc-bad)" then return "url(#dc-a-bad)" end
-		return "url(#dc-a-ok)"
-	end
+	-- 箭头标记：v0.15.0 按用户要求**全部移除**。
+	--
+	-- 原实现按状态色定义 3 个 <marker>（dc-a-ok/warn/bad）并给每条线
+	-- 加 marker-end。移除后：
+	--   · 连线只靠颜色与曲线形状表达走向
+	--   · 不再需要 <defs>，也不再占用文档级 id
+	--   · 与 diagrams.lua 的两张图口径一致（那边也移除了）
+	-- 注意 hline/curve 的签名仍保留 color 参数 —— 它决定描边色，与箭头无关。
 
 	--- 水平连线（两端节点垂直对齐时用）
 	--
@@ -342,8 +374,8 @@ function o.cfgvalue()
 		local dip = 3   -- 中点下沉像素
 		return string.format(
 			'<path d="M %d %d Q %d %d, %d %d" stroke="%s" stroke-width="2.5" ' ..
-			'fill="none" stroke-linecap="round" marker-end="%s"/>',
-			x1, y, mid, y + dip, x2, y, color, arrow(color))
+			'fill="none" stroke-linecap="round"/>',
+			x1, y, mid, y + dip, x2, y, color)
 	end
 
 	--- 贝塞尔连线：从 (x1,y1) 平滑过渡到 (x2,y2)
@@ -367,9 +399,8 @@ function o.cfgvalue()
 		if dx < 6 then dx = 6 end
 		return string.format(
 			'<path d="M %d %d C %d %d, %d %d, %d %d" stroke="%s" ' ..
-			'stroke-width="2.5" fill="none" stroke-linecap="round" ' ..
-			'marker-end="%s"/>',
-			x1, y1, x1 + dx, y1, x2 - dx, y2, x2, y2, color, arrow(color))
+			'stroke-width="2.5" fill="none" stroke-linecap="round"/>',
+			x1, y1, x1 + dx, y1, x2 - dx, y2, x2, y2, color)
 	end
 
 	-- 节点：状态点 + 标题 + 副标题 + 说明
@@ -462,37 +493,129 @@ function o.cfgvalue()
 	-- 「gfw 域名」在 dnsproxy 国外 下方
 	p[#p + 1] = forkLabel(X3, YB + NH + 18, translate("gfw 域名 → 经代理出站"), "start")
 
-	-- 底部说明
+	-- 底部说明（v0.16.0 改写）
+	--
+	-- 原文只写了「nftset 写入 blacklist → 流量进 :1234」，那是**旧机制**
+	-- 的单一通路。现在实际有两条落库路径，且判定依据是实测而非静态归属：
+	--
+	--   ① 静态分流：域名在 gfw 名单里 → nftset 写 blacklist → 走 :1234
+	--   ② 动态分诊：不在任何库的目标 → 试直连/试代理 → 按实测结果落库
+	--
+	-- 只写①会让看图的人以为「不在 gfw 名单就一定直连」，而实际
+	-- 不在任何库的目标要先经过分诊，否则会落到兜底规则被误送代理
+	-- （这正是 cdn.staticsfile.org 白屏的成因）。
+	p[#p + 1] = label(X1 + 2, H - 30,
+		translate("静态分流：gfw 名单命中 → nftset 写 blacklist → 流量进 :1234"))
 	p[#p + 1] = label(X1 + 2, H - 16,
-		translate("国外域名解析结果经 nftset 写入 blacklist → 流量进 :1234"))
+		translate("动态分诊：不在任何库 → 试直连，通→写 china；不通→试代理，通→写 blacklist；都不通→标 dead"))
 
 	p[#p + 1] = '</svg></div>'
 	return table.concat(p)
 end
 
--- ── 分流决策（概览页也放一张，进来就能看到分流逻辑）──────────────
+-- ── 实时诊断链路图（v0.15.0 新增，替代原「分流决策」在概览的重复渲染）──
 --
--- 为什么概览也要：用户反馈「找不到分流导图」—— 原来只在「域名」tab 里，
--- 而「域名」tab 的入口按钮带徽标数字（「域名1」），看不出里面还有图。
--- 概览是第一屏，把分流决策放在这里，用户不必先猜哪个 tab。
+-- 用户要求「加上实时诊断的链路思维导图」。
 --
--- 与「域名」tab 里那张是**同一个函数**（dg.route_map），
--- 不是两份实现 —— 两份必然漂移。
+-- 与已有的三张图的区别（这是它存在的理由，不是又一张重复图）：
 --
--- ⚠️ 必须传 id_prefix（v0.14.2）：两处都渲染 → 同一份 HTML 里
---    出现两套 marker。SVG id 是文档级全局的，前缀相同则
---    `url(#dcrt-a-ok)` 全部解析到第一个定义，箭头颜色会静默串掉。
---    实测：修复前有 5 组重复 id（dcrt-a-ok/warn/bad/info/mute 各 2 份）。
-o = s:option(DummyValue, "_route_map_overview", translate("分流决策"))
+--   解析链路（_chain_graph）   静态拓扑 + 端口存活色。回答「组件在不在」。
+--   判定链路（dg.route_map）   域名归属规则。回答「某个域名会怎么走」。
+--   改道状态（dg.status_map）  观测域名的当前改道状态。回答「谁被改道了」。
+--   ★ 实时诊断（本项）          **逐段实测判定**。回答「哪一段真的通、
+--                             哪一段是死的、证据是什么」。
+--
+-- 数据来源是 ds.selftest() 的 20 项结果 —— 按**链路阶段**重新分组，
+-- 每组取该项的 PASS/FAIL/SKIP 与证据串。这样一眼能看出断点在哪一段，
+-- 而不用在 20 行表格里逐行找红色。
+--
+-- ⚠️ 不新增后端调用：selftest 已被 _conclusion 调用过，请求级缓存命中。
+o = s:option(DummyValue, "_live_diag_map", translate("实时诊断链路"))
 o.rawhtml = true
 function o.cfgvalue()
-	local entry = ds.entry_port()
-	local fport = ds.foreign_port()
-	return dg.route_map({
-		entry_port   = entry,
-		foreign_port = fport,
-		id_prefix    = "dcrt-ov",
-	})
+	local result = ds.selftest()
+	local items = result.items or {}
+
+	-- 自检项 → 链路阶段分组
+	--
+	-- 键是阶段名，值是该阶段包含的自检项编号（与 dnschain-selftest 的
+	-- `emit <序号>` 一一对应）。改 selftest 的项号时**必须同步这里**，
+	-- tools/verify-dnschain-domains.sh 有断言检查编号覆盖完整。
+	local STAGES = {
+		{ id = "client",  label = translate("客户机入口"), items = { 1 } },
+		{ id = "dnsmasq", label = "dnsmasq",           items = { 3, 15, 16 } },
+		{ id = "domestic", label = translate("国内链路"), items = { 4, 5, 8, 9 } },
+		{ id = "foreign",  label = translate("国外链路"), items = { 10, 11, 12 } },
+		{ id = "proxy",    label = translate("代理与分流"), items = { 13 } },
+		{ id = "split",    label = translate("分流规则"), items = { 2, 17, 18 } },
+		{ id = "fw4",      label = "fw4",              items = { 14, 20 } },
+		{ id = "policy",   label = translate("双栈与端口"), items = { 6, 7, 19 } },
+	}
+
+	local by_no = {}
+	for _, it in ipairs(items) do
+		by_no[tonumber(it.no) or 0] = it
+	end
+
+	-- 每个阶段汇总：最差状态 + 证据
+	local function worst(st)
+		local n_pass, n_fail, n_skip = 0, 0, 0
+		local first_bad = nil
+		for _, no in ipairs(st.items) do
+			local it = by_no[no]
+			if it then
+				if it.status == "PASS" then n_pass = n_pass + 1
+				elseif it.status == "SKIP" then n_skip = n_skip + 1
+				else
+					n_fail = n_fail + 1
+					if not first_bad then first_bad = it end
+				end
+			end
+		end
+		local tone = "ok"
+		if n_fail > 0 then tone = "bad"
+		elseif n_skip > 0 then tone = "warn" end
+		return tone, n_pass, n_fail, n_skip, first_bad
+	end
+
+	-- ── 组装阶段数据，交给 diagrams.lua 画思维导图 ──────────
+	--
+	-- v0.16.3：原来在这里内联拼 SVG（纵向列表），用户要求改成
+	-- 思维导图。绘图逻辑移进 diagrams.lua 的 live_diag_map()，
+	-- 与页面其余三张图同一套视觉语言（圆角节点、状态色、贝塞尔连线）。
+	--
+	-- 这里只负责「把 selftest 的 20 项归组成 8 个阶段」这件事 ——
+	-- 归组规则是本页的业务知识，不该散到绘图层。
+	local stage_data = {}
+	for _, st in ipairs(STAGES) do
+		local tone, n_pass, n_fail, n_skip, first_bad = worst(st)
+
+		-- 证据：优先显示失败项的证据，否则显示本阶段第一项的证据
+		local ev = ""
+		if first_bad then
+			ev = tostring(first_bad.detail or "")
+		else
+			for _, no in ipairs(st.items) do
+				local it = by_no[no]
+				if it and it.detail and it.detail ~= "" then
+					ev = tostring(it.detail)
+					break
+				end
+			end
+		end
+
+		stage_data[#stage_data + 1] = {
+			id       = st.id,
+			label    = st.label,
+			tone     = tone,
+			n_pass   = n_pass,
+			n_fail   = n_fail,
+			n_skip   = n_skip,
+			evidence = ev,
+		}
+	end
+
+	return dg.live_diag_map(stage_data)
 end
 
 -- ── 链路指标 ──────────────────────────────────────────────────────
@@ -1165,12 +1288,105 @@ function o.cfgvalue()
 end
 
 -- ── 观测与阈值 ────────────────────────────────────────────────────
+-- ── 分诊结果（v0.16.0 新增）────────────────────────────────────────
+--
+-- 用户要求「所有功能都要能对得上视觉上看到的 web ui」。
+-- 分诊是本次新增的核心能力，但在此之前**页面上完全看不到它的结果** ——
+-- 用户只能通过命令行 `dnschain-triage list` 查，这与「视觉为准」冲突。
+--
+-- 这里把分诊结论摆出来，三档语义与落库动作一一对应：
+--
+--   direct  试直连通   → IP 已写入 china 集合、域名已写入 dom_domestic
+--   proxy   直连不通，代理通 → IP 已写入 blacklist、域名已写入 dom_foreign
+--   dead    都不通     → 两个集合都不写，等下一轮重试
+--
+-- ⚠️ 与「改道明细」的区别（不是重复功能）：
+--   改道明细  看的是**观测列表**里 8 个种子域名的链路健康与自动改道
+--   分诊结果  看的是**客户机实际访问过、但不在任何库里**的未知目标
+--   两者输入集合不同、落库目标不同、判定方法不同（DNS 探测 vs HTTP 实测）
+s = m:section(TypedSection, "dnschain", translate("分诊结果"),
+	translate("不在 GFW 名单、不在代理 IP 集、不在国内 IP 段、也不在任何数据库的" ..
+		"目标，会按「先试直连 → 直连不通试代理 → 都不通标 dead」判定。" ..
+		"跑通的落库：IP 进对应集合（nft 自动合并成 IP 段），域名进对应列表。"))
+s.anonymous = true
+s.addremove = false
+
+o = s:option(DummyValue, "_triage_table", translate("结论"))
+o.rawhtml = true
+function o.cfgvalue()
+	local t = ds.triage_rows()
+	local rows = t.rows or {}
+	local sum = t.summary or {}
+
+	if #rows == 0 then
+		return '<div class="dc-alert dc-alert--info">' ..
+			'<span class="dc-alert__icon">i</span><div>' ..
+			translate("还没有分诊记录。点「概览与诊断 → 操作 → 立即分诊未知目标」，" ..
+				"或等待守护进程自动跑一轮。") ..
+			'</div></div>'
+	end
+
+	local TONE = { direct = "ok", proxy = "warn", dead = "bad" }
+	local TEXT = {
+		direct = translate("直连通"),
+		proxy  = translate("代理通"),
+		dead   = translate("两种链路都不通"),
+	}
+	local KIND = { ip = translate("IP"), domain = translate("域名") }
+
+	local p = {}
+	-- data-dc-triage：标记这是分诊结果表。
+	--
+	-- dnschain.js 的 countBadges() 会跳过它内部的 .dc-badge--bad ——
+	-- 因为「两种链路都不通」是客观观测结果，不是本页配置异常。
+	-- 不跳过的话 tab 徽标会把 dead 条数当故障数（实测显示「10」，
+	-- 让人以为有 10 处配置错误）。
+	p[#p + 1] = '<div class="dc-table-wrap" data-dc-triage="1"><table class="dc-table"><thead><tr>' ..
+		'<th>' .. translate("目标") .. '</th>' ..
+		'<th>' .. translate("类型") .. '</th>' ..
+		'<th>' .. translate("结论") .. '</th>' ..
+		'<th>' .. translate("落库动作") .. '</th>' ..
+		'</tr></thead><tbody>'
+
+	for _, r in ipairs(rows) do
+		local tone = TONE[r.verdict] or "mute"
+		local action
+		if r.verdict == "direct" then
+			action = (r.kind == "ip")
+				and translate("已加入 china 集合（直连）")
+				or translate("已写入 dom_domestic（国内）")
+		elseif r.verdict == "proxy" then
+			action = (r.kind == "ip")
+				and translate("已加入 blacklist 集合（代理）")
+				or translate("已写入 dom_foreign（国外）")
+		else
+			action = translate("不写入任何集合，下一轮重试")
+		end
+
+		p[#p + 1] = string.format(
+			'<tr><td><code>%s</code></td><td>%s</td>' ..
+			'<td><span class="dc-badge dc-badge--%s">%s</span></td>' ..
+			'<td>%s</td></tr>',
+			r.target, KIND[r.kind] or r.kind, tone,
+			TEXT[r.verdict] or r.verdict, action)
+	end
+
+	p[#p + 1] = '</tbody></table></div>'
+	p[#p + 1] = string.format(
+		'<div class="dc-hint">%s %d / %s %d / %s %d / %s %d</div>',
+		translate("直连通"), sum.direct or 0,
+		translate("代理通"), sum.proxy or 0,
+		translate("都不通"), sum.dead or 0,
+		translate("合计"), sum.total or 0)
+
+	return table.concat(p)
+end
+
 s = m:section(TypedSection, "health", translate("观测与阈值"),
 	translate("只探测<b>观测列表</b>里的域名，不做全量探测 —— " ..
 		"3.5 万个域名一轮要几小时，也会把 dnsmasq 与 dnsproxy 打满。"))
 s.anonymous = true
 s.addremove = false
-
 o = s:option(Flag, "enabled", translate("启用健康检测与自动改道"),
 	translate("关闭后不探测、不改道，静态分流照常工作。"))
 o.rmempty = false
@@ -1759,7 +1975,16 @@ function o.cfgvalue()
 end
 
 ------------------------------------------------------------------------
--- Tab「诊断」：自检表格 + 操作
+-- 概览与诊断（合并 tab，v0.15.0）
+--
+-- 原「诊断」是独立 tab，内容为：自检 20 项表格 + 两个配置项 + 5 个按钮。
+-- 合并后归入 overview，与「当前状态」（结论 / 解析链路 / 实时诊断链路 /
+-- 链路指标 / 组件状态）连成一条「先看结论 → 再看逐段证据 → 最后动手」
+-- 的阅读顺序。
+--
+-- 重复项已在合并时消除：概览原有的「分流决策」图是「域名」tab 判定链路
+-- 图的第二次渲染（同一函数 dg.route_map），已删除；改用本页独有的
+-- 「实时诊断链路」图，它按链路阶段重新组织 selftest 的 20 项结果。
 ------------------------------------------------------------------------
 
 s = m:section(TypedSection, "selftest", translate("自检"),
@@ -1856,6 +2081,18 @@ function o.write(self, section)
 	local ok, out = ds.reconcile_now()
 	ds.invalidate()
 	setmsg("✓ " .. translate("已归一") .. "\n" .. (out or ""))
+end
+
+o = s:option(Button, "_triage", translate("立即分诊未知目标"),
+	translate("对「不在 GFW 名单、不在代理 IP 集、不在国内 IP 段、" ..
+		"也不在任何数据库」的目标执行：先试直连，直连不通再试代理，" ..
+		"都不通则标记为死。跑通的会落库（IP 进集合、域名进对应列表），" ..
+		"下次开机与每轮收敛自动重放。"))
+o.inputstyle = "apply"
+function o.write(self, section)
+	local ok, out = ds.triage_now()
+	ds.invalidate()
+	setmsg((ok and "✓ " or "✗ ") .. translate("已分诊") .. "\n" .. (out or ""))
 end
 
 o = s:option(Button, "_import", translate("手动导入名单"),

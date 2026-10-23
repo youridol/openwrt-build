@@ -1405,3 +1405,108 @@ msgstr "已保存，但未应用（详见下方说明）"
 
 msgid "应用结果不明（脚本无输出）"
 msgstr "应用结果不明（脚本无输出）"
+
+msgid "概览与诊断"
+msgstr "概览与诊断"
+
+msgid "实时诊断链路"
+msgstr "实时诊断链路"
+
+msgid "客户机入口"
+msgstr "客户机入口"
+
+msgid "国内链路"
+msgstr "国内链路"
+
+msgid "国外链路"
+msgstr "国外链路"
+
+msgid "代理与分流"
+msgstr "代理与分流"
+
+msgid "双栈与端口"
+msgstr "双栈与端口"
+
+msgid "实时诊断链路图"
+msgstr "实时诊断链路图"
+
+msgid "已纠正"
+msgstr "已纠正"
+
+msgid "立即分诊未知目标"
+msgstr "立即分诊未知目标"
+
+msgid "对「不在 GFW 名单、不在代理 IP 集、不在国内 IP 段、也不在任何数据库」的目标执行：先试直连，直连不通再试代理，都不通则标记为死。跑通的会落库（IP 进集合、域名进对应列表），下次开机与每轮收敛自动重放。"
+msgstr "对「不在 GFW 名单、不在代理 IP 集、不在国内 IP 段、也不在任何数据库」的目标执行：先试直连，直连不通再试代理，都不通则标记为死。跑通的会落库（IP 进集合、域名进对应列表），下次开机与每轮收敛自动重放。"
+
+msgid "已分诊"
+msgstr "已分诊"
+
+msgid "分诊结果"
+msgstr "分诊结果"
+
+msgid "静态分流：gfw 名单命中 → nftset 写 blacklist → 流量进 :1234"
+msgstr "静态分流：gfw 名单命中 → nftset 写 blacklist → 流量进 :1234"
+
+msgid "动态分诊：不在任何库 → 试直连，通→写 china；不通→试代理，通→写 blacklist；都不通→标 dead"
+msgstr "动态分诊：不在任何库 → 试直连，通→写 china；不通→试代理，通→写 blacklist；都不通→标 dead"
+
+msgid "不在 GFW 名单、不在代理 IP 集、不在国内 IP 段、也不在任何数据库的目标，会按「先试直连 → 直连不通试代理 → 都不通标 dead」判定。跑通的落库：IP 进对应集合（nft 自动合并成 IP 段），域名进对应列表。"
+msgstr "不在 GFW 名单、不在代理 IP 集、不在国内 IP 段、也不在任何数据库的目标，会按「先试直连 → 直连不通试代理 → 都不通标 dead」判定。跑通的落库：IP 进对应集合（nft 自动合并成 IP 段），域名进对应列表。"
+
+msgid "还没有分诊记录。点「概览与诊断 → 操作 → 立即分诊未知目标」，或等待守护进程自动跑一轮。"
+msgstr "还没有分诊记录。点「概览与诊断 → 操作 → 立即分诊未知目标」，或等待守护进程自动跑一轮。"
+
+msgid "直连通"
+msgstr "直连通"
+
+msgid "代理通"
+msgstr "代理通"
+
+msgid "两种链路都不通"
+msgstr "两种链路都不通"
+
+msgid "目标"
+msgstr "目标"
+
+msgid "类型"
+msgstr "类型"
+
+msgid "落库动作"
+msgstr "落库动作"
+
+msgid "已加入 china 集合（直连）"
+msgstr "已加入 china 集合（直连）"
+
+msgid "已写入 dom_domestic（国内）"
+msgstr "已写入 dom_domestic（国内）"
+
+msgid "已加入 blacklist 集合（代理）"
+msgstr "已加入 blacklist 集合（代理）"
+
+msgid "已写入 dom_foreign（国外）"
+msgstr "已写入 dom_foreign（国外）"
+
+msgid "不写入任何集合，下一轮重试"
+msgstr "不写入任何集合，下一轮重试"
+
+msgid "都不通"
+msgstr "都不通"
+
+msgid "合计"
+msgstr "合计"
+
+msgid "实时诊断链路思维导图"
+msgstr "实时诊断链路思维导图"
+
+msgid "有断点"
+msgstr "有断点"
+
+msgid "部分跳过"
+msgstr "部分跳过"
+
+msgid "全通"
+msgstr "全通"
+
+msgid "整体结论"
+msgstr "整体结论"

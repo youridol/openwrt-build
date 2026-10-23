@@ -631,45 +631,51 @@ else
 	fail "节点 fill 不是 --dc-surface"
 fi
 
-# marker id 必须带前缀 —— 同一页两张图，同名 marker 会串色
+# ── 连线不得带箭头（v0.15.0 用户要求）──
 #
-# ⚠️ v0.14.2：前缀改为**由调用方传入**（opts.id_prefix）。
+# 历史：v0.14.2 起每张图按状态色定义 5 个 <marker>，连线用 marker-end
+# 引用，靠 id 前缀区分同页多图。
 #
-#   原因：判定链路图被渲染**两次** —— 概览 tab 的「分流决策」与
-#   域名 tab 的「走法」。CBI 的 tab 是 CSS 隐藏、不是懒加载，
-#   两个 tab 的内容都进同一份 HTML，而 SVG id 是**文档级全局**的。
-#   原先两处都用硬编码的 "dcrt" → 页面里有 5 组重复 id
-#   （dcrt-a-ok/warn/bad/info/mute 各两份），
-#   `url(#dcrt-a-ok)` 全部解析到第一个定义，配色一变就静默串掉。
+# v0.15.0 按用户要求**移除全部箭头**：思维导图的语义是「从主干生长出
+# 分支」，靠曲线形状与颜色即可表达走向；箭头在密集分支处互相压盖，
+# 反而看不清。移除后连 marker 一起没有了 —— 重复 id 的根因随之消失。
 #
-#   故现在断言分三层：
-#     ① 两个函数都支持 id_prefix（有 rawget 读取）
-#     ② 两处调用**传了不同**的前缀
-#     ③ 默认值仍带各自前缀（dcrt / dcst），保底不串
-if body_of "$DIA" | grep -q 'rawget(opts, "id_prefix")'; then
-	pass "判定链路图 marker 前缀可由调用方指定"
+# 断言改为反向条件（必须**不存在**），并保留 id_prefix 参数化能力
+# （它现在落在无副作用的 data-dc-figure 上）。
+if lua_body_of "$DIA" | grep -q '<marker'; then
+	fail "判定链路图/状态图仍生成 <marker>（v0.15.0 要求移除箭头）"
 else
-	fail "判定链路图不支持 id_prefix（两处渲染会 id 冲突）"
-fi
-if body_of "$DIA" | grep -q 'id_prefix or "dcst"'; then
-	pass "状态导图 marker 前缀可指定且默认 dcst"
-else
-	fail "状态导图 marker 前缀默认值缺失"
+	pass "两张图都不生成 <marker>（箭头已移除）"
 fi
 
-# 两处调用必须传不同前缀
-if grep -q 'id_prefix    = "dcrt-ov"' "$GEN" 2>/dev/null \
-   && grep -q 'id_prefix    = "dcrt-dm"' "$GEN" 2>/dev/null; then
-	pass "概览与域名 tab 的链路图用不同 id 前缀（ov / dm）"
+if lua_body_of "$DIA" | grep -q 'marker-end'; then
+	fail "diagrams.lua 仍有 marker-end 引用（箭头未清干净）"
 else
-	fail "两处链路图未传不同 id_prefix（同页 id 会重复）"
+	pass "diagrams.lua 无 marker-end 引用"
 fi
 
-# 前缀默认值仍须存在（防止 rawget 回落成空串导致 id="*-a-ok"）
-if body_of "$DIA" | grep -q 'or "dcrt"'; then
-	pass "判定链路图 marker 前缀默认 dcrt"
+if lua_body_of "$GEN" | grep -q 'marker-end\|dc-a-ok'; then
+	fail "general.lua 内联链路图仍有箭头（marker-end / dc-a-ok）"
 else
-	fail "判定链路图 marker 前缀默认值缺失"
+	pass "general.lua 内联链路图无箭头"
+fi
+
+if lua_body_of "$DIA" | grep -q 'rawget(opts, "id_prefix")'; then
+	pass "判定链路图图身份可由调用方指定（id_prefix）"
+else
+	fail "判定链路图不支持 id_prefix"
+fi
+if lua_body_of "$DIA" | grep -q 'id_prefix or "dcst"'; then
+	pass "状态导图图身份可指定且默认 dcst"
+else
+	fail "状态导图 id_prefix 默认值缺失"
+fi
+
+# 前缀默认值仍须存在（防止 rawget 回落成空串导致 data-dc-figure=""）
+if lua_body_of "$DIA" | grep -q 'or "dcrt"'; then
+	pass "判定链路图 id_prefix 默认 dcrt"
+else
+	fail "判定链路图 id_prefix 默认值缺失"
 fi
 
 # ── 清缓存必须走正确 PID（v0.14.2）──

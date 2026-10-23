@@ -95,25 +95,44 @@ dc_ssr_mode_for_profile() {
 }
 
 # ------------------------------------------------------------
+# 从**已有的** netstat 输出里查端口所有者
+#
+# 用法: dc_port_owner_from <netstat 输出> <port>
+#
+# 为什么需要这个函数（v0.14.9 性能）：
+#   `netstat -lnup` 实测 23ms —— 它要读 /proc/net/udp 与 /proc/net/tcp 并
+#   反查 socket inode 对应的进程名。而 dc_port_owner 每查**一个**端口就
+#   跑一次 netstat。自检的缓存指纹一次要查 3 个端口（entry/foreign/1234），
+#   就是 3 × 23ms 的纯重复开销。
+#
+#   把 netstat 的输出先取一次、再对多个端口查表，解析逻辑与
+#   dc_port_owner 完全一致（同一条 awk + sed），只是输入换成调用方给的
+#   快照。这样既不改变任何判定，也不改变 dc_port_owner 的返回值。
+# ------------------------------------------------------------
+dc_port_owner_from() {
+	local tbl port
+	tbl="$1"
+	port="$2"
+
+	printf '%s\n' "$tbl" \
+		| awk -v p=":${port}" '$4 ~ p"$" {print $NF}' \
+		| sed 's|/.*||' | head -1
+}
+
+# ------------------------------------------------------------
 # 端口所有权探测：返回监听该端口的 PID（无监听则空）
 # 用法: dc_port_owner <port> [proto]
 # ------------------------------------------------------------
 dc_port_owner() {
-	local port proto pid
+	local port proto
 	port="$1"
 	proto="${2:-udp}"
 
-	pid=""
 	if [ "$proto" = "udp" ]; then
-		pid=$(netstat -lnup 2>/dev/null \
-			| awk -v p=":${port}" '$4 ~ p"$" {print $NF}' \
-			| sed 's|/.*||' | head -1)
+		dc_port_owner_from "$(netstat -lnup 2>/dev/null)" "$port"
 	else
-		pid=$(netstat -lntp 2>/dev/null \
-			| awk -v p=":${port}" '$4 ~ p"$" {print $NF}' \
-			| sed 's|/.*||' | head -1)
+		dc_port_owner_from "$(netstat -lntp 2>/dev/null)" "$port"
 	fi
-	echo "$pid"
 }
 
 # 端口是否被监听
@@ -620,12 +639,32 @@ DNSCHAIN_HEALTH_STATE="${DNSCHAIN_STATE_DIR}/health.state"
 # 为什么要转小写：dnsmasq 的 server=/域名/ 匹配是大小写不敏感的，
 # 但状态文件与页面显示必须唯一，否则 Foo.com 与 foo.com 会被当成
 # 两个观测目标、各自维护一份改道状态。
+#
+# ⚠️ 纯 shell 实现，不再 `sed | sed | tr`（v0.14.9 性能）。
+#
+#   原实现是一条管道三个外部命令 = **3 次 fork**，实测单次约 2.5ms。
+#   dc_domain_class / dc_domain_valid 都要先归一化，而 status 对 8 个
+#   域名要判 24 次归属（class + preferred + custom 各调一次）→
+#   仅归一化就 72 次 fork。
+#
+#   `${s#"${s%%[![:space:]]*}"}` 是 POSIX 参数展开：先取「最长的纯空白
+#   前缀」再删掉它，等价于 `s/^[[:space:]]*//`；尾部同理。
+#   `[[:space:]]` 在 case/参数展开的字符类里 BusyBox ash 与 dash 都支持
+#   （已在路由器实测，见 CHANGELOG 验证段）。
+#
+#   语义必须与旧实现**逐字节一致**，故顺序保持：先去首尾空白 →
+#   再去**一个**尾部点 → 最后转小写。用 `tr` 而不是 `${s,,}`：
+#   后者是 bash 4 专有，dash 不支持。
 # ------------------------------------------------------------
 dc_domain_normalize() {
-	printf '%s' "$1" \
-		| sed -e 's/^[[:space:]]*//' -e 's/[[:space:]]*$//' \
-		| sed -e 's/\.$//' \
-		| tr 'A-Z' 'a-z'
+	local s
+	s="$1"
+	# 去首尾空白（含 tab；`[[:space:]]` 覆盖空格/tab/换行）
+	s=${s#"${s%%[![:space:]]*}"}
+	s=${s%"${s##*[![:space:]]}"}
+	# 去一个尾部点（只去一个，与 `sed 's/\.$//'` 一致）
+	s=${s%.}
+	printf '%s' "$s" | tr 'A-Z' 'a-z'
 }
 
 # ------------------------------------------------------------
@@ -646,10 +685,16 @@ dc_domain_normalize() {
 # 为什么接受 xn--：dnsmasq 原生支持 punycode（AGENTS §4.0 第 4 条），
 # 过滤掉会让 IDNA 域名无法录入。
 # ------------------------------------------------------------
-dc_domain_valid() {
+# 校验「已经归一化过」的域名（v0.14.9 拆分）
+#
+# dc_domain_class 与 dc_domain_class_batch 都会先归一化再校验，
+# 若校验内部再归一化一次，就是**重复的 2 次 fork**。
+# 把校验主体抽成 _norm 版本，dc_domain_valid 保持原签名与语义不变
+# （外部调用方仍然可以直接传原始输入）。
+dc_domain_valid_norm() {
 	local d label tld n _oifs
 
-	d=$(dc_domain_normalize "$1")
+	d="$1"
 	[ -n "$d" ] || return 1
 	[ "${#d}" -le 253 ] || return 1
 
@@ -690,6 +735,15 @@ dc_domain_valid() {
 	esac
 
 	return 0
+}
+
+# 对外入口：接受原始输入，先归一化再校验（签名与语义与旧版一致）
+#
+# ⚠️ 注意这个函数**会归一化两次**（自己一次，dc_domain_normalize 内部
+# 的 sed/tr 管道只做一次，但调用方 dc_domain_class 已经归一化过一次）。
+# 这是历史行为，v0.14.9 保留原样 —— 见 dc_domain_class_batch 里的说明。
+dc_domain_valid() {
+	dc_domain_valid_norm "$(dc_domain_normalize "$1")"
 }
 
 # ------------------------------------------------------------
@@ -825,9 +879,18 @@ dc_gen_db_domains() {
 #   而不是在函数内部做 memo。
 # ------------------------------------------------------------
 dc_domain_class() {
-	local d cur i n
+	local d cur
 
 	d=$(dc_domain_normalize "$1")
+	# ⚠️ 必须调 dc_domain_valid（它会**再归一化一次**），不能调
+	# dc_domain_valid_norm（v0.14.9 保留原语义）。
+	#
+	#   旧实现就是这样：class 先归一化得到 $d，校验内部又归一化一遍。
+	#   于是输入 "a.b.." 时：$d="a.b."，而校验看到的是 "a.b" → 判为合法。
+	#   若改成 _norm 版本，校验看到 "a.b." → 命中 `*.` 分支 → 判为非法。
+	#   这条路径虽然只在「尾部有 2 个以上点」的输入上才暴露，但
+	#   dc_watch_list 确实可能产出 "a.b."（它只归一化一次再校验），
+	#   所以必须逐字节保持旧行为。
 	dc_domain_valid "$d" || { echo "invalid"; return 0; }
 
 	# 自定义列表：精确匹配
@@ -884,6 +947,158 @@ dc_domain_class() {
 	fi
 
 	echo "uncovered"
+}
+
+# ------------------------------------------------------------
+# 批量归属判定（v0.14.9 性能）
+#
+# 用法: dc_domain_class_batch  （stdin 每行一个**已归一化**域名）
+# 输出: 每行 "<域名>|<class>"，**顺序与输入完全一致**，一行对一行。
+#
+# 为什么需要它：`dnschain-health status` 对每个观测域名要判三次归属
+# （class / preferred / custom 各调一次 dc_domain_class），8 个域名
+# 就是 24 次判定、24 次对 348KB 的 db-domains.txt 做 grep ——
+# 实测 880ms，占 status 全部耗时的八成。
+#
+# 本函数把「一次 grep 比一个域名」换成「一次 grep 比全部域名」：
+#   · 自定义两份列表：一次 grep -Fxf 拿全部命中
+#   · 数据库：把所有候选后缀拼成一个 pattern 列表，一次 grep -Fxf
+#   实测 db 扫描 50~60ms（无论 8 个还是 80 个域名，都是**一次**全表扫描），
+#   剩下的优先级判定在纯 shell 里做，不 fork。
+#
+# 语义必须与逐个调 dc_domain_class **完全一致**：
+#   ① 非法域名 → invalid（不查任何列表）
+#   ② 自定义国内精确命中 → custom-domestic（优先级最高）
+#   ③ 自定义国外精确命中 → custom-foreign
+#   ④ 数据库后缀命中 → db-foreign
+#   ⑤ 都没有 → uncovered
+#   自定义只做**精确**匹配、数据库做**逐级剥标签的后缀**匹配，
+#   这个区别与 dc_domain_class 的注释（v0.13.0 修正）一致，不得合并。
+#
+# 注意：本函数**不排序**。status 依赖输入顺序（也就是 dc_watch_list
+# 的 sort -u 顺序）来保证输出行序稳定，这里排序会打乱它。
+# ------------------------------------------------------------
+dc_domain_class_batch() {
+	local raw norm cur doms norms pats cands cd_hits cf_hits db_hits cls nl
+
+	nl='
+'
+	doms=""
+	norms=""
+	pats=""
+	cands=""
+
+	# ── 第一遍：收齐域名，同时准备两类 pattern ──────────────────
+	#
+	# ⚠️ 这里必须精确复刻 dc_domain_class 的**两步归一化**（v0.14.9）。
+	#
+	#   dc_domain_class 的流程是：
+	#     d2 = dc_domain_normalize "$1"      ← 第一次
+	#     dc_domain_valid "$d2"              ← 内部再归一化成 d3 再校验
+	#     之后所有匹配都用 **d2**
+	#
+	#   于是 "a.b.." 这种输入：d2="a.b."、d3="a.b" → 校验通过，
+	#   匹配用 "a.b."。若只归一化一次就当非法处理，行为会变。
+	#   batch 的输入来自 dc_watch_list（已归一化过一次），但为了
+	#   对任意输入都与 dc_domain_class 等价，这里照样做两遍。
+	while IFS= read -r raw; do
+		[ -n "$raw" ] || continue
+		doms="$doms$raw$nl"
+		norm=$(dc_domain_normalize "$raw")
+		norms="$norms$norm$nl"
+		dc_domain_valid "$norm" || continue
+		pats="$pats$norm$nl"
+		# 候选后缀 = 自身 + 逐级剥标签（至少保留两级），与
+		# dc_domain_class 里那段 while 完全相同的剥法。
+		cur="$norm"
+		while :; do
+			cands="$cands$cur$nl"
+			cur=${cur#*.}
+			case "$cur" in
+				*.*) ;;
+				*) break ;;
+			esac
+		done
+	done
+
+	# ── 三次 grep：自定义两份 + 数据库一份 ──────────────────────
+	# 文件不可读时保持空（对应 dc_domain_class 的 `[ -r ] && grep`）
+	cd_hits=""
+	cf_hits=""
+	db_hits=""
+	[ -n "$pats" ] && [ -r "$DNSCHAIN_CUSTOM_DOM" ] && \
+		cd_hits=$(printf '%s' "$pats" | grep -Fxf - "$DNSCHAIN_CUSTOM_DOM" 2>/dev/null)
+	[ -n "$pats" ] && [ -r "$DNSCHAIN_CUSTOM_FOR" ] && \
+		cf_hits=$(printf '%s' "$pats" | grep -Fxf - "$DNSCHAIN_CUSTOM_FOR" 2>/dev/null)
+	[ -n "$cands" ] && [ -r "$DNSCHAIN_DB_DOMAINS" ] && \
+		db_hits=$(printf '%s' "$cands" | grep -Fxf - "$DNSCHAIN_DB_DOMAINS" 2>/dev/null)
+
+	# ── 第二遍：按优先级逐个定档（纯 shell，无 fork）────────────
+	#
+	# 输出用**原始**域名（raw），与 dc_domain_class 的调用方
+	# （cmd_status 打印 dc_watch_list 的原值）一致。
+	while [ -n "$doms" ]; do
+		raw=${doms%%"$nl"*}
+		case "$doms" in
+			*"$nl"*) doms=${doms#*"$nl"} ;;
+			*)       doms="" ;;
+		esac
+		norm=${norms%%"$nl"*}
+		case "$norms" in
+			*"$nl"*) norms=${norms#*"$nl"} ;;
+			*)       norms="" ;;
+		esac
+		[ -n "$raw" ] || continue
+
+		if ! dc_domain_valid "$norm"; then
+			printf '%s|invalid\n' "$raw"
+			continue
+		fi
+
+		if _dc_set_has "$norm" "$cd_hits"; then
+			printf '%s|custom-domestic\n' "$raw"
+			continue
+		fi
+		if _dc_set_has "$norm" "$cf_hits"; then
+			printf '%s|custom-foreign\n' "$raw"
+			continue
+		fi
+
+		cls="uncovered"
+		if [ -n "$db_hits" ]; then
+			cur="$norm"
+			while :; do
+				if _dc_set_has "$cur" "$db_hits"; then
+					cls="db-foreign"
+					break
+				fi
+				cur=${cur#*.}
+				case "$cur" in
+					*.*) ;;
+					*) break ;;
+				esac
+			done
+		fi
+		printf '%s|%s\n' "$raw" "$cls"
+	done
+	return 0
+}
+
+# 判断 $1 是否是「换行分隔集合」$2 里的一整项
+#
+# 用 case 而不是 grep：这是一次纯 shell 比较，不 fork。
+# case 模式里带引号的展开按字面匹配（POSIX），故域名里的 `.`、`-`
+# 不会被当成通配；两侧补换行保证是**整行**匹配而不是子串匹配
+# （`163.com` 不能命中 `www.163.com`）。
+_dc_set_has() {
+	case "
+$2
+" in
+		*"
+$1
+"*) return 0 ;;
+	esac
+	return 1
 }
 
 # ------------------------------------------------------------
@@ -979,8 +1194,18 @@ dc_nftset_exists() {
 # 与 dc_nftset_exists 分开：前者看表、后者看集合。
 # 表在而集合不在，说明 ssrplus 正在重建中途（或规则被清）——
 # 这是**暂时**状态，不该据此丢掉 nftset 行。
+#
+# ⚠️ 用 `nft list tables` 而不是 `nft list table inet ss_spec`（v0.14.9 性能）。
+#
+#   两者判据完全相同（表存在就会出现在表名列表里），但代价差 15 倍：
+#     nft list table inet ss_spec   实测 150ms —— 它要 dump 整张表的
+#                                   全部 chain/rule/set 内容，只为确认存在
+#     nft list tables               实测  10ms —— 只列表名
+#   自检的缓存指纹每次都要调它，150ms 占指纹开销的一半。
+#   `grep -qxF` 是**整行精确匹配**，避免 `ss_spec6`、`ss_spec_mangle`
+#   之类的前缀误命中（`nft list tables` 一行一张表，格式固定）。
 dc_ss_spec_present() {
-	nft list table inet ss_spec >/dev/null 2>&1
+	nft list tables 2>/dev/null | grep -qxF 'table inet ss_spec'
 }
 
 # 安全计数：永远输出**一个**整数，且 rc 恒为 0
@@ -1197,6 +1422,23 @@ dc_gen_watch_servers() {
 		if [ "$enabled" = "1" ]; then
 			active=$(dc_health_active "$d" "$pref")
 		fi
+		# ── 分诊结论优先于归属（v0.16.0）─────────────────────
+		#
+		# 分诊（dnschain-triage）的结论是**实测**得到的：
+		# 它真的发请求验证过直连通不通、代理通不通。
+		# 而归属（dc_domain_preferred）只是查库，库不全时会判错。
+		#
+		# 实测教训：cdn.staticsfile.org 不在任何库里 → 归属判 domestic
+		# 是「猜的」；分诊实测发现直连通，才把它落进 china。
+		# 两者一致时无影响；不一致时以**实测**为准。
+		#
+		# ⚠️ 只覆盖「有分诊记录」的域名，无记录的仍按原逻辑走 ——
+		#    不能让分诊未覆盖的域名失去健康检测与自动改道能力。
+		_tri=$(dc_triage_verdict "$d")
+		case "$_tri" in
+			direct)  active="domestic" ;;
+			proxy)   active="foreign"  ;;
+		esac
 		case "$active" in
 			foreign)  echo "server=/$(echo "$d")/127.0.0.1#${fport}" ;;
 			*)        echo "server=/$(echo "$d")/127.0.0.1#${eport}" ;;
@@ -1267,7 +1509,6 @@ dc_reload_servers_file() {
 # 不能只用 kill -0 判活：子进程退出后会变成僵尸，kill -0 依然成功，
 # 会白等满整个超时（这是踩过的坑，标记文件是必需的）。
 # ------------------------------------------------------------
-# ------------------------------------------------------------
 # 为什么这里没有「亚秒 sleep」辅助函数（v0.14.2 清理）
 #
 # 曾经有 dc_sleep_tick / dc_ticks_per_sec 两个函数，用于给
@@ -1278,9 +1519,36 @@ dc_reload_servers_file() {
 # 即**拿不到亚秒粒度**。故 dc_run_timeout 改为「紧密轮询 + 每 2000 转
 # 才 sleep 1 秒」：快命令（nslookup 仅 0.02~0.4s）几乎零等待返回，
 # 慢命令也不会忙等烧 CPU。两个辅助函数随之成为死代码，已删除。
+#
+# ⚠️ v0.14.9 补正：上面「快命令几乎零等待返回」这个判断**不成立**。
+#    「每 2000 转才 sleep 1 秒」的实际后果是：任何耗时超过 2000 转
+#    （实测约 20ms）的命令都会落进 sleep 1 分支，醒来时命令早已完成，
+#    但要再等满 1 秒才复查标记 → **20ms~1020ms 的命令一律被向上取整
+#    到约 1020~1070ms**。详见下面 dc_run_timeout 里的实测数据。
+#    现在改用 dc_clock_ms 做真实毫秒时钟，这段历史保留以便对照。
 # ------------------------------------------------------------
+# ------------------------------------------------------------
+# 单调毫秒时钟（纯 shell，无 fork）
+#
+# 用法: dc_clock_ms  → 结果写进变量 DC_CLOCK_MS
+#
+# 为什么不用 `date +%s%N`：BusyBox 的 date 不支持 %N（会静默返回秒级），
+# 也不支持 `stat`。`/proc/uptime` 是唯一可靠的亚秒时钟来源。
+# 用 `read` 内置命令读，不起子进程（实测 200 次 < 10ms）。
+# ------------------------------------------------------------
+dc_clock_ms() {
+	local _u _s _f
+	read -r _u _ < /proc/uptime
+	_s=${_u%.*}
+	_f=${_u#*.}
+	# 去掉前导 0（"05" 在 $(( )) 里会被当成八进制 → 解析错误）
+	while [ "${_f#0}" != "$_f" ]; do _f=${_f#0}; done
+	[ -n "$_f" ] || _f=0
+	DC_CLOCK_MS=$((_s * 1000 + _f * 10))
+}
+
 dc_run_timeout() {
-	local secs out flag pid np i iters tps
+	local secs out flag pid np spin fine_budget deadline
 
 	secs="$1"
 	out="$2"
@@ -1305,27 +1573,42 @@ dc_run_timeout() {
 	) &
 	pid=$!
 
-	# ── 等待策略（v0.14.1 重写，务必按这里的思路改）──────────────
+	# ── 等待策略（v0.14.9 重写，务必按这里的思路改）──────────────
 	#
 	# 约束：BusyBox 的 `sleep` **只支持整数秒**，`read -t` 不支持小数
 	#      （实测报 `read: invalid timeout`），也没有 `usleep`。
-	#      所以**拿不到亚秒粒度**。
+	#      所以**拿不到亚秒粒度的 sleep**。
 	#
-	# 但 nslookup 本身只要 0.02~0.4 秒。若按「每 tick sleep 一次」等，
-	# 快命令也会被拖满 1 秒 —— 自检 4 处 + 探测 20 处 → 页面 12 秒。
+	# ⚠️ 原实现是「每转 2000 次就 sleep 1 秒」，有一个被忽略的后果
+	#    （v0.14.9 实测定位，这是自检最大的一处隐性开销）：
 	#
-	# 解法：**紧密轮询 + 只在累计等待满 1 秒后才 sleep**。
-	#   · 快命令（绝大多数）：标记立刻出现，紧密轮询几十次即命中，
-	#     总耗时 ≈ 命令本身（实测 0.02~0.4 秒）
-	#   · 慢命令/挂死：每转 2000 次（纯 shell 循环，无 fork）才 sleep 1 秒，
-	#     既不会忙等烧 CPU，也不会拖长快路径
+	#      命令只要耗时超过「2000 转」（实测约 20ms），就会落进
+	#      `sleep 1` 分支；醒来时命令**早已完成**，但要等到 1 秒后才
+	#      再看标记。于是**任何 20ms~1020ms 的命令都被向上取整到约
+	#      1020~1070ms**。实测（冷缓存，同一台路由器）：
 	#
-	# 2000 次是实测折中：一次 `[ -f ]` 约 5~20µs，2000 次 ≈ 10~40ms，
-	# 即每秒约 25~100 次 sleep 检查，CPU 占用可忽略。
-	local total_s deadline spin_max spin
-	total_s="$secs"
-	deadline=0
-	spin_max=2000
+	#        google A  真实 220~540ms → 经 dc_run_timeout 恒为 1070ms
+	#        google AAAA          同上 → 1070ms
+	#
+	#      也就是说：自检第 10/11 项的 1070ms 里，**只有约 500ms 是
+	#      真实网络往返，另外约 530ms 是纯等待策略的量化误差**。
+	#      这不是网络慢，改上游/换节点都治不好。
+	#
+	# 解法：用 `/proc/uptime`（纯 shell，无 fork）做真实时钟，
+	#      在 `fine_budget` 毫秒内**紧密轮询**，之后才退回 `sleep 1`。
+	#
+	#      · fine_budget 覆盖实测最慢的正常答复（google A 冷 540ms）
+	#        并留余量 → 正常答复的量化误差降到约 10ms
+	#      · 超过 fine_budget 仍无标记（真正挂死的链路）→ 退回原来的
+	#        sleep 1 轮询，CPU 不会长时间被占满，超时语义不变
+	#      · 超时判定仍走 `kill -TERM` + 完成标记，**没有改动**
+	#        dc_run_timeout 的对外契约（约束 18/19/44）：
+	#        stdout 输出 0/1、成功路径删除 `.done`、超时发 TERM
+	fine_budget=1200
+	dc_clock_ms
+	deadline=$((DC_CLOCK_MS + secs * 1000))
+	local fine_end
+	fine_end=$((DC_CLOCK_MS + fine_budget))
 
 	# 先检查一次：命令若已瞬间完成，零等待返回
 	if [ -f "$flag" ]; then
@@ -1335,9 +1618,14 @@ dc_run_timeout() {
 		return 0
 	fi
 
-	while [ "$deadline" -lt "$total_s" ]; do
+	while :; do
+		# 紧密轮询一批，再读一次真实时钟
+		#
+		# 2000 转实测约 20ms（纯 shell 循环，无 fork），即每 20ms 读一次
+		# /proc/uptime。读时钟本身很便宜（read 是内置命令），但会走一次
+		# 文件打开，故按批读而不是每转都读。
 		spin=0
-		while [ "$spin" -lt "$spin_max" ]; do
+		while [ "$spin" -lt 2000 ]; do
 			if [ -f "$flag" ]; then
 				wait "$pid" 2>/dev/null
 				rm -f "$flag" 2>/dev/null
@@ -1346,19 +1634,34 @@ dc_run_timeout() {
 			fi
 			spin=$((spin + 1))
 		done
-		# 转满 spin_max 仍未完成 → 睡 1 秒，再继续
-		sleep 1
-		deadline=$((deadline + 1))
-	done
 
-	# 到点：kill 掉包装层，其 trap 再杀真实命令
-	#
-	# 此刻 $pid 必然是「还在跑」或「已退出但未被 wait 回收的僵尸」。
-	# 僵尸的 pid 在回收前不会被复用，故这里 kill 一定落在自己人身上。
-	kill -TERM "$pid" 2>/dev/null
-	wait "$pid" 2>/dev/null
-	echo 1
-	return 0
+		dc_clock_ms
+
+		# 到点：kill 掉包装层，其 trap 再杀真实命令
+		#
+		# 此刻 $pid 必然是「还在跑」或「已退出但未被 wait 回收的僵尸」。
+		# 僵尸的 pid 在回收前不会被复用，故这里 kill 一定落在自己人身上。
+		if [ "$DC_CLOCK_MS" -ge "$deadline" ]; then
+			kill -TERM "$pid" 2>/dev/null
+			wait "$pid" 2>/dev/null
+			echo 1
+			return 0
+		fi
+
+		# 超出紧密轮询预算：只有在「剩余时间还超过 1 秒」时才 sleep 1，
+		# 否则继续紧密轮询直到到点。
+		#
+		# ⚠️ 这里不能无条件 sleep 1（v0.14.9 实测修正）：
+		#    剩余不足 1 秒时 sleep 1 会**越过** deadline —— 实测 2 秒超时
+		#    变成了 2270ms（原实现是 2000ms）。超时精度变差会让调用方的
+		#    重试节奏漂移，也偏离约束 19 的语义。
+		#    改为「够 1 秒才睡，不够就紧密轮询」，最坏多耗 1 秒 CPU
+		#    （与原来每轮转 2000 次的开销同量级），但到点精确。
+		if [ "$DC_CLOCK_MS" -ge "$fine_end" ] \
+			&& [ $((deadline - DC_CLOCK_MS)) -gt 1000 ]; then
+			sleep 1
+		fi
+	done
 }
 
 # ------------------------------------------------------------
@@ -1453,20 +1756,92 @@ dc_dns_first_addr() {
 # 持久化反而危险 —— 断电前的「已改道」不该在下次开机继续生效，
 # 那时链路可能是好的。
 # ------------------------------------------------------------
+
+# 可选预加载：把整个状态文件读进变量，之后 dc_health_read 在内存里查
+#
+# 用法: dc_health_prime   （先调它，再连续读多个域名的字段）
+#
+# ⚠️ 不 prime 时 dc_health_read 的行为与原来**完全一致**（走 awk），
+#    所以其它调用点（cycle / explain / 页面）不需要任何改动。
+#
+# 为什么值得：status 对 8 个域名读 5 个字段 = 40 次 dc_health_field，
+# 每次 2 次 fork（awk 找行 + awk 取字段）→ 实测 160ms。
+# 状态文件只有几百字节、十几行，整份读进变量后每次查表都是纯 shell 比较。
+dc_health_prime() {
+	_DC_HEALTH_BLOB=""
+	_DC_HEALTH_LOADED=0
+	[ -r "$DNSCHAIN_HEALTH_STATE" ] || return 0
+	_DC_HEALTH_BLOB=$(cat "$DNSCHAIN_HEALTH_STATE" 2>/dev/null)
+	_DC_HEALTH_LOADED=1
+	return 0
+}
+
+# 写状态文件后必须让预加载缓存失效，否则同一进程里读到的还是旧内容
+dc_health_prime_invalidate() {
+	_DC_HEALTH_LOADED=0
+	_DC_HEALTH_BLOB=""
+	return 0
+}
+
 dc_health_read() {
-	local d line
+	local d line rest nl
 	d="$1"
 	[ -r "$DNSCHAIN_HEALTH_STATE" ] || return 1
+
+	# 已预加载：在内存里按「首字段精确等于 $d」找第一行
+	#
+	# 判据与 awk 的 `$1 == d` 等价：域名不含 |，故命中当且仅当
+	# 整行等于 $d（只有一列的退化行）或以 "$d|" 开头。
+	if [ "${_DC_HEALTH_LOADED:-0}" = "1" ]; then
+		nl='
+'
+		rest="$_DC_HEALTH_BLOB"
+		while [ -n "$rest" ]; do
+			line=${rest%%"$nl"*}
+			case "$rest" in
+				*"$nl"*) rest=${rest#*"$nl"} ;;
+				*)       rest="" ;;
+			esac
+			case "$line" in
+				"$d"|"$d"\|*) printf '%s\n' "$line"; return 0 ;;
+			esac
+		done
+		return 1
+	fi
+
 	line=$(awk -F'|' -v d="$d" '$1 == d { print; exit }' "$DNSCHAIN_HEALTH_STATE" 2>/dev/null)
 	[ -n "$line" ] || return 1
 	echo "$line"
+}
+
+# 从一行状态记录里取第 n 个字段（纯 shell，不 fork）
+#
+# 语义与 `echo "$line" | awk -F'|' -v n=N '{ print $n }'` 逐字节一致：
+#   · 字段不足时输出空行（awk 对 n > NF 打印空）
+#   · 分隔符是**单个** |，连续 || 之间是空字段
+# 已用 8 组输入实测对照（含越界 n），见 CHANGELOG 验证段。
+_dc_field() {
+	local l n
+	l="$1"
+	n="$2"
+	while [ "$n" -gt 1 ]; do
+		case "$l" in
+			*'|'*) l=${l#*'|'} ;;
+			*)     l=""; break ;;
+		esac
+		n=$((n - 1))
+	done
+	case "$l" in
+		*'|'*) printf '%s\n' "${l%%'|'*}" ;;
+		*)     printf '%s\n' "$l" ;;
+	esac
 }
 
 # 取字段：dc_health_field <domain> <1..7>
 dc_health_field() {
 	local line
 	line=$(dc_health_read "$1") || return 1
-	echo "$line" | awk -F'|' -v n="$2" '{ print $n }'
+	_dc_field "$line" "$2"
 }
 
 # 当前生效链路（无状态时回落到首选）
@@ -1478,6 +1853,33 @@ dc_health_active() {
 	case "$active" in
 		domestic|foreign) echo "$active" ;;
 		*)                echo "$pref" ;;
+	esac
+}
+
+# ------------------------------------------------------------
+# 分诊结论查询（v0.16.0）
+#
+# 返回：direct / proxy / dead / 空（无记录）
+#
+# 为什么要读分诊记录而不只是查库：分诊是**实测**结论（真的发了
+# 请求验证直连与代理哪条通），而归属库只是静态数据、会不全。
+# 两者冲突时以实测为准。
+#
+# 记录文件由 /usr/bin/dnschain-triage 维护：
+#   /etc/dnschain/triage-domain.list   <域名>|<domestic|foreign|dead>
+#   /etc/dnschain/triage-ip.list       <IP>|<direct|proxy|dead>
+#
+# 这里只读域名表（watch.servers 是按域名写的）；IP 表用于集合重放。
+# ------------------------------------------------------------
+dc_triage_verdict() {
+	local d="$1" f="/etc/dnschain/triage-domain.list" v
+	[ -r "$f" ] || return 0
+	v=$(awk -F'|' -v d="$d" '$1 == d { print $2; exit }' "$f" 2>/dev/null)
+	case "$v" in
+		domestic) echo "direct" ;;
+		foreign)  echo "proxy" ;;
+		dead)     echo "dead" ;;
+		*)        : ;;
 	esac
 }
 
@@ -1506,6 +1908,9 @@ dc_health_upsert() {
 		"$d" "$pref" "$active" "$fail" "$ok" "$last" "$res" >> "$tmp"
 
 	mv -f "$tmp" "$DNSCHAIN_HEALTH_STATE" || return 1
+
+	# 状态文件已变，预加载缓存必须失效（否则同进程里读到旧内容）
+	dc_health_prime_invalidate
 }
 
 # 写入/更新一行，last 由调用方给定（改道/首次探测时用 now）
@@ -1766,6 +2171,65 @@ dc_health_cycle() {
 
 	# 释放互斥锁（正常路径）
 	rm -rf "$lockd" 2>/dev/null
+
+	# ── 分诊（v0.16.0）───────────────────────────────────────
+	#
+	# 放在释放锁之后：分诊要发真实 HTTP 请求（每个目标 3~6 秒），
+	# 持锁跑会把下一轮 cycle 全挡掉。分诊有自己的幂等语义
+	# （已落库的目标会判 known 直接跳过），并发跑不会互相破坏。
+	#
+	# ⚠️ 必须在锁外：否则 daemon 的周期会被分诊拖长，
+	#    健康检测的时效性下降（这是本仓库历史上踩过的坑）。
+	dc_triage_cycle
+
+	return 0
+}
+
+# ------------------------------------------------------------
+# 一轮分诊（v0.16.0）
+#
+# 对「不在任何归属库里」的目标执行：
+#   ① 试直连（临时加入 china，发真实请求）
+#   ② 直连不通 → 试代理（移入 blacklist，再发请求）
+#   ③ 都不通 → 标记 dead
+#   ④ 跑通 → 落库（IP 进集合、域名进 custom 列表）
+#
+# 是否启用由 UCI `dnschain.main.triage_enabled` 控制，默认 1。
+#
+# ⚠️ 为什么不在 dc_health_cycle 的循环里做：那个循环只处理
+#    dc_watch_list() 的观测域名（默认 8 个种子域名）。而分诊要覆盖
+#    **客户机实际访问的所有域名**，数据源是 dnsmasq 的查询日志。
+#    两者的输入集合不同，硬塞进同一个循环会让语义混乱。
+# ------------------------------------------------------------
+dc_triage_cycle() {
+	local enabled
+	enabled=$(dc_get main triage_enabled 1)
+	[ "$enabled" = "1" ] || { echo "TRIAGE SKIP 未启用"; return 0; }
+
+	[ -x /usr/bin/dnschain-triage ] || {
+		echo "TRIAGE SKIP 脚本缺失"
+		return 0
+	}
+
+	# 每轮最多分诊多少个目标（防止日志里域名太多拖长周期）
+	local max
+	max=$(dc_get main triage_max 12)
+	case "$max" in ''|*[!0-9]*) max=12 ;; esac
+
+	# 数据源：客户机最近查询过的域名（排除路由器自身）
+	local cands
+	cands=$(logread 2>/dev/null \
+		| grep -oE 'query\[[A-Z]+\] [^ ]+ from 192\.168\.[0-9]+\.[0-9]+' \
+		| sed -e 's/^query\[[A-Z]*\] //' -e 's/ from .*$//' \
+		| grep -vE '^(localhost|.*\.local|.*\.lan|.*\.arpa)$' \
+		| sort -u | head -n "$max")
+
+	[ -n "$cands" ] || { echo "TRIAGE SKIP 无候选"; return 0; }
+
+	# 只分诊「未知」的（已有归属的跳过，triage 内部会再判一次）
+	local out
+	out=$(/usr/bin/dnschain-triage run $cands 2>/dev/null)
+	printf '%s\n' "$out" | grep -E '^(ITEM|SUMMARY)' | sed 's/^/TRIAGE /'
 	return 0
 }
 

@@ -23,6 +23,21 @@
 
 . /usr/share/dnschain/dnschain.sh
 
+# ------------------------------------------------------------
+# 临时目录（v0.14.9）
+#
+# 自检需要在进程内共享几个中间文件（观测列表快照、并行探测的输出）。
+# 统一放这里，脚本退出时由 trap 清掉 —— 不用固定路径，避免两次运行
+# 撞名；也不用 `mktemp` 逐个文件（每个 mktemp 都是一次 fork）。
+#
+# 取不到临时目录时 TMPD 为空，调用方各自退化为不落盘（不影响判定）。
+# ------------------------------------------------------------
+TMPD=""
+TMPD=$(mktemp -d 2>/dev/null) || TMPD=""
+if [ -n "$TMPD" ]; then
+	trap 'rm -rf "$TMPD" 2>/dev/null' EXIT INT TERM
+fi
+
 PASS_CNT=0
 FAIL_CNT=0
 SKIP_CNT=0
@@ -94,15 +109,195 @@ lan_addr() {
 }
 
 # ------------------------------------------------------------
+# 三个「全文件扫描」检查的独立实现（v0.14.9）
+#
+# 为什么抽成函数：第 2、15、18 项各自要对 dnschain-split.conf（实测
+# 2.0MB / 23714 行）或整个 conf-dir 做一次完整扫描，彼此**完全独立**
+# （只读、互不依赖对方的结论）。原来串行跑，总耗时 = 三者之和
+# （实测 210 + 290 + 310 = 810ms）。
+#
+# 抽出来后可以在 check_all 开头**同时**放后台跑，与第 1 项的真实
+# DNS 查询重叠，总墙钟时间降到约 max(三者) ≈ 350ms。
+#
+# 语义逐字保持：这些函数体就是原检查项的判据，没有任何放宽。
+# 返回值经 stdout 传回（后台任务只能这么传）。
+# ------------------------------------------------------------
+
+# 第 2 项：框架分流片段里有没有「不符合预期端口」的 server= 行
+# 输出："MISSING"（片段不存在）| 空（全部正确）| 第一条异常行
+_scan_item2() {
+	local split_file fport
+	fport=$(dc_get main foreign_port 5336)
+	split_file="$DNSCHAIN_DNSMASQ_CONF_DIR/dnschain-split.conf"
+
+	[ -r "$split_file" ] || { printf 'MISSING\n'; return 0; }
+
+	grep -vE "^server=/[^/]+/127\.0\.0\.1#${fport}\$" "$split_file" 2>/dev/null \
+		| grep -E '^server=' | head -1
+}
+
+# 第 15 项：conf-dir 里有没有指向**非** 127.0.0.1 的明文 IP 的 server=
+# 输出：空（无旁路）| 第一条命中的行
+_scan_item15() {
+	# 「排除 127.0.0.1」放在前面：两个条件是交集，交换顺序不改变
+	# 结果集合，也不改变「文件遍历顺序里的第一条」。
+	# conf-dir 里绝大多数 server= 都指向 127.0.0.1#<端口>，先用便宜的
+	# -vE 滤掉，后面那条带 `([0-9]{1,3}\.){3}` 回溯的严格正则只处理
+	# 极少量行。实测 350ms → 286ms。
+	grep -rhvE '^server=/[^/]+/127\.0\.0\.1' \
+		"$DNSCHAIN_DNSMASQ_CONF_DIR" 2>/dev/null \
+		| grep -E '^server=/[^/]+/([0-9]{1,3}\.){3}[0-9]{1,3}(#[0-9]+)?$' | head -1
+}
+
+# 第 15 项失败时数总数（只有真出问题才走这条慢路径）
+_scan_item15_count() {
+	grep -rhvE '^server=/[^/]+/127\.0\.0\.1' \
+		"$DNSCHAIN_DNSMASQ_CONF_DIR" 2>/dev/null \
+		| grep -E '^server=/[^/]+/([0-9]{1,3}\.){3}[0-9]{1,3}(#[0-9]+)?$' | wc -l
+}
+
+# 第 18 项：观测域名与静态片段的交集条数
+# 输出：一个整数（无交集时为 0）
+_scan_item18() {
+	local watch_file split_file2 watch_tmp dup_n
+	watch_file="$DNSCHAIN_WATCH_SERVERS"
+	split_file2="$DNSCHAIN_DNSMASQ_CONF_DIR/dnschain-split.conf"
+
+	[ -r "$watch_file" ] || { printf '0\n'; return 0; }
+	[ -r "$split_file2" ] || { printf '0\n'; return 0; }
+
+	# 观测域名先落盘一次（dc_watch_list 只跑一遍，不再每个域名重算）
+	watch_tmp=$(mktemp 2>/dev/null) || { printf '0\n'; return 0; }
+	dc_watch_list > "$watch_tmp" 2>/dev/null
+
+	# ⚠️ 观测列表为空时必须直接返回 0（v0.14.9 实测踩到）。
+	#
+	#   BusyBox 的 `grep -Fxcf <空 pattern 文件>` **匹配所有行**
+	#   （实测：printf "a\nb\nc\n" | grep -Fxcf /dev/null -  → 3，rc=0）。
+	#   这是空 pattern 的经典歧义：POSIX 允许「空正则匹配任意串」，
+	#   于是空 pattern 文件 = 匹配一切。
+	#
+	#   而原实现的 `for d in $(dc_watch_list)` 在列表为空时**零次迭代**，
+	#   dup_n 恒为 0。若不拦住，空观测列表会让本项把 split 里的每个域名
+	#   都算成「重复」→ 第 18 项误报 FAIL。
+	#
+	#   实测复现：watch 为空 + split 有 1 条 → 新写法返回 1（错），
+	#   原写法返回 0（对）。已用合成数据逐条比对过 6 种边界情形。
+	if [ ! -s "$watch_tmp" ]; then
+		rm -f "$watch_tmp" 2>/dev/null
+		printf '0\n'
+		return 0
+	fi
+
+	# 一次扫描抽出全部 server=/<域名>/ 的域名键，再与观测列表求交集。
+	# `grep -Fxcf` 是**整行精确匹配**，与原来 `^server=/<域名转义>/`
+	# 的精确前缀语义一致（`github.com` 不会匹配 `www.github.com`，
+	# 也不会匹配 `notgithub.com`）—— 已用合成数据逐条验证。
+	#
+	# ⚠️ 不接 `|| echo 0`：grep -c 无匹配时既打印 0 又返回 rc=1，
+	#    `|| echo 0` 会追加第二个 0（"0\n0"），随后算术比较直接报错。
+	dup_n=$(grep -oE '^server=/[^/]+/' "$split_file2" 2>/dev/null \
+		| sed 's|^server=/||; s|/$||' \
+		| sort -u \
+		| grep -Fxcf "$watch_tmp" - 2>/dev/null)
+	rm -f "$watch_tmp" 2>/dev/null
+
+	case "$dup_n" in
+		''|*[!0-9]*) dup_n=0 ;;
+	esac
+	printf '%s\n' "$dup_n"
+}
+
+# ------------------------------------------------------------
 # 逐项检查
 # ------------------------------------------------------------
 check_all() {
 	local entry lan cn_up foreign_up owner pid
-	local cls addr tables chains fw4_ok
+	# v0.14.9：`cls` / `addr` 随第 8~11 项改为并行（a8/c9/a9/a10/c11）后
+	# 不再使用，已从 local 声明里去掉，避免留下误导性的未用变量。
+	local tables chains fw4_ok
 	local dnsmasq_cache dp_args
 
 	entry=$(dc_get main entry_port 5353)
 	lan=$(lan_addr)
+
+	# ── 一次性快照（v0.14.9 性能）────────────────────────────
+	#
+	# `netstat -lnup` 实测 23ms、`nft list table inet ss_spec` 实测 150ms。
+	# 原来第 4/5/6/13 项各自跑一次 netstat（4 × 23ms），第 3/19 项各自
+	# 反查一次 dnsmasq pid（2 × 23ms）。这些查询在**一次自检之内**重复
+	# 读取的是同一份内核状态，取一次快照复用即可。
+	#
+	# 判定语义不变：快照只是把「同一时刻的观测」摊开给多个检查项用，
+	# 每个检查项的判据与阈值一字未改。
+	local ns_udp ns_tcp dp_pid_cached
+	ns_udp=$(netstat -lnup 2>/dev/null)
+	ns_tcp=$(netstat -lntp 2>/dev/null)
+	# dnsmasq 真 worker 的 PID：第 3 项（取 -C 配置路径）与第 19 项
+	# （取 PPid 查 ujail 白名单）都要用，算一次复用（原各算一次，各 23ms）。
+	dp_pid_cached=$(dc_dnsmasq_pid)
+
+	# ── 三个全文件扫描：放后台并行 ───────────────────────────
+	#
+	# 第 2/15/18 项互不依赖，各自是一次 2~3MB 的只读扫描（串行合计
+	# 约 810ms）。放后台与第 1 项的 DNS 查询重叠，墙钟降到约 350ms。
+	# 结果经 $TMPD 下的文件传回；emit 仍在主 shell 里按原顺序执行，
+	# 输出格式与逐行统计不受影响。
+	local r2 r15 r18 pid2 pid15 pid18
+	r2=""; r15=""; r18=""
+	pid2=""; pid15=""; pid18=""
+	# 第 1 项也要一次真实 DNS 查询（LAN 地址上的 baidu）。它与第 2/15/18
+	# 项的全文件扫描、以及第 8~11 项的四个探测**互相独立**，一并并行。
+	local r1 pid1
+	r1=""; pid1=""
+	# ── 8~11：四个互相独立的 DNS 探测，**在这里就启动** ──────────
+	#
+	# 性能要点（v0.14.9）：这四项的目标域名、记录类型、查询路径互不依赖 ——
+	# item 8 查 baidu A、9 查 taobao AAAA、10 查 google A、11 查 google AAAA。
+	# 原实现串行跑，总耗时 = 四次之和（实测冷缓存 30+30+540+540 ≈ 1140ms）。
+	#
+	# 后两项是主要成本，而它们都是**在等跨境 DoH 往返**，CPU 几乎全程空闲。
+	#
+	# ⚠️ 启动点必须放在这里（check_all 最开头），不能放在第 8 项的位置：
+	#    放在第 8 项时，前面第 1~7 项的工作（约 400ms）与这 570ms 的
+	#    网络等待完全串行，白等。提到最开头后，这段等待与第 1~7 项的
+	#    netstat/uci/awk 等本地工作完全重叠，墙钟直接省掉约 400ms。
+	#
+	# 做法：各自后台跑、结果写 $TMPD 下的文件、第 8 项处 wait 收齐再判定。
+	# 判定逻辑、阈值、输出格式**逐字未改**，只是把等待重叠起来。
+	#
+	# ⚠️ 临时文件必须用 $TMPD（mktemp -d + trap 清理），不能用固定路径：
+	#    页面「一键自检」与定时任务可能并发跑，固定路径会互相覆盖，
+	#    症状是偶发的「结果串项」。
+	# ⚠️ emit 必须留在**主 shell**，不能进后台子 shell —— 否则输出顺序
+	#    会乱，SUMMARY 的逐行统计也会漏项。
+	local p8 p9 p10 p11 pid8 pid9 pid10 pid11
+	p8=""; p9=""; p10=""; p11=""
+	pid8=""; pid9=""; pid10=""; pid11=""
+
+	if [ -n "$TMPD" ]; then
+		r2="${TMPD}/scan2"; r15="${TMPD}/scan15"; r18="${TMPD}/scan18"
+		r1="${TMPD}/scan1"
+		p8="${TMPD}/p8.out"
+		p9="${TMPD}/p9.out"
+		p10="${TMPD}/p10.out"
+		p11="${TMPD}/p11.out"
+		( _scan_item2 )  > "$r2"  2>/dev/null & pid2=$!
+		( _scan_item15 ) > "$r15" 2>/dev/null & pid15=$!
+		( _scan_item18 ) > "$r18" 2>/dev/null & pid18=$!
+		( dns_class "www.baidu.com" "$lan" ) > "$r1" 2>/dev/null & pid1=$!
+		( dns_first_addr "www.baidu.com" "$lan" ) > "$p8" 2>/dev/null & pid8=$!
+		(
+			# item 9 原本是「先判 class，OK 再取地址」两次查询。
+			# 顺序保持原样，只是整段放进后台，与其它三项并行。
+			_c=$(dns_class "www.taobao.com" "$lan" aaaa)
+			_a=""
+			[ "$_c" = "OK" ] && _a=$(dns_first_addr "www.taobao.com" "$lan" aaaa)
+			printf '%s\n%s\n' "$_c" "$_a" > "$p9"
+		) & pid9=$!
+		( dns_first_addr "www.google.com" "$lan" ) > "$p10" 2>/dev/null & pid10=$!
+		( dns_class "www.google.com" "$lan" aaaa ) > "$p11" 2>/dev/null & pid11=$!
+	fi
 
 	# 1. 客户机 DNS 路径可达（LAN 地址上 :53 能应答）
 	#
@@ -114,7 +309,14 @@ check_all() {
 	# 真正该验的是「LAN 地址上的 :53 能否解析」：
 	# 这既覆盖「dnsmasq 在监听」，也覆盖「上游链路通」。
 	local lan_cls
-	lan_cls=$(dns_class "www.baidu.com" "$lan")
+	# 查询已由后台并行块完成（见 check_all 开头）；没跑成后台时就地算一次。
+	if [ -n "$pid1" ]; then
+		wait "$pid1" 2>/dev/null
+		lan_cls=$(sed -n '1p' "$r1" 2>/dev/null)
+	else
+		lan_cls=$(dns_class "www.baidu.com" "$lan")
+	fi
+	[ -n "$lan_cls" ] || lan_cls=$(dns_class "www.baidu.com" "$lan")
 	if [ "$lan_cls" = "OK" ] || [ "$lan_cls" = "EMPTY" ]; then
 		emit 1 PASS "客户机 DNS 路径可达" "${lan}:53 应答 ${lan_cls}"
 	else
@@ -133,30 +335,28 @@ check_all() {
 	#
 	# 该验的是「框架生成的片段本身正确」——即 dnschain-split.conf 里
 	# 所有 server= 都指向 foreign_port，且没有残留指向 :5335 的旧规则。
-	local split_file bad_ports ports_found fport
+	#
+	# 扫描本身已由 _scan_item2 在后台完成（见 check_all 开头的并行块）。
+	local split_file bad_ports ports_found fport first_bad
 	fport=$(dc_get main foreign_port 5336)
 	split_file="$DNSCHAIN_DNSMASQ_CONF_DIR/dnschain-split.conf"
 
-	if [ ! -r "$split_file" ]; then
-		emit 2 FAIL "框架分流规则正确" "缺少 ${split_file}"
+	# 取回后台扫描结果（若没跑成后台，则就地同步算一次）
+	if [ -n "$pid2" ]; then
+		wait "$pid2" 2>/dev/null
+		first_bad=$(sed -n '1p' "$r2" 2>/dev/null)
 	else
-		# 性能要点（v0.11.1）：该文件实测 1.5MB / 17813 行。
-		# 原实现用 `grep -hoE ... | sed | sort -u | tr` 收集全部端口再去重，
-		# 要扫完全文件 + 起 3 个进程（170ms）。
-		# 但判定只需要知道「有没有不等于 fport 的行」→ 反选 + head -1 短路，
-		# 正常情况下扫到第一行就能确认（实测 170ms → 40ms）。
-		local first_bad
-		first_bad=$(grep -vE "^server=/[^/]+/127\.0\.0\.1#${fport}\$" "$split_file" 2>/dev/null \
-			| grep -E '^server=' | head -1)
+		first_bad=$(_scan_item2)
+	fi
 
-		if [ -z "$first_bad" ]; then
-			emit 2 PASS "框架分流规则正确" "dnschain-split.conf 全部指向 :${fport}"
-		else
-			local bad_ports
-			bad_ports=$(grep -hoE '^server=/[^/]+/127\.0\.0\.1#[0-9]+' "$split_file" 2>/dev/null \
-				| sed 's/.*#//' | sort -u | tr '\n' ' ')
-			emit 2 FAIL "框架分流规则正确" "出现未预期端口: ${bad_ports}（应为 ${fport}），例如 ${first_bad}"
-		fi
+	if [ "$first_bad" = "MISSING" ]; then
+		emit 2 FAIL "框架分流规则正确" "缺少 ${split_file}"
+	elif [ -z "$first_bad" ]; then
+		emit 2 PASS "框架分流规则正确" "dnschain-split.conf 全部指向 :${fport}"
+	else
+		bad_ports=$(grep -hoE '^server=/[^/]+/127\.0\.0\.1#[0-9]+' "$split_file" 2>/dev/null \
+			| sed 's/.*#//' | sort -u | tr '\n' ' ')
+		emit 2 FAIL "框架分流规则正确" "出现未预期端口: ${bad_ports}（应为 ${fport}），例如 ${first_bad}"
 	fi
 
 	# 3. dnsmasq 唯一默认上游恰好一条
@@ -170,8 +370,11 @@ check_all() {
 	#   与 "1" 比较必然不等 → 第 3 项恒 FAIL，看起来像链路坏了。
 	#
 	#   改为从 dnsmasq 进程 argv 取真正在用的 `-C` 路径。
+	#
+	# v0.14.9：pid 复用 check_all 开头算好的快照（dc_dnsmasq_pid 实测
+	# 23ms，第 19 项也要用同一个值，取一次即可）。
 	_dc_conf=""
-	_dc_pid=$(dc_dnsmasq_pid)
+	_dc_pid="$dp_pid_cached"
 	if [ -n "$_dc_pid" ]; then
 		_dc_conf=$(tr '\0' '\n' < "/proc/${_dc_pid}/cmdline" 2>/dev/null \
 			| awk '/^-C$/ { getline; print; exit } /^-C./ { sub(/^-C/, ""); print; exit }')
@@ -187,7 +390,10 @@ check_all() {
 	fi
 
 	# 4. dnsproxy 在监听（127.0.0.1 与 ::1）
-	if dc_port_listening "$entry" udp; then
+	#
+	# v0.14.9：端口查表改用 netstat 快照（原每项各跑一次 netstat，
+	# 每次 23ms）。判据与 dc_port_listening 完全相同。
+	if [ -n "$(dc_port_owner_from "$ns_udp" "$entry")" ]; then
 		local v4 v6
 		v4=$(dns_class "www.baidu.com" "127.0.0.1:${entry}")
 		v6=$(dns_class "www.baidu.com" "[::1]:${entry}")
@@ -201,18 +407,38 @@ check_all() {
 	fi
 
 	# 5. dnsproxy 参数与配置一致，且不含 --cache
-	pid=$(dc_port_owner "$entry" udp)
+	pid=$(dc_port_owner_from "$ns_udp" "$entry")
 	if [ -n "$pid" ] && [ -r "/proc/${pid}/cmdline" ]; then
 		dp_args=$(tr '\0' '\n' < "/proc/${pid}/cmdline")
-		if echo "$dp_args" | grep -q '^--cache'; then
-			emit 5 FAIL "dnsproxy 参数一致" "出现 --cache，违反「缓存只在 dnsmasq 一层」"
-		elif echo "$dp_args" | grep -q '^--fallback'; then
-			emit 5 FAIL "dnsproxy 参数一致" "出现 --fallback，会回落明文/污染上游"
-		elif echo "$dp_args" | grep -q '^--ipv6-disabled'; then
-			emit 5 FAIL "dnsproxy 参数一致" "出现 --ipv6-disabled，会连国内 AAAA 一起砍"
-		else
-			emit 5 PASS "dnsproxy 参数一致" "无 --cache、无 --fallback、无 --ipv6-disabled"
-		fi
+		# 三处 grep 合并成一次 case 匹配：--cache / --fallback /
+		# --ipv6-disabled 都是「行首」模式，用 case 的多分支保持原有
+		# 优先级（先报 --cache），且省掉 3 次 fork。
+		case "$dp_args" in
+			*'--cache'*)
+				# 精确到行首才算（argv 里 `--cache` 独占一行）
+				if printf '%s\n' "$dp_args" | grep -q '^--cache'; then
+					emit 5 FAIL "dnsproxy 参数一致" "出现 --cache，违反「缓存只在 dnsmasq 一层」"
+				elif printf '%s\n' "$dp_args" | grep -q '^--fallback'; then
+					emit 5 FAIL "dnsproxy 参数一致" "出现 --fallback，会回落明文/污染上游"
+				elif printf '%s\n' "$dp_args" | grep -q '^--ipv6-disabled'; then
+					emit 5 FAIL "dnsproxy 参数一致" "出现 --ipv6-disabled，会连国内 AAAA 一起砍"
+				else
+					emit 5 PASS "dnsproxy 参数一致" "无 --cache、无 --fallback、无 --ipv6-disabled"
+				fi
+				;;
+			*'--fallback'*|*'--ipv6-disabled'*)
+				if printf '%s\n' "$dp_args" | grep -q '^--fallback'; then
+					emit 5 FAIL "dnsproxy 参数一致" "出现 --fallback，会回落明文/污染上游"
+				elif printf '%s\n' "$dp_args" | grep -q '^--ipv6-disabled'; then
+					emit 5 FAIL "dnsproxy 参数一致" "出现 --ipv6-disabled，会连国内 AAAA 一起砍"
+				else
+					emit 5 PASS "dnsproxy 参数一致" "无 --cache、无 --fallback、无 --ipv6-disabled"
+				fi
+				;;
+			*)
+				emit 5 PASS "dnsproxy 参数一致" "无 --cache、无 --fallback、无 --ipv6-disabled"
+				;;
+		esac
 	else
 		emit 5 SKIP "dnsproxy 参数一致" "取不到 dnsproxy 的 pid"
 	fi
@@ -223,7 +449,7 @@ check_all() {
 	# 原因：chinadns-ng 的 -t 不支持 DoH，而落地节点到 853 全部不通，
 	# 它只会把国外域名降级成「用国内 DNS 查」→ 污染答案。
 	local fl_pid
-	fl_pid=$(dc_port_owner 5335 udp)
+	fl_pid=$(dc_port_owner_from "$ns_udp" 5335)
 	if [ -z "$fl_pid" ]; then
 		emit 6 PASS "无 chinadns-ng 残留" ":5335 无监听（v0.10.0 已移除该组件）"
 	else
@@ -252,31 +478,53 @@ check_all() {
 		emit 7 PASS "端口所有权无冲突" "pdnsd_enable=${ssr_mode}、ipv6_support=1、dnsmasq.filter_aaaa=0"
 	fi
 
-	# 8. 国内 A 正确（客户机路径）
-	addr=$(dns_first_addr "www.baidu.com" "$lan")
-	if [ -n "$addr" ] && ! is_polluted "$addr"; then
-		emit 8 PASS "国内 A 正确" "${lan} 查 www.baidu.com -> ${addr}"
+	# ── 8~11：收齐上面已启动的四个探测结果 ──────────────────────
+	#
+	# 探测本身在 check_all 开头就已启动（与第 1~7 项重叠执行），
+	# 这里只负责 wait + 判定。emit 顺序与原来完全一致。
+	local a8 c9 a9 a10 c11 par_ok
+	par_ok=0
+	[ -n "$pid8" ] && par_ok=1
+
+	if [ "$par_ok" = "1" ]; then
+		wait "$pid8" "$pid9" "$pid10" "$pid11" 2>/dev/null
+
+		a8=$(sed -n '1p' "$p8" 2>/dev/null)
+		c9=$(sed -n '1p' "$p9" 2>/dev/null)
+		a9=$(sed -n '2p' "$p9" 2>/dev/null)
+		a10=$(sed -n '1p' "$p10" 2>/dev/null)
+		c11=$(sed -n '1p' "$p11" 2>/dev/null)
 	else
-		emit 8 FAIL "国内 A 正确" "${lan} 查 www.baidu.com -> ${addr:-无结果}"
+		# TMPD 取不到时退回串行 —— 判定完全一致，只是慢一点。
+		a8=$(dns_first_addr "www.baidu.com" "$lan")
+		c9=$(dns_class "www.taobao.com" "$lan" aaaa)
+		a9=""
+		[ "$c9" = "OK" ] && a9=$(dns_first_addr "www.taobao.com" "$lan" aaaa)
+		a10=$(dns_first_addr "www.google.com" "$lan")
+		c11=$(dns_class "www.google.com" "$lan" aaaa)
+	fi
+
+	# 8. 国内 A 正确（客户机路径）
+	if [ -n "$a8" ] && ! is_polluted "$a8"; then
+		emit 8 PASS "国内 A 正确" "${lan} 查 www.baidu.com -> ${a8}"
+	else
+		emit 8 FAIL "国内 A 正确" "${lan} 查 www.baidu.com -> ${a8:-无结果}"
 	fi
 
 	# 9. 国内 AAAA 保留
-	cls=$(dns_class "www.taobao.com" "$lan" aaaa)
-	if [ "$cls" = "OK" ]; then
-		addr=$(dns_first_addr "www.taobao.com" "$lan" aaaa)
-		emit 9 PASS "国内 AAAA 保留" "www.taobao.com -> ${addr}"
+	if [ "$c9" = "OK" ]; then
+		emit 9 PASS "国内 AAAA 保留" "www.taobao.com -> ${a9}"
 	else
-		emit 9 FAIL "国内 AAAA 保留" "www.taobao.com AAAA 结果 ${cls}（应为 OK）"
+		emit 9 FAIL "国内 AAAA 保留" "www.taobao.com AAAA 结果 ${c9}（应为 OK）"
 	fi
 
 	# 10. 国外 A 正确（非污染）
-	addr=$(dns_first_addr "www.google.com" "$lan")
-	if [ -n "$addr" ] && ! is_polluted "$addr"; then
-		emit 10 PASS "国外 A 正确" "www.google.com -> ${addr}"
-	elif [ -z "$addr" ]; then
+	if [ -n "$a10" ] && ! is_polluted "$a10"; then
+		emit 10 PASS "国外 A 正确" "www.google.com -> ${a10}"
+	elif [ -z "$a10" ]; then
 		emit 10 FAIL "国外 A 正确" "www.google.com 无结果（dnsproxy 或代理可能未运行）"
 	else
-		emit 10 FAIL "国外 A 正确" "www.google.com -> ${addr}（污染值，检查国外上游是否为 DoH）"
+		emit 10 FAIL "国外 A 正确" "www.google.com -> ${a10}（污染值，检查国外上游是否为 DoH）"
 	fi
 
 	# 11. 国外 AAAA **保留**（v0.10.0 起不再抑制）
@@ -284,12 +532,11 @@ check_all() {
 	# 语义反转：v0.9.x 期望 EMPTY（抑制），v0.10.0 期望 OK（保留）。
 	# 因为 SSR-Plus 的 IPv6 流量代理会把国外 IPv6 也送进 :1234，
 	# 没有「IPv6 直连被 RST」的问题，抑制反而损失双栈能力。
-	cls=$(dns_class "www.google.com" "$lan" aaaa)
-	case "$cls" in
+	case "$c11" in
 		OK) emit 11 PASS "国外 AAAA 保留" "返回真实 AAAA（IPv6 经代理出站）" ;;
 		EMPTY) emit 11 FAIL "国外 AAAA 保留" "被抑制了（应为 OK）——检查 ipv6_support 与 chinadns-ng 是否残留" ;;
 		TIMEOUT) emit 11 FAIL "国外 AAAA 保留" "TIMEOUT —— 会卡住客户端" ;;
-		*) emit 11 FAIL "国外 AAAA 保留" "结果 ${cls}" ;;
+		*) emit 11 FAIL "国外 AAAA 保留" "结果 ${c11}" ;;
 	esac
 
 	# 12. 国外 DoH 出站（v0.10.0：不再是 DoT）
@@ -307,9 +554,16 @@ check_all() {
 	fi
 
 	# 13. 代理与分流在位
+	#
+	# v0.14.9：`nft list table inet ss_spec` 实测 150ms（它要 dump 整张
+	# 表的全部规则，而这里只关心「表存不存在」）。`nft list tables` 只列
+	# 表名，实测 10ms —— 判据完全相同（表在就会出现在列表里）。
+	#
+	# 仍然保留「恰好 2 个」的判据：ss_spec 与 ss_spec_mangle 各一个。
 	tables=$(nft list tables 2>/dev/null | grep -c ss_spec)
 	local port1234 gs
-	port1234=$(dc_port_listening 1234 tcp && echo yes || echo no)
+	# v0.14.9：:1234 的 TCP 查表复用 netstat 快照（判据与 dc_port_listening 同）
+	port1234=$( [ -n "$(dc_port_owner_from "$ns_tcp" 1234)" ] && echo yes || echo no )
 	gs=$(uci -q get shadowsocksr.@global[0].global_server 2>/dev/null)
 	if [ "$tables" = "2" ] && [ "$port1234" = "yes" ] && [ "$gs" != "nil" ] && [ -n "$gs" ]; then
 		emit 13 PASS "代理与分流在位" "ss_spec 表 2 个、:1234 在监听、global_server=${gs}"
@@ -386,18 +640,32 @@ check_all() {
 	#      `^server=/[^/]+/...` 只试行首，实测 300ms → 10ms。
 	#   2. 判定只需「有没有」，不需要精确条数 → `head -1` 短路。
 	#      失败时才回退去数总数（那种情况本来就该慢一点给人看清）。
+	#
+	# v0.14.9：把「排除 127.0.0.1」这一条**提到前面**。
+	#
+	#   判定是「命中严格明文 IP 模式 **且** 目标不是 127.0.0.1」——
+	#   这是两个条件的交集，交换顺序**不改变结果集合**，也不改变
+	#   `head -1` 取到的「文件遍历顺序里的第一条」（集合相同 → 首元素相同）。
+	#
+	#   收益来自数据分布：conf-dir 里绝大多数 server= 都指向
+	#   127.0.0.1#<端口>，先用便宜的 -vE 把它们滤掉，后面那条
+	#   带 `([0-9]{1,3}\.){3}` 回溯的严格正则就只处理极少量行。
+	#   实测 350ms → 286ms。
 	local plain_hit=""
-	plain_hit=$(grep -rhE '^server=/[^/]+/([0-9]{1,3}\.){3}[0-9]{1,3}(#[0-9]+)?$' \
-		"$DNSCHAIN_DNSMASQ_CONF_DIR" 2>/dev/null \
-		| grep -vE '^server=/[^/]+/127\.0\.0\.1' | head -1)
+	# 扫描已由 _scan_item15 在后台完成（见 check_all 开头的并行块）。
+	# 没跑成后台时就地同步算一次，判据一致。
+	if [ -n "$pid15" ]; then
+		wait "$pid15" 2>/dev/null
+		plain_hit=$(sed -n '1p' "$r15" 2>/dev/null)
+	else
+		plain_hit=$(_scan_item15)
+	fi
 
 	if [ -z "$plain_hit" ]; then
 		emit 15 PASS "无明文旁路" "conf-dir 内无非 127.0.0.1 的 server="
 	else
 		local plain
-		plain=$(grep -rhE '^server=/[^/]+/([0-9]{1,3}\.){3}[0-9]{1,3}(#[0-9]+)?$' \
-			"$DNSCHAIN_DNSMASQ_CONF_DIR" 2>/dev/null \
-			| grep -vE '^server=/[^/]+/127\.0\.0\.1' | wc -l)
+		plain=$(_scan_item15_count)
 		emit 15 FAIL "无明文旁路" "${plain} 条指向外部明文 IP 的 server=，例如 ${plain_hit}"
 	fi
 
@@ -444,18 +712,38 @@ check_all() {
 	# dnschain-split.conf（静态）与 watch.servers（动态）里，
 	# dnsmasq 会把两条 server= 当作**候选**（不是后者覆盖前者），
 	# 改道就退化成「随机走一条」，而且两条链都能解析时完全看不出问题。
-	local dup_n watch_file split_file2 d_w
-	watch_file="$DNSCHAIN_WATCH_SERVERS"
-	split_file2="$DNSCHAIN_DNSMASQ_CONF_DIR/dnschain-split.conf"
+	#
+	# 性能要点（v0.14.9）：这是自检最大的热点，原实现 1350ms。
+	#
+	#   原实现对**每个**观测域名都跑 `echo | sed | grep -qE` 三个进程，
+	#   且每次 grep 都**全文件扫描**。实测 dnschain-split.conf 有
+	#   23714 行 / 2.0MB，8 个观测域名 × 约 165ms = 1320ms。
+	#
+	#   改成「一次扫描把域名抽出来，再与观测列表求交集」：
+	#     grep -oE '^server=/[^/]+/'  ← 1 个进程、1 次全文件扫描
+	#     sed 去掉前缀与尾斜杠        ← 复用同一条管道
+	#     sort -u                     ← 去重（判定只需集合语义）
+	#     grep -Fxcf <watch 文件>     ← 精确整行匹配，直接得到交集条数
+	#   实测 1320ms → 290ms。
+	#
+	# ⚠️ 语义必须与原实现**逐字等价**（已用合成数据验证）：
+	#   原判据 `^server=/<域名转义>/` 是**精确前缀匹配** ——
+	#   `server=/github.com/` 不匹配 `server=/www.github.com/`，
+	#   也不匹配 `server=/notgithub.com/`。
+	#   `grep -Fxf`（整行精确匹配）恰好是同一个语义：
+	#   抽取时按第一个 `/` 切断，得到的就是 dnsmasq 认的那个域名键。
+	local dup_n
 	dup_n=0
-	if [ -r "$watch_file" ] && [ -r "$split_file2" ]; then
-		for d_w in $(dc_watch_list); do
-			[ -n "$d_w" ] || continue
-			if grep -qE "^server=/$(echo "$d_w" | sed 's|\.|\\.|g')/" "$split_file2" 2>/dev/null; then
-				dup_n=$((dup_n + 1))
-			fi
-		done
+	# 扫描已由 _scan_item18 在后台完成（见 check_all 开头的并行块）。
+	if [ -n "$pid18" ]; then
+		wait "$pid18" 2>/dev/null
+		dup_n=$(sed -n '1p' "$r18" 2>/dev/null)
+	else
+		dup_n=$(_scan_item18)
 	fi
+	case "$dup_n" in
+		''|*[!0-9]*) dup_n=0 ;;
+	esac
 	if [ "$dup_n" -eq 0 ]; then
 		emit 18 PASS "观测域名不与静态片段重复" "watch.servers 与 dnschain-split.conf 无交集"
 	else
@@ -502,7 +790,7 @@ check_all() {
 		# `procd_add_jail_mount` 声明过的路径。servers-file 指向白名单
 		# 之外的目录时**既不报错也不生效** —— 这是最隐蔽的一种失效。
 		local dpid jail_ok jail_dir
-		dpid=$(dc_dnsmasq_pid)
+		dpid="$dp_pid_cached"
 		jail_ok=0
 		jail_dir=$(dirname "$sf_uci")
 		if [ -n "$dpid" ]; then
@@ -515,13 +803,16 @@ check_all() {
 				# 故比较时两侧都去掉尾斜杠再比，否则永远匹配不上
 				# （实测：dirname 给出 /var/run/dnsmasq，而白名单里是
 				#  /var/run/dnsmasq/，直接 grep -qxF 会漏）。
-				local jd
-				while IFS= read -r jd; do
-					jd=$(echo "$jd" | sed 's:/*$::')
-					[ "$jd" = "$jail_dir" ] && { jail_ok=1; break; }
-				done <<EOF
-$(tr '\0' '\n' < "/proc/${ppid}/cmdline" 2>/dev/null)
-EOF
+				#
+				# v0.14.9：原来是对每一行跑 `echo | sed` 去尾斜杠再比，
+				# 实测 50 个参数就要 120ms（每行 2 个进程）。改成**一次**
+				# sed 处理整份 cmdline，再 `grep -qxF` 整行精确比对 ——
+				# 语义相同（都是「去掉尾部斜杠后整行相等」），实测 0ms。
+				if tr '\0' '\n' < "/proc/${ppid}/cmdline" 2>/dev/null \
+					| sed 's:/*$::' \
+					| grep -qxF "$jail_dir" 2>/dev/null; then
+					jail_ok=1
+				fi
 			else
 				# 没有 ujail 包装（或读不到父进程）时视为不受限
 				jail_ok=1
@@ -545,25 +836,25 @@ EOF
 	# 状态文件是「页面显示」与「实际生效」的接合处。若 active 与 pref
 	# 不同却没有 switch:/fallback: 记录，说明有人手工改过状态文件，
 	# 或写入被打断 —— 两种情况都该被看见。
-	local st_bad st_total st_line st_d st_pref st_act st_res
-	st_bad=0
-	st_total=0
-	while read -r st_line; do
-		[ -n "$st_line" ] || continue
-		st_total=$((st_total + 1))
-		st_d=$(echo "$st_line" | awk -F'|' '{print $1}')
-		st_pref=$(echo "$st_line" | awk -F'|' '{print $2}')
-		st_act=$(echo "$st_line" | awk -F'|' '{print $3}')
-		st_res=$(echo "$st_line" | awk -F'|' '{print $7}')
-		if [ "$st_act" != "$st_pref" ]; then
-			case "$st_res" in
-				switch:*|fallback:*|recover-wait:*) : ;;
-				*) st_bad=$((st_bad + 1)) ;;
-			esac
-		fi
-	done <<-EOF
-		$(dc_health_state_dump)
-	EOF
+	#
+	# v0.14.9：原来每行跑 4 次 `echo | awk` 取字段，实测 8 行就要 80ms
+	# （每行 5 个进程）。改成**一次** awk 同时算「总行数」与「无原因
+	# 记录的改道行数」，判据与字段位置完全一致，实测 80ms → 2ms。
+	local st_bad st_total st_awk
+	st_awk=$(dc_health_state_dump 2>/dev/null | awk -F'|' '
+		$0 != "" {
+			total++
+			if ($3 != $2) {
+				if ($7 !~ /^(switch:|fallback:|recover-wait:)/) bad++
+			}
+		}
+		END { printf "%d %d\n", total + 0, bad + 0 }')
+	st_total=${st_awk%% *}
+	st_bad=${st_awk##* }
+	[ -n "$st_total" ] || st_total=0
+	[ -n "$st_bad" ] || st_bad=0
+	case "$st_total" in ''|*[!0-9]*) st_total=0 ;; esac
+	case "$st_bad" in ''|*[!0-9]*) st_bad=0 ;; esac
 
 	if [ "$st_total" -eq 0 ]; then
 		emit 20 SKIP "改道状态自洽" "还没有探测数据（等一轮 interval 或从页面手动触发）"
@@ -727,13 +1018,24 @@ selftest_fingerprint() {
 	#    即类型是 upstream、名字是 cn/foreign。写成 `dc_get_list upstream server`
 	#    会返回空（把它当 section 名查），指纹里那段就恒为 "0/"，
 	#    等于上游变化完全检测不到。
-	up="$(dc_get_list cn server 2>/dev/null | wc -l)/$(dc_get_list cn server 2>/dev/null | head -1)/$(dc_get_list foreign server 2>/dev/null | wc -l)/$(dc_get_list foreign server 2>/dev/null | head -1)"
+	#
+	# v0.14.9：原来 `dc_get_list cn server` 被调了 **4 次**（每个 cn 出现
+	# 两次），每次都是一次 uci + tr + grep 的管道。改成各取一次进变量。
+	local cn_lst fo_lst
+	cn_lst=$(dc_get_list cn server 2>/dev/null)
+	fo_lst=$(dc_get_list foreign server 2>/dev/null)
+	up="$(printf '%s\n' "$cn_lst" | wc -l)/$(printf '%s\n' "$cn_lst" | head -1)/$(printf '%s\n' "$fo_lst" | wc -l)/$(printf '%s\n' "$fo_lst" | head -1)"
+
+	# v0.14.9：端口查表复用一次 netstat 快照（原每端口各跑一次 netstat）。
+	local fp_ns_udp fp_ns_tcp
+	fp_ns_udp=$(netstat -lnup 2>/dev/null)
+	fp_ns_tcp=$(netstat -lntp 2>/dev/null)
 
 	printf '%s|%s|%s|%s|%s|%s|%s|%s|%s|%s' \
 		"$e" "$f" \
-		"$(dc_port_owner "$e" udp)" \
-		"$(dc_port_owner "$f" udp)" \
-		"$(dc_port_listening 1234 tcp && echo 1 || echo 0)" \
+		"$(dc_port_owner_from "$fp_ns_udp" "$e")" \
+		"$(dc_port_owner_from "$fp_ns_udp" "$f")" \
+		"$( [ -n "$(dc_port_owner_from "$fp_ns_tcp" 1234)" ] && echo 1 || echo 0 )" \
 		"$(dc_ss_spec_present && echo 1 || echo 0)" \
 		"$(dc_get main enabled 1)" \
 		"$aaaa" "$v6" "$n_gfw/$up"

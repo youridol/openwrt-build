@@ -60,6 +60,8 @@
 **/usr/bin/dnschain-reconcile          text eol=lf
 **/usr/bin/dnschain-selftest           text eol=lf
 **/usr/bin/dnschain-health             text eol=lf
+# v0.16.0 新增：分诊（默认直连 → 直连不通试代理 → 都不通标 dead）
+**/usr/bin/dnschain-triage             text eol=lf
 **/usr/share/dnschain/dnschain.sh      text eol=lf
 **/etc/capabilities/dnschain-filter.json text eol=lf
 

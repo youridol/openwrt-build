@@ -109,8 +109,27 @@ html[data-darkmode="true"] {
 }
 
 /* 旧浏览器无 :has() 时兜底：本页自建了 .dc-tabs，CBI 的 tabmenu 一律无用 */
-.dc-tabs ~ .cbi-tabmenu,
-.cbi-map > .cbi-tabmenu:empty {
+/* ── 隐藏 LuCI 原生 tabmenu（v0.16.2 修）──────────────────────────
+ *
+ * 本页的 tab 由 dnschain.js 生成 `.dc-tabs`，原生 `.cbi-tabmenu`
+ * 是空的（每个 <li> 里只有空 <a>）。但主题 CSS 给它设了
+ * `display:inline-flex; height: 36px; padding: …`，于是渲染成一个
+ * **32×36px 的空方块**，孤零零挂在标题和 tab 栏之间。
+ *
+ * 实测（修复前）：
+ *   .cbi-tabmenu  computed: display=inline-flex, 32×36px
+ *   li 共 6 个，其中 1 个可见但内容为空
+ *   截图里就是标题下方那个圆角空框
+ *
+ * ⚠️ 原选择器写的是 `.dc-tabs ~ .cbi-tabmenu`（**后续兄弟**），
+ *    而实际 DOM 里 cbi-tabmenu 在 dc-tabs **之前** —— 永远不匹配。
+ *    这就是「规则写了但没生效」的原因：不报错、不警告，只是没作用。
+ *
+ * 改用 `.cbi-map > .cbi-tabmenu` 直接按父容器定位，覆盖两种顺序。
+ */
+.cbi-map > .cbi-tabmenu,
+.cbi-map .cbi-tabmenu:empty,
+.dc-tabs ~ .cbi-tabmenu {
 	display: none !important;
 }
 
@@ -713,4 +732,26 @@ html[data-darkmode="true"] {
 /* 判定链路图/状态图的行距比概览图紧，上下留白可以小一点 */
 .dc-chain--map {
 	padding: 2px 0;
+}
+
+/*
+ * 实时诊断链路图（v0.15.0）
+ *
+ * 与前两张图的差别：它是**纵向单列**的，宽度 720 是布局基准但内容
+ * 只有「阶段名 + 状态点 + 计数 + 证据串」四段文字，没有节点框。
+ *
+ * 因此：
+ *   · 不需要 --map 那套 620px 下限（窄屏压到 480 仍可读）
+ *   · 不需要横向滚动（内容不会超出 720）
+ *   · 但**需要**给每行留足行高，否则 10px 证据串会挤在一起
+ */
+.dc-chain--live {
+	overflow-x: visible;
+}
+
+.dc-chain--live svg {
+	width: 100%;
+	height: auto;
+	min-width: 0;
+	max-width: 100%;
 }

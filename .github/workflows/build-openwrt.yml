@@ -204,7 +204,13 @@ jobs:
           #   verify-...domains.sh   契约校验（本步骤会调它）
           #   render-...diagrams.py  图示几何自检
           # 缺任一都说明功能不完整，且症状隐蔽（页面照常打开）。
+          #
+          # v0.16.0 起再加一个：
+          #   dnschain-triage        未知目标的「试直连 → 试代理 → 标 dead」分诊
+          # 它由 dnschain-health 的 dc_triage_cycle 与 dnschain-reconcile
+          # 的 apply 调用；缺了分诊完全不工作，而页面只是不显示分诊结果。
           for f in files/usr/bin/dnschain-health \
+                   files/usr/bin/dnschain-triage \
                    files/usr/share/dnschain/dnschain.sh ; do
             if [ -f "../openwrt-build/$f" ]; then
               echo "OK   $f"
@@ -216,7 +222,8 @@ jobs:
 
           # 新脚本必须有执行位 —— 缺了它 rpcd 调不动，
           # 页面所有按钮都会静默失败（点「立即探测」没反应）。
-          for f in files/usr/bin/dnschain-health ; do
+          for f in files/usr/bin/dnschain-health \
+                   files/usr/bin/dnschain-triage ; do
             if [ -x "../openwrt-build/$f" ]; then
               echo "OK   $f 有执行位"
             else
@@ -367,6 +374,7 @@ jobs:
           # 写死数字会让每次加表格都要改 CI，而改 CI 时最容易
           # 顺手把断言删掉（那就等于没有断言）。
           GEN=package/luci-app-dnschain/luasrc/model/cbi/dnschain/general.lua
+          DIA=package/luci-app-dnschain/luasrc/model/cbi/dnschain/diagrams.lua
           opened=$(grep -c 'dc-table-wrap"><table class="dc-table' "$GEN" || true)
           closed=$(grep -c '</tbody></table></div>' "$GEN" || true)
           if [ "$opened" -ge 3 ] && [ "$opened" = "$closed" ]; then
@@ -411,11 +419,43 @@ jobs:
             exit 1
           fi
 
-          nmark=$(grep -c 'marker("dc-a-' "$GEN" || true)
-          if [ "$nmark" -ge 3 ]; then
-            echo "OK   箭头按状态色定义 $nmark 个"
+          # v0.15.0：箭头全部移除（用户要求）。断言改为**反向条件** ——
+          # 不得再生成任何 marker 定义或 marker-end 引用。
+          # 三处独立实现都要查：general.lua 的内联链路图 + diagrams.lua 的两个函数。
+          #
+          # ⚠️ 必须先剥掉整行 Lua 注释（`--`）再判断。
+          #    这两处的注释里都写了「v0.15.0 移除了 marker-end」这类说明文字，
+          #    不剥注释会让断言永久误报 —— 本仓库已踩过同类问题
+          #    （AGENTS.md 第 6 条：v0.4.7 的 nft 守卫、v0.4.10 的
+          #    setInterval 守卫都栽在「解释错误写法的注释」上）。
+          gen_code=$(grep -v '^[[:space:]]*--' "$GEN")
+          dia_code=$(grep -v '^[[:space:]]*--' "$DIA")
+
+          if printf '%s\n' "$gen_code" | grep -q 'marker("dc-a-'; then
+            echo "FAIL general.lua 内联链路图仍有箭头（v0.15.0 要求移除）" >&2
+            exit 1
+          fi
+          if printf '%s\n' "$gen_code" | grep -q 'marker-end'; then
+            echo "FAIL general.lua 仍有 marker-end 引用" >&2
+            exit 1
+          fi
+          echo "OK   general.lua 内联链路图无箭头"
+
+          if printf '%s\n' "$dia_code" | grep -q 'marker-end'; then
+            echo "FAIL diagrams.lua 仍有 marker-end 引用" >&2
+            exit 1
+          fi
+          if printf '%s\n' "$dia_code" | grep -q '<marker'; then
+            echo "FAIL diagrams.lua 仍生成 <marker> 定义" >&2
+            exit 1
+          fi
+          echo "OK   diagrams.lua 无箭头"
+
+          # 图身份标记仍在（无副作用，替代原来的 marker id 前缀）
+          if printf '%s\n' "$dia_code" | grep -q 'data-dc-figure'; then
+            echo "OK   图身份用 data-dc-figure 标记（同页多图可区分）"
           else
-            echo "FAIL 箭头只有 $nmark 个（应 >= 3：ok/warn/bad）" >&2
+            echo "FAIL 缺少 data-dc-figure 图身份标记" >&2
             exit 1
           fi
 
@@ -990,6 +1030,9 @@ jobs:
           # v0.13.0：健康探测与自动改道。缺执行位时 rpcd 调不动，
           # 页面上「立即探测一轮」等按钮会静默无反应（不报错、无日志）。
           if [ -f files/usr/bin/dnschain-health ]; then chmod +x files/usr/bin/dnschain-health; fi
+          # v0.16.0：未知目标分诊。同样缺不得执行位 ——
+          # 页面「立即分诊未知目标」按钮会静默失败。
+          if [ -f files/usr/bin/dnschain-triage ]; then chmod +x files/usr/bin/dnschain-triage; fi
           echo "files overlay 执行位设置完成:"
           ls -l files/etc/init.d/ files/etc/uci-defaults/ files/etc/hotplug.d/iface/ files/etc/rc.local 2>/dev/null
 
@@ -1049,6 +1092,7 @@ jobs:
                    files/usr/bin/dnschain-reconcile \
                    files/usr/bin/dnschain-selftest \
                    files/usr/bin/dnschain-health \
+                   files/usr/bin/dnschain-triage \
                    files/etc/uci-defaults/99-zz-dnschain; do
             if [ -f "$f" ]; then
               echo "OK   存在 $f"
@@ -1065,6 +1109,7 @@ jobs:
           for f in "$LIB" "$INIT" files/usr/bin/dnschain-reconcile \
                    files/usr/bin/dnschain-selftest \
                    files/usr/bin/dnschain-health \
+                   files/usr/bin/dnschain-triage \
                    files/etc/uci-defaults/99-zz-dnschain; do
             [ -f "$f" ] || continue
             if sh -n "$f" 2>/tmp/dnschain-shn.err; then
@@ -1087,6 +1132,7 @@ jobs:
           for f in "$LIB" "$INIT" files/usr/bin/dnschain-reconcile \
                    files/usr/bin/dnschain-selftest \
                    files/usr/bin/dnschain-health \
+                   files/usr/bin/dnschain-triage \
                    files/etc/uci-defaults/99-zz-dnschain; do
             [ -f "$f" ] || continue
             body="$(grep -v '^[[:space:]]*#' "$f")"

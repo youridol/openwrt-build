@@ -21,8 +21,9 @@
 | `0003-*.patch` | 中文翻译（新增 `po/zh-cn/` + 同步 pot 模板） |
 | `0004-*.patch` | 主机实时连接详情页（13 列表格）+ conntrack 回复方向字段 |
 | `0005-*.patch` | 设置独立成 tab + 页面共用模块 `common.js` + 设备页去重与重排 |
+| `0006-*.patch` | 移除 Telegram 机器人（页面、后端脚本、UCI 段、日志项全链路删除） |
 
-## 五个 patch 各自为什么存在
+## 六个 patch 各自为什么存在
 
 ### 0001 — 重写 nft 字节计数后端（**不改就功能失效**）
 
@@ -101,7 +102,10 @@ JSON 契约与上游保持一致（`ip` / `bytes_in` / `bytes_out` / `bytes_tcp`
   `zh_Hans`，故 `po/zh-cn/` 可被正确识别（CI 已实测
   `CONFIG_PACKAGE_luci-i18n-trafficctl-zh-cn=y` 通过）。
 - 覆盖情况由 `tools/check-trafficctl-i18n.py` 校验；CI 会在译文缺失时失败。
-- `.pot` 模板一并重生成（上游只带了 121 条，实际需要 425 条）。
+- `.pot` 模板一并重生成（上游只带了 121 条；当前 pot 实测 376 条、po 502 条。
+  ⚠️ 早期本文写「实际需要 425 条」，那是 Telegram 时代的数字，已过时。
+  `po` 里另有 124 条 `pot` 没有的孤儿 msgid（`#~` 计数为 0，是活条目，不是 GNU gettext
+  的 obsolete 标记），来源是 Telegram 字符串与已删界面文案 —— 它们不影响覆盖率判定。
 
 ### 0004 — 主机实时连接详情页
 
@@ -133,8 +137,8 @@ IP/主机名指向它。后端 `trafficctl-device.sh` 补出 conntrack **回复�
 
 - 新增 `htdocs/.../view/trafficctl/settings.js`，成为页面级 tab「设置」
   （`menu.d` 登记 `admin/status/trafficctl/settings`，顺序 2；
-  Telegram 与端口转发顺延为 3、4）。顶部行为
-  **设备 | 设置 | Telegram机器人 | 端口转发**。
+  端口转发顺延为 3）。顶部行为 **设备 | 设置 | 端口转发**
+  （本 patch 落地时还有 Telegram tab，v0.7.0 起由 0006 全链路移除，现为三项）。
 - 新增 `htdocs/luci-static/resources/trafficctl/common.js`：rpc 声明、
   localStorage 选项（`loadOpts`/`optRefresh` 等）、格式化函数、
   开关/chip/折叠卡片控件。此前这些定义在 `status.js` 里、被 `telegram.js`
@@ -159,6 +163,40 @@ IP/主机名指向它。后端 `trafficctl-device.sh` 补出 conntrack **回复�
 4. **`connFiltersRow` 的定义必须先于引用**：它是「连接表筛选」（协议/分组），
    迁配置区时极易被一并删掉，而 `viewSection` 与 `updateTableSectionMode`
    仍引用它 → `ReferenceError` 令设备页整页空白。
+
+### 0006 — 移除 Telegram 机器人（v0.7.0）
+
+上游 1.21.4 带一整套 Telegram Bot：页面 tab、`trafficctl-telegram.sh`、
+`trafficctl-telegram-test.sh`、`/etc/init.d/trafficctl-telegram`、UCI `trafficctl.telegram`
+段、`logging.log_telegram` 日志项，以及 ACL 里的对应方法。
+
+本仓库不需要它，且它带来三个实际负担：`+curl` 依赖（仅为发 Telegram 消息）、
+一个常驻 init.d 服务、以及一个需要长期维护 token 的攻击面。
+
+本 patch 全链路删除（证据：`0006-remove-telegram.patch` 的 `diff --git` 列表）：
+
+| 删除对象 | 说明 |
+|---|---|
+| `root/etc/init.d/trafficctl-telegram` | 整个文件删除 |
+| `root/usr/local/bin/trafficctl-telegram.sh` | 整个文件删除 |
+| `root/usr/local/bin/trafficctl-telegram-test.sh` | 整个文件删除 |
+| `root/usr/share/rpcd/acl.d/luci-app-trafficctl.json` | 去掉 Telegram 相关 ubus 方法 |
+| `root/usr/local/bin/trafficctl-fw.sh` | 去掉 Telegram 通知钩子 |
+| `root/etc/hotplug.d/dhcp/99-trafficctl-newdevice` | 去掉新设备 Telegram 通知 |
+| `README.md` | 上游 README 里的 Telegram 章节 |
+
+配套的清理在 `Makefile` 的 `postinst`（`package/luci-app-trafficctl/Makefile:74-90`）：
+stop + disable 残留服务、`killall trafficctl-telegram.sh`、删
+`/etc/rc.d/*trafficctl-telegram`、删 `/etc/trafficctl/telegram_known.json`、
+删 UCI `trafficctl.telegram` 与 `logging.log_telegram`。
+**刷机升级时老配置里的这些残留会被这段 postinst 清掉**，不需要手工处理。
+
+⚠️ 两点遗留（不是 bug，但读文档时要知道）：
+
+- `Makefile:38` 的 `LUCI_DEPENDS` 仍含 `+curl`。全包 23 个脚本 + 1 个 CGI
+  已无任何 `curl` 调用 —— 它是 Telegram 时代的遗留依赖，删掉是安全的，但属独立改动。
+- `po/zh-cn/luci-app-trafficctl.po` 里仍有 124 条 Telegram 时代的 msgid
+  （见上文 0003 小节），它们不影响覆盖率判定。
 
 ## 维护流程
 

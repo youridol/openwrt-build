@@ -76,14 +76,42 @@ cmd_explain() {
 cmd_status() {
 	local d cls pref active fail ok last res state
 	local n_total n_ok n_rerouted n_bad n_custom n_degraded
+	local classes line
 
 	n_total=0; n_ok=0; n_rerouted=0; n_bad=0; n_custom=0; n_degraded=0
 
-	for d in $(dc_watch_list); do
+	# ── 一次算完所有域名的归属（v0.14.9 性能）────────────────────
+	#
+	# 原来在循环体里对每个域名调三次 dc_domain_class
+	# （cls / pref / custom 各一次），8 个域名 = 24 次判定，
+	# 每次都要 grep 一遍 348KB 的 db-domains.txt → 实测 880ms，
+	# 占 status 全部 1080ms 的八成。
+	#
+	# 现在改成「一次加载、多次查表」：
+	#   · dc_domain_class_batch 只做**一次**全表扫描，输出每行
+	#     "<域名>|<class>"，顺序与 dc_watch_list 完全一致；
+	#   · preferred 与 custom 都从这一份结果里推导，不再重复判定。
+	#
+	# 输出格式与逐字段判定**逐字节相同**：pref 仍按
+	# custom-foreign|db-foreign → foreign、其余 → domestic；
+	# custom 仍只对 custom-domestic|custom-foreign 计数。
+	# 这两条正是 dc_domain_preferred / dc_domain_custom 的定义，
+	# 直接内联在这里，避免再 fork 两次。
+	classes=$(dc_watch_list | dc_domain_class_batch)
+
+	# 状态文件只有几百字节、十几行：整份读进变量，之后每次取字段
+	# 都是纯 shell 比较（原来每个字段 2 次 fork，8 域 × 5 字段 = 80 次）。
+	dc_health_prime
+
+	for line in $classes; do
+		d=${line%%|*}
+		cls=${line#*|}
 		[ -n "$d" ] || continue
 
-		cls=$(dc_domain_class "$d")
-		pref=$(dc_domain_preferred "$d")
+		case "$cls" in
+			custom-foreign|db-foreign) pref="foreign" ;;
+			*)                         pref="domestic" ;;
+		esac
 
 		fail=$(dc_health_field "$d" 4)
 		ok=$(dc_health_field "$d" 5)
@@ -97,7 +125,9 @@ cmd_status() {
 		[ -n "$active" ] || active="$pref"
 
 		# custom 只计数，不参与下面的状态分类
-		dc_domain_custom "$d" && n_custom=$((n_custom + 1))
+		case "$cls" in
+			custom-domestic|custom-foreign) n_custom=$((n_custom + 1)) ;;
+		esac
 
 		if [ -z "$res" ]; then
 			state="unknown"

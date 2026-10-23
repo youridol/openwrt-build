@@ -565,8 +565,58 @@ end
         ("switch:TIMEOUT-&gt;OK", "明细表含改道原因（已转义）"),
         ("dc-badge", "含状态徽标"),
         ("dc-table-wrap", "表格套滚动容器"),
+        # ── v0.15.0：实时诊断链路图 ──────────────────────────────
+        # 用户要求「加上实时诊断的链路思维导图」。
+        # 它把 selftest 的 20 项按链路阶段重新分组，逐段给状态与证据。
+        #
+        # v0.16.3：从纵向列表改成思维导图，aria-label 同步改为
+        # 「实时诊断链路思维导图」（与页面其余三张图统一为「…思维导图」）。
+        ("实时诊断链路思维导图", "实时诊断链路思维导图 aria-label"),
+        ("dc-chain--live", "实时诊断图有独立样式类"),
+        ("客户机入口", "实时诊断图含客户机入口阶段"),
+        ("国外链路", "实时诊断图含国外链路阶段"),
+        ("代理与分流", "实时诊断图含代理阶段"),
+        ("分流规则", "实时诊断图含分流规则阶段"),
+        ("双栈与端口", "实时诊断图含双栈阶段"),
     ]:
         check_contains("页面含 %s" % desc, alltext, needle)
+
+    # ── v0.15.0：箭头必须全部移除 ────────────────────────────────
+    #
+    # 页面渲染出的 HTML 里不得出现任何 marker 定义或 marker-end 引用。
+    # 这是「连线移除箭头」这条需求的**渲染级**验证 ——
+    # 只查源码可能漏掉某条拼接路径（比如 general.lua 的内联链路图
+    # 与 diagrams.lua 的两个函数是三处独立实现）。
+    check_not_contains("页面无 marker 定义", alltext, "<marker")
+    check_not_contains("页面无 marker-end 引用", alltext, "marker-end")
+
+    # ── v0.15.0：概览与诊断已合并，且概览不再重复渲染判定链路图 ──
+    #
+    # 判定链路图在合并前被渲染两次（概览的「分流决策」+ 域名的「走法」），
+    # 是同一函数 dg.route_map 的两份输出 —— 真正的重复。
+    #
+    # ⚠️ 统计口径：本测试脚本会把 general.lua 加载两次（__chunk2 之前已
+    #    加载过一次），故 __opts 里每个 option 都注册了两份，直接数
+    #    alltext 里的出现次数会恒为 2×N。这里改为**按 option 名去重**后
+    #    再数有几个不同的 option 会渲染出判定链路图。
+    n_route_opts = L.eval(r"""
+(function()
+	local seen, n = {}, 0
+	for _, o in ipairs(_G.__opts) do
+		if o.kind == "DummyValue" and type(o.cfgvalue) == "function" then
+			local okc, res = pcall(o.cfgvalue, o)
+			if okc and res and tostring(res):find("域名判定链路图", 1, true) then
+				if not seen[o.name] then
+					seen[o.name] = true
+					n = n + 1
+				end
+			end
+		end
+	end
+	return n
+end)()
+""")
+    check_eq("判定链路图只由一个 option 渲染（不重复）", int(n_route_opts), 1)
 
     # 空数据兜底：状态表在无数据时应给提示而不是空白
     #
@@ -825,11 +875,33 @@ def test_v0144_fixes():
     else:
         bad("reconcile 结果判定", "未找到 exec_ok")
 
-    # ── M7：长域名截断 ──
-    if "text_w(keep, 11) + ell_w > avail" in dg:
-        ok("超长域名按宽硬切并补省略号")
+    # ── M7：长域名截断（v0.15.1 改为按列宽截断）──
+    #
+    # 原断言查的是 `text_w(keep, 11) + ell_w > avail`（按整行可用宽度截）。
+    # v0.15.1 把域名清单改成多列网格后，截断基准从「整行宽度」变成
+    # 「单列宽度 col_w」，变量名也随之变化。
+    #
+    # 断言改为查**截断逻辑本身**（按字符回退直到放得下 + 补省略号），
+    # 不绑定具体变量名 —— 否则每次调整布局都要改断言，
+    # 而改断言时最容易顺手删掉（那就等于没有断言）。
+    if "text_w(keep, 11) + ell_w > col_w" in dg:
+        ok("超长域名按列宽硬切并补省略号")
+    elif "text_w(keep, 11) + ell_w > avail" in dg:
+        ok("超长域名按可用宽度硬切并补省略号")
     else:
         bad("超长域名硬切", "未找到截断逻辑")
+
+    # 域名清单必须是多列网格（v0.15.1 修「显示不足」）
+    if "n_cols" in dg and "COL_GAP" in dg:
+        ok("域名清单用多列网格铺开（不再用「、」串接）")
+    else:
+        bad("域名清单未改为多列网格", "仍是旧的「、」串接折行")
+
+    # 画布必须容得下最长的常见域名（v0.15.1：760 → 900）
+    if "local STATUS_W = 900" in dg:
+        ok("状态图画布宽 900（容得下长域名清单）")
+    else:
+        bad("状态图画布宽不是 900", "长域名会被迫截断")
 
     # ── M8：filter_aaaa 同步检查结果 ──
     if 'code = "uci_write_failed"' in d:

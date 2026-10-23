@@ -185,5 +185,22 @@ fi
 
 uci commit shadowsocksr 2>/dev/null
 
+# ------------------------------------------------------------
+# 7. 重放分诊结果（v0.16.0）
+#
+# nft 的 `china` / `blacklist` 集合由上游 SSR-Plus 每次 start 时
+# 重建，分诊增补的元素会被清掉。这里在首刷阶段重放一次，
+# 之后由 dnschain-reconcile 每轮收敛继续保证。
+#
+# 分诊本身的判定逻辑见 /usr/bin/dnschain-triage 顶部注释：
+# 默认直连 → 直连不通试代理 → 都不通标记 dead。
+# ------------------------------------------------------------
+if [ -x /usr/bin/dnschain-triage ]; then
+	_tri=$(/usr/bin/dnschain-triage apply 2>/dev/null | sed -n 's/^SUMMARY applied=//p')
+	[ -n "$_tri" ] && log "triage: 已重放 ${_tri} 条分诊结果"
+else
+	log "WARN: /usr/bin/dnschain-triage 缺失，跳过分诊重放"
+fi
+
 log "首刷默认值完成"
 exit 0

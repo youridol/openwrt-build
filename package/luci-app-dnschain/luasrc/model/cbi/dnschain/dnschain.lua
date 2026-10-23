@@ -468,6 +468,62 @@ function M.reconcile_now()
 	return exec_ok(out), out
 end
 
+--- 立即分诊未知目标（v0.16.0）
+--
+-- 逻辑（用户需求原文）：
+--   不在 GFW 名单、不在代理 IP 集（blacklist）、不在国内 IP 段（china）、
+--   不在任何数据库的域名 / IP / IP 段，全部先走直连；
+--   直连不通再走 SSR-Plus；都不通则标记为死。
+--   跑通的落库：IP 转 IP 段追加到集合，域名追加到对应列表。
+--
+-- 判定依据是**实测**（真的发 HTTP 请求），不是查库或猜延迟。
+function M.triage_now()
+	local out = sys.exec("/usr/bin/dnschain-triage run 2>&1") or ""
+	return exec_ok(out), out
+end
+
+--- 读取分诊结果（v0.16.0）
+--
+-- 返回：{ { target, kind, verdict }, ... } 与汇总
+--   kind    = "ip" | "domain"
+--   verdict = "direct" | "proxy" | "dead"
+--
+-- 数据源是 /usr/bin/dnschain-triage list 的输出：
+--   ITEM <目标>|<类型>|<结果>
+--   SUMMARY total=<n> direct=<n> proxy=<n> dead=<n>
+--
+-- 为什么要读脚本而不是直接读记录文件：记录文件有两份
+-- （triage-ip.list / triage-domain.list），格式与语义在脚本里统一，
+-- 页面重复实现一遍解析就会漂移。
+function M.triage_rows()
+	return cached("triage_rows", function()
+		local rows, sum = {}, {}
+		local out = sys.exec("/usr/bin/dnschain-triage list 2>/dev/null") or ""
+
+		for line in out:gmatch("[^\n]+") do
+			local it = line:match("^ITEM%s+(.+)$")
+			if it then
+				local target, kind, verdict = it:match("^([^|]+)|([^|]+)|([^|]+)$")
+				if target and verdict then
+					rows[#rows + 1] = {
+						target = target,
+						kind = kind or "",
+						verdict = verdict,
+					}
+				end
+			end
+			local sm = line:match("^SUMMARY%s+(.+)$")
+			if sm then
+				for k, v in sm:gmatch("(%w+)=(%d+)") do
+					sum[k] = tonumber(v) or 0
+				end
+			end
+		end
+
+		return { rows = rows, summary = sum }
+	end)
+end
+
 --- 运行自检
 --
 -- 性能要点（v0.11.1）：selftest 单次实测 1370ms（它内部要跑 6+ 条 DNS 查询、

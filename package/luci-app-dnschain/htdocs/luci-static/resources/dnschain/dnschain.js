@@ -28,17 +28,22 @@
 	/*
 	 * tab 顺序。
 	 *
-	 * 顺序即阅读顺序，按「先看结论、再管配置、最后排障」排：
-	 *   概览（链路现在什么样）
-	 *   域名（自定义列表 + 判定链路 + 改道状态）  ← v0.13.0 新增
+	 * 顺序即阅读顺序，按「先看结论、再管配置、最后动手」排：
+	 *   概览与诊断（结论 + 解析链路 + 实时诊断链路 + 指标 + 组件状态
+	 *              + 自检 20 项 + 操作按钮）   ← v0.15.0 合并
+	 *   域名（自定义列表 + 判定链路 + 改道状态）
 	 *   解析 / 分流 / 代理 / DHCP（配置）
-	 *   诊断（自检与操作）
+	 *
+	 * v0.15.0 按用户要求把「诊断」并入「概览」：
+	 *   两者本就同源（结论徽标与 20 项表格都来自同一次 selftest），
+	 *   拆成两个 tab 时用户要来回切才能把「一句话结论」与「逐项证据」对上。
+	 *   合并后 tab 由 7 个减为 6 个。
 	 *
 	 * 「域名」紧跟概览而不是排在配置区中间：
 	 *   它同时承担「看」和「配」两件事（判定链路图与状态导图都是只读诊断），
 	 *   放到「代理」后面会让用户以为它只是又一张配置表。
 	 */
-	var TAB_ORDER = ['overview', 'domains', 'resolve', 'split', 'proxy', 'dhcp', 'diag'];
+	var TAB_ORDER = ['overview', 'domains', 'resolve', 'split', 'proxy', 'dhcp'];
 
 	var meta = null;
 
@@ -80,7 +85,26 @@
 	}
 
 	function countBadges(el) {
-		return el.querySelectorAll('.dc-badge--bad').length;
+		/* 只统计「需要用户处理」的异常徽标。
+		 *
+		 * ⚠️ 必须排除分诊结果表里的红徽标（v0.16.2 修）。
+		 *
+		 *   分诊表用 dc-badge--bad 表示「这个目标两种链路都不通」——
+		 *   那是**客观观测结果**，不是本页配置有错，用户也不需要
+		 *   去修什么（下一轮分诊会自动重试）。
+		 *
+		 *   实测问题：分诊表里有 10 条 dead，tab 徽标就显示「10」，
+		 *   看上去像「有 10 处配置错误」。这会让用户误以为页面坏了。
+		 *
+		 *   判据：分诊表的行用 data-dc-triage 标记，跳过其内部徽标。
+		 */
+		var all = el.querySelectorAll('.dc-badge--bad');
+		var n = 0;
+		for (var i = 0; i < all.length; i++) {
+			if (all[i].closest('[data-dc-triage]')) continue;
+			n++;
+		}
+		return n;
 	}
 
 	/**
@@ -231,7 +255,6 @@
 	 */
 	var BLOCK_CLASSES = ['dc-chain', 'dc-metrics', 'dc-stats', 'dc-table-wrap',
 		'dc-alert', 'dc-badge', 'dc-inline-form', 'dc-hint'];
-
 	function markBlockRows() {
 		var fields = document.querySelectorAll('.cbi-value > .cbi-value-field');
 		for (var i = 0; i < fields.length; i++) {

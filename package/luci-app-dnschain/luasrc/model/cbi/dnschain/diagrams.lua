@@ -23,8 +23,12 @@
 --     左边，曲线在中间兜回来、出现自交扭结，看起来也是断链。
 --   · 节点必须有填充（var(--dc-surface)）。fill="none" 时连线从节点
 --     内部透出来，同样像断链。
---   · marker id 必须带前缀。同一页有多张 SVG 时 id 是**文档级全局**的，
---     同名 marker 会全部解析到第一个定义 —— 颜色就串了。
+--   · 连线**不画箭头**（v0.15.0 按用户要求移除）。思维导图的语义是
+--     「从主干生长出分支」，靠曲线形状与颜色表达走向即可；箭头在密集
+--     分支处会互相压盖，反而看不清。
+--     ⇒ 因此也**不再生成 `<marker>` 定义**。曾经的 id 前缀机制
+--     （`id_prefix` 参数）现在只用于给 `<g>` 打 `data-dc-figure` 标记，
+--     供前端与测试区分同一页上的多张图；不再影响任何 SVG id。
 --   · 所有动态文本必须转义。域名与原因串来自配置文件与探测结果，
 --     含 & < > 时会让整个 SVG 解析失败（页面变成一片空白）。
 --
@@ -74,32 +78,27 @@ local C = {
 D.colors = C
 
 -----------------------------------------------------------------------
--- 箭头定义：按状态色各一个
+-- 图身份标记（v0.15.0 起替代原来的 marker id 前缀）
 --
--- 只定义一个固定灰色时，红/绿连线配灰箭头，看起来像没连上。
+-- 原机制：每张图按状态色定义 5 个 <marker>，id 带前缀避免同页冲突。
+-- v0.15.0 按用户要求移除全部箭头 ⇒ 没有 marker 了。
+--
+-- 但「同一页有多张图」这个事实还在（概览/诊断合并后同页 3 张），
+-- 前端与测试仍需要区分它们，故保留一个无副作用的身份标记：
+-- 给最外层 <g> 打 data-dc-figure="<prefix>"。
+-- 它不影响渲染，也不参与任何 SVG id 解析。
 -----------------------------------------------------------------------
-local function defs(prefix)
-	local out = { "<defs>" }
-	for _, tone in ipairs({ "ok", "warn", "bad", "info", "mute" }) do
-		out[#out + 1] = string.format(
-			'<marker id="%s-a-%s" viewBox="0 0 10 10" refX="9" refY="5" ' ..
-			'markerWidth="7" markerHeight="7" orient="auto-start-reverse">' ..
-			'<path d="M 0 0 L 10 5 L 0 10 z" fill="%s"/></marker>',
-			prefix, tone, C[tone])
-	end
-	out[#out + 1] = "</defs>"
-	return table.concat(out)
+local function figure_attr(prefix)
+	return string.format(' data-dc-figure="%s"', prefix)
 end
-
-local function arrow(prefix, tone)
-	return string.format("url(#%s-a-%s)", prefix, tone or "ok")
-end
+D.figure_attr = figure_attr
 
 -----------------------------------------------------------------------
--- 连线
+-- 连线（v0.15.0：全部去掉 marker-end，不再画箭头）
 --
 -- hline：两端垂直对齐时的水平线，中点轻微下沉（思维导图的「生长感」）。
 -- curve：从 (x1,y1) 平滑过渡到 (x2,y2) 的 S 形三次贝塞尔。
+-- vline：跨段的竖虚线。
 --
 -- ⚠️ dx 上限 (x2-x1)/2 是硬约束，见文件头。
 -----------------------------------------------------------------------
@@ -108,8 +107,8 @@ local function hline(x1, x2, y, tone, prefix, dash)
 	local dip = 3
 	return string.format(
 		'<path d="M %d %d Q %d %d, %d %d" stroke="%s" stroke-width="2.5" ' ..
-		'fill="none" stroke-linecap="round" marker-end="%s"%s/>',
-		x1, y, mid, y + dip, x2, y, C[tone or "ok"], arrow(prefix, tone),
+		'fill="none" stroke-linecap="round"%s/>',
+		x1, y, mid, y + dip, x2, y, C[tone or "ok"],
 		dash and ' stroke-dasharray="5 4"' or "")
 end
 
@@ -121,16 +120,16 @@ local function curve(x1, y1, x2, y2, tone, prefix)
 	if dx < 6 then dx = 6 end
 	return string.format(
 		'<path d="M %d %d C %d %d, %d %d, %d %d" stroke="%s" ' ..
-		'stroke-width="2.5" fill="none" stroke-linecap="round" marker-end="%s"/>',
-		x1, y1, x1 + dx, y1, x2 - dx, y2, x2, y2, C[tone or "ok"], arrow(prefix, tone))
+		'stroke-width="2.5" fill="none" stroke-linecap="round"/>',
+		x1, y1, x1 + dx, y1, x2 - dx, y2, x2, y2, C[tone or "ok"])
 end
 
 --- 竖虚线（用于「上一阶段 → 下一阶段」的跨段连接）
 local function vline(x, y1, y2, tone, prefix)
 	return string.format(
 		'<path d="M %d %d L %d %d" stroke="%s" stroke-width="2" ' ..
-		'fill="none" stroke-dasharray="5 4" marker-end="%s" opacity="0.75"/>',
-		x, y1, x, y2, C[tone or "mute"], arrow(prefix, tone or "mute"))
+		'fill="none" stroke-dasharray="5 4" opacity="0.75"/>',
+		x, y1, x, y2, C[tone or "mute"])
 end
 
 -----------------------------------------------------------------------
@@ -217,6 +216,41 @@ local function text_w(s, size)
 	end
 	return math.ceil(total * size)
 end
+
+--- 按字符数截断，超长补省略号（v0.15.0，实时诊断图用）
+--
+-- 为什么按「字符数」而不是「像素」：实时诊断图的证据串是等宽小字、
+-- 单行显示，按像素算反而要在视图层再引一次 text_w，得不偿失。
+--
+-- ⚠️ 必须按 UTF-8 码点切，不能 `s:sub(1, n)` —— Lua 的 sub 按**字节**，
+-- 切在多字节字符中间会产出非法 UTF-8，整个 SVG 解析失败（页面空白）。
+-- 本仓库已踩过同类问题（AGENTS.md 第 46 条：Lua 字符类按字节工作）。
+--
+-- ⚠️⚠️ 取值位置踩过坑（v0.16.2 修）：`utf8_iter` 每次返回
+--   `cp, 字符原文, 字节长度` 三个值。原实现写 `for _, _, raw in utf8_iter(s)`，
+--   第三个位置拿到的是**字节长度**（1/2/3/4），不是字符 ——
+--   于是所有证据串被渲染成 `111111111111113311` 这种数字串。
+--
+--   实测（修复前）：
+--     "192.168.3.254:53 应答 OK"  →  "1111111111111111133111"
+--     "dnschain-split.conf 全部指向 :5336" → "111111111111111111113333111111"
+--
+--   这个 bug 极其隐蔽：代码语法正确、类型不报错、SVG 也能正常渲染，
+--   只是文字全变成了 1/3/4 —— 只有**看页面截图**才能发现。
+local function truncate(s, max_chars)
+	s = tostring(s or "")
+	local out, n = {}, 0
+	-- 第二个返回值才是字符原文
+	for _, ch in utf8_iter(s) do
+		if n >= max_chars then
+			return table.concat(out) .. "…"
+		end
+		out[#out + 1] = ch
+		n = n + 1
+	end
+	return table.concat(out)
+end
+D.truncate = truncate
 
 --- 按像素宽度折行（SVG <text> 不会自动换行，只能自己切）
 --
@@ -361,7 +395,7 @@ local ROUTE_W, ROUTE_H = 720, 520
 function D.route_map(opts)
 	opts = opts or {}
 
-	-- marker id 前缀：调用方必须传不同的值，否则同页两图 id 冲突。
+	-- 图身份：v0.15.0 起不再有 marker id，prefix 只用于 data-dc-figure 标记。
 	--
 	-- 用 rawget 而不是 opts.id_prefix：lupa（测试用的真实 Lua 解释器）
 	-- 把 Python dict 桥接成 Lua 表时，**缺失的键会抛 KeyError 而不是返回
@@ -410,7 +444,7 @@ function D.route_map(opts)
 		'width="%d" height="%d" role="img" ' ..
 		'aria-label="%s">', ROUTE_W, ROUTE_H, ROUTE_W, ROUTE_H,
 		esc(translate("域名判定链路图")))
-	o[#o + 1] = defs(p)
+	o[#o + 1] = "<g" .. figure_attr(p) .. ">"
 
 	--------------------------------------------------------------------
 	-- 上段连线
@@ -512,7 +546,7 @@ function D.route_map(opts)
 		translate("两条链都不通时不改道 —— 那是链路故障，改道只会掩盖问题"),
 		"mute", 10, "0.55")
 
-	o[#o + 1] = "</svg></div>"
+	o[#o + 1] = "</g></svg></div>"
 	return table.concat(o)
 end
 
@@ -590,7 +624,23 @@ local STATUS_META = {
 
 -- 高度由 status_map 内的 layout_plan 算出，不存在固定高度常量
 -- （原 STATUS_H 恒为 0 且从未被读取，v0.14.4 删）
-local STATUS_W = 760
+--
+-- ── 宽度（v0.15.1 修「域名清单显示不足」）──────────────────────
+--
+-- 原值 760。实测问题：8 个观测域名在右侧清单里被挤成 3 行，
+-- 而第三行只有 www.youtube.com 一个（占 91px）—— 右侧空出 250px 空白，
+-- 同时前两行又逼近右边界。视觉上就是「内容没显示全」。
+--
+-- 算式（改前）：X3=415 → NW3=331 → avail=325px，而 8 个域名的
+-- 自然总宽约 710px（含「、」分隔符）→ 必须折 3 行。
+--
+-- 改法不是简单加宽画布（那只是把问题推到更长的域名上），而是：
+--   ① 画布加宽到 900，给清单更多横向预算
+--   ② 清单改为**多列网格**：先算出能放几列，再按列均分，
+--      避免「最后一行只剩一个」的畸形折行
+--   ③ 每个域名单独成格（不再用「、」串成一行），列间用间距分隔
+--      —— 这样任意数量的域名都能均匀铺开，不会出现半行空白
+local STATUS_W = 900
 
 -- 把一行的 state 归一到「可画」的档位。
 --
@@ -738,10 +788,10 @@ function D.status_map(rows, summary, id_prefix)
 	local X1, X2, ROOT_W, GAP = LP.X1, LP.X2, LP.ROOT_W, LP.GAP
 	local PAD_L, PAD_R = LP.PAD_L, LP.PAD_R
 
-	-- marker id 前缀：与判定链路图用不同前缀（dcst vs dcrt）。
+	-- 图身份：v0.15.0 起不再有 marker id，prefix 只用于 data-dc-figure 标记。
 	--
-	-- 这张图目前只渲染一次，但接口保持一致（第三个参数 id_prefix），
-	-- 以免将来在别处再渲染一次时重犯「同页 id 冲突」的错。
+	-- 接口保持第三个参数 id_prefix，以免将来在别处再渲染一次时
+	-- 无法区分同一页上的两张图。
 	local p = id_prefix or "dcst"
 	local o = {}
 	-- 同判定链路图：必须给 width/height 固有尺寸，
@@ -751,7 +801,7 @@ function D.status_map(rows, summary, id_prefix)
 		'width="%d" height="%d" role="img" ' ..
 		'aria-label="%s">', STATUS_W, H, STATUS_W, H,
 		esc(translate("改道状态思维导图")))
-	o[#o + 1] = defs(p)
+	o[#o + 1] = "<g" .. figure_attr(p) .. ">"
 
 	local x_root_r = X1 + ROOT_W
 	local x2_r = X2 + NW2
@@ -799,7 +849,19 @@ function D.status_map(rows, summary, id_prefix)
 		o[#o + 1] = box_lines(X2 + PAD_L, y + 51, NW2 - PAD_L - PAD_R,
 			pl.hint_lines, 10, "0.55", nil, nil)
 
-		-- 域名清单：每行最多 2 个（等宽计算不了，用长度估算），最多 3 行
+		-- ── 域名清单：多列网格 + 独立容器框（v0.15.2）─────────────
+		--
+		-- v0.15.1 改成多列网格解决了「最后一行只剩一个」的问题，但留下了
+		-- 一个新的视觉缺陷：**域名只是悬在空白里的文字，没有容器**。
+		-- 左侧的「正常」框有边框、有底色，右侧的域名却什么都没有 ——
+		-- 看起来像是「框丢了」，而不是「这是清单」。
+		--
+		-- v0.15.2 补上容器：
+		--   · 一个浅底、细边的矩形，包住整个清单区
+		--   · 左侧留 8px 内边距，与连线末端衔接
+		--   · 边框色跟随该档的语义色（绿/黄/红/灰），但更淡
+		--
+		-- 这样视觉上就是「状态框 ──→ 清单框」的完整链路。
 		local names = {}
 		for _, r in ipairs(list) do
 			local tag = r.domain or "?"
@@ -810,50 +872,100 @@ function D.status_map(rows, summary, id_prefix)
 			names[#names + 1] = tag
 		end
 
-		-- 按 NW3 的实际像素宽度折行（原来是硬编码「52 个单位」，
-		-- 与真实框宽无关 —— 框变宽后仍按旧值折，白白浪费空间）
-		local lines = {}
-		local cur = ""
-		local avail = NW3 - 6
+		-- 清单容器框左右内边距（v0.15.2：加框后从 6 增到 10）
+		local LIST_PAD = 10
+		local avail = NW3 - LIST_PAD * 2
+		local COL_GAP = 14        -- 列间距
+		local ROW_STEP = 14       -- 行距（与字号 11 匹配）
+
+		-- 每格的最大自然宽度；超宽的域名先按「列宽上限」截断
+		local max_cell = 0
 		for _, nm in ipairs(names) do
-			-- ⚠️ 单个域名本身就超宽时必须硬切（v0.14.4 修 M7）。
-			--
-			--   原实现只在 `cur ~= ""` 时折行，单个 token 超宽时
-			--   无条件接受 → 文字画到 viewBox 外被裁掉。实测：
-			--   cdn.static-resources-for-some-service.eu-central-1.amazonaws.com
-			--   右边界 799 > 760，右侧被裁。而这一列正是导图里唯一的
-			--   「哪些域名出问题」信息，裁掉就看不全。
-			local nm_w = text_w(nm, 11)
-			if nm_w > avail then
-				-- 按字符逐步截断，留出省略号宽度
-				local ell_w = text_w("…", 11)
-				local keep = nm
-				while #keep > 1 and text_w(keep, 11) + ell_w > avail do
-					keep = keep:sub(1, #keep - 1)
-				end
-				nm = keep .. "…"
-			end
-			local cand = (cur == "") and nm or (cur .. "、" .. nm)
-			if text_w(cand, 11) > avail and cur ~= "" then
-				lines[#lines + 1] = cur
-				cur = nm
-			else
-				cur = cand
-			end
-		end
-		if cur ~= "" then lines[#lines + 1] = cur end
-
-		local shown = {}
-		local max_lines = math.max(1, math.floor((NH - 8) / 14))
-		for k = 1, math.min(#lines, max_lines) do shown[#shown + 1] = lines[k] end
-		if #lines > max_lines then
-			shown[#shown] = string.format(translate("…等 %d 个"), n)
+			local w = text_w(nm, 11)
+			if w > max_cell then max_cell = w end
 		end
 
-		if #shown == 0 then
-			o[#o + 1] = label(X3 + 6, y + 30, translate("（无）"), "mute", 11, "0.5")
+		-- 单列上限：不超过可用宽度的一半，否则一列占满、无从分栏
+		local cell_cap = math.max(60, math.floor(avail / 2))
+		local n_cols = 1
+		if max_cell + COL_GAP <= avail then
+			-- 理想列宽 = 最宽那格 + 间距；据此算最多能放几列
+			n_cols = math.max(1, math.floor((avail + COL_GAP) / (max_cell + COL_GAP)))
 		else
-			o[#o + 1] = box_lines(X3 + 6, y + 20, NW3 - 6, shown, 11, "0.8", nil, nil)
+			-- 有超宽域名：按 cell_cap 截断后再算列数
+			n_cols = math.max(1, math.floor((avail + COL_GAP) / (cell_cap + COL_GAP)))
+		end
+		-- 列数不超过域名总数（1 个域名不该开 5 列）
+		if n_cols > #names then n_cols = #names end
+		if n_cols < 1 then n_cols = 1 end
+
+		local col_w = math.floor((avail - (n_cols - 1) * COL_GAP) / n_cols)
+
+		-- 按列宽截断每个域名
+		local function fit(nm)
+			if text_w(nm, 11) <= col_w then return nm end
+			local ell_w = text_w("…", 11)
+			local keep = nm
+			while #keep > 1 and text_w(keep, 11) + ell_w > col_w do
+				keep = keep:sub(1, #keep - 1)
+			end
+			return keep .. "…"
+		end
+
+		local max_rows = math.max(1, math.floor((NH - 8) / ROW_STEP))
+		local capacity = n_cols * max_rows
+		local truncated = (#names > capacity)
+
+		-- 截断时最后一行留一格放「…等 N 个」
+		local to_show = truncated and (capacity - 1) or #names
+		if to_show < 0 then to_show = 0 end
+
+		-- ── 清单容器框（v0.15.2）─────────────────────────────────
+		--
+		-- 没有容器时，域名只是悬在空白里的文字，视觉上像「框丢了」。
+		-- 这里画一个浅底细边矩形包住整块清单：
+		--   · x 从 X3 起（连线末端），宽度到画布右缘留 14px
+		--   · 高度 = 实际用到的行数 * ROW_STEP + 上下内边距
+		--   · 边框用该档语义色的淡版本（stroke-opacity 0.45）
+		--   · 填充用 --dc-surface，与左侧状态框一致
+		--
+		-- ⚠️ 必须画在文字**之前**（先入数组），否则框会盖住文字。
+		local used_rows = math.max(1, math.ceil(math.max(to_show, 1) / n_cols))
+		if truncated then
+			used_rows = math.max(1, math.ceil((to_show + 1) / n_cols))
+		end
+		local box_h = used_rows * ROW_STEP + 12
+		local box_x = X3
+		local box_w = STATUS_W - X3 - 14
+		o[#o + 1] = string.format(
+			'<rect x="%d" y="%d" width="%d" height="%d" rx="7" ' ..
+			'fill="var(--dc-surface)" stroke="%s" stroke-width="1.5" ' ..
+			'stroke-opacity="0.45"/>',
+			box_x, y + 6, box_w, box_h, C[meta.tone])
+
+		if #names == 0 then
+			o[#o + 1] = label(X3 + 10, y + 26, translate("（无）"), "mute", 11, "0.5")
+		else
+			for k = 1, to_show do
+				local idx = k - 1
+				local col = idx % n_cols
+				local row = math.floor(idx / n_cols)
+				o[#o + 1] = string.format(
+					'<text x="%d" y="%d" font-size="11" fill="currentColor" opacity="0.8">%s</text>',
+					X3 + 10 + col * (col_w + COL_GAP),
+					y + 20 + row * ROW_STEP,
+					esc(fit(names[k])))
+			end
+			if truncated then
+				local idx = to_show
+				local col = idx % n_cols
+				local row = math.floor(idx / n_cols)
+				o[#o + 1] = string.format(
+					'<text x="%d" y="%d" font-size="11" fill="currentColor" opacity="0.55">%s</text>',
+					X3 + 10 + col * (col_w + COL_GAP),
+					y + 20 + row * ROW_STEP,
+					esc(string.format(translate("…等 %d 个"), n)))
+			end
 		end
 	end
 
@@ -867,7 +979,7 @@ function D.status_map(rows, summary, id_prefix)
 		translate("红色 = 需要人工介入；黄色 = 系统已自动处理，观察即可；绿色 = 按归属正常走"),
 		nil, 10, "0.62")
 
-	o[#o + 1] = "</svg></div>"
+	o[#o + 1] = "</g></svg></div>"
 	return table.concat(o)
 end
 
@@ -900,6 +1012,152 @@ function D.status_layout(rows)
 		tiers = #plan.present,
 		rows = plan.n_all,
 	}
+end
+
+------------------------------------------------------------------------
+-- 实时诊断链路思维导图（v0.16.3）
+--
+-- ── 为什么要改成思维导图（用户要求）──────────────────────────────
+--
+--   v0.15.0 版是一列「阶段名 + 状态点 + 计数 + 证据」的纵向列表。
+--   信息是全的，但它不是「链路图」—— 看不出段与段之间的**顺序与
+--   依赖关系**，而诊断的核心问题恰恰是「断在哪一段、下游受不受影响」。
+--
+--   本版改成三层思维导图，与页面其余三张图同一套视觉语言：
+--
+--      根（整体结论）
+--        ├─ 阶段1 ── 证据
+--        ├─ 阶段2 ── 证据
+--        └─ ...
+--
+--   根 → 阶段的连线用该阶段的状态色：一眼看出哪条支路是红的。
+--
+-- ── 布局参数怎么定的 ─────────────────────────────────────────
+--
+--   左侧根节点固定宽度，中间阶段列，右侧证据列。
+--   阶段数量固定 8 个（对应 selftest 的 8 个链路阶段），故高度
+--   可直接由行距算出，不需要 status_map 那种动态分组。
+--
+--   证据列宽度取 420：实测最长的证据串是
+--   「ss_spec 表 2 个、:1234 在监听、global_server=cfg0b4a8f」，
+--   在 11px 字号下约 300px，留出余量后 420 够用；超长仍会被
+--   truncate 截断并加省略号。
+------------------------------------------------------------------------
+local LIVE_W = 1180
+local LIVE_NH = 52          -- 阶段节点高
+local LIVE_GAP = 14         -- 阶段之间垂直间距
+local LIVE_ROOT_W = 150     -- 根节点宽
+local LIVE_STAGE_W = 168    -- 阶段节点宽
+local LIVE_EVID_W = 420     -- 证据框宽
+local LIVE_X1 = 14          -- 根节点 x
+local LIVE_X2 = 208         -- 阶段节点 x
+local LIVE_X3 = 424         -- 证据框 x
+local LIVE_TOP = 16         -- 首个阶段顶部
+
+--- 实时诊断链路思维导图
+--
+-- 参数 stages：{ { id, label, tone, n_pass, n_fail, n_skip, evidence }, ... }
+-- 返回：完整 SVG 字符串（含外层 <div>）
+function D.live_diag_map(stages)
+	stages = stages or {}
+	local n = #stages
+	if n == 0 then
+		return '<div class="dc-chain dc-chain--live"></div>'
+	end
+
+	local H = LIVE_TOP * 2 + n * LIVE_NH + (n - 1) * LIVE_GAP
+	local root_cy = LIVE_TOP + math.floor((n * LIVE_NH + (n - 1) * LIVE_GAP) / 2)
+	local root_h = 74
+
+	-- 根节点色调：有 FAIL 就是 bad，否则有 SKIP 是 warn，否则 ok
+	local root_tone = "ok"
+	for _, st in ipairs(stages) do
+		if st.tone == "bad" then root_tone = "bad"; break end
+		if st.tone == "warn" then root_tone = "warn" end
+	end
+
+	local p = "dclive"
+	local o = {}
+
+	-- 固有宽高必须给：否则 CSS width:auto 回落到 100%，图被拉伸放大
+	o[#o + 1] = string.format(
+		'<div class="dc-chain dc-chain--live"><svg viewBox="0 0 %d %d" ' ..
+		'width="%d" height="%d" role="img" aria-label="%s">',
+		LIVE_W, H, LIVE_W, H, esc(translate("实时诊断链路思维导图")))
+	o[#o + 1] = "<g" .. figure_attr(p) .. ">"
+
+	local root_right = LIVE_X1 + LIVE_ROOT_W
+
+	-- ── 根 → 各阶段的连线 ──────────────────────────────────
+	-- 用该阶段的状态色：一眼看出哪条支路是红的
+	for i, st in ipairs(stages) do
+		local y = LIVE_TOP + (i - 1) * (LIVE_NH + LIVE_GAP)
+		o[#o + 1] = curve(root_right, root_cy, LIVE_X2,
+			y + math.floor(LIVE_NH / 2), st.tone, p)
+	end
+
+	-- ── 阶段 → 证据的连线（细虚线，表示「附带说明」而非「下游」）──
+	for i, st in ipairs(stages) do
+		local y = LIVE_TOP + (i - 1) * (LIVE_NH + LIVE_GAP)
+		local cy = y + math.floor(LIVE_NH / 2)
+		o[#o + 1] = hline(LIVE_X2 + LIVE_STAGE_W, LIVE_X3, cy,
+			st.tone, p, true)
+	end
+
+	-- ── 根节点 ────────────────────────────────────────────
+	local n_pass, n_fail, n_skip = 0, 0, 0
+	for _, st in ipairs(stages) do
+		n_pass = n_pass + (st.n_pass or 0)
+		n_fail = n_fail + (st.n_fail or 0)
+		n_skip = n_skip + (st.n_skip or 0)
+	end
+
+	local verdict
+	if n_fail > 0 then
+		verdict = translate("有断点")
+	elseif n_skip > 0 then
+		verdict = translate("部分跳过")
+	else
+		verdict = translate("全通")
+	end
+
+	o[#o + 1] = box(LIVE_X1, root_cy - math.floor(root_h / 2),
+		LIVE_ROOT_W, root_h, translate("整体结论"), verdict,
+		string.format("PASS %d / FAIL %d", n_pass, n_fail), root_tone)
+
+	-- ── 阶段节点 + 证据 ───────────────────────────────────
+	for i, st in ipairs(stages) do
+		local y = LIVE_TOP + (i - 1) * (LIVE_NH + LIVE_GAP)
+
+		-- 阶段节点：标题 = 阶段名，副标题 = PASS/FAIL 计数
+		local cnt = string.format("PASS %d", st.n_pass or 0)
+		if (st.n_fail or 0) > 0 then
+			cnt = cnt .. string.format(" · FAIL %d", st.n_fail)
+		end
+		if (st.n_skip or 0) > 0 then
+			cnt = cnt .. string.format(" · SKIP %d", st.n_skip)
+		end
+
+		o[#o + 1] = box(LIVE_X2, y, LIVE_STAGE_W, LIVE_NH,
+			st.label or st.id or "", cnt, nil, st.tone)
+
+		-- 证据框：浅底、无边框，视觉上是「附注」而非「节点」
+		local ev = st.evidence or ""
+		if ev ~= "" then
+			local cy = y + math.floor(LIVE_NH / 2)
+			o[#o + 1] = string.format(
+				'<rect x="%d" y="%d" width="%d" height="%d" rx="6" ' ..
+				'fill="currentColor" opacity="0.045"/>',
+				LIVE_X3, cy - 13, LIVE_EVID_W, 26)
+			o[#o + 1] = string.format(
+				'<text x="%d" y="%d" font-size="11" fill="currentColor" ' ..
+				'opacity="0.72">%s</text>',
+				LIVE_X3 + 10, cy + 4, esc(truncate(ev, 64)))
+		end
+	end
+
+	o[#o + 1] = "</g></svg></div>"
+	return table.concat(o)
 end
 
 return D
