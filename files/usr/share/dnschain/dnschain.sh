@@ -76,7 +76,18 @@ dc_get_list() {
 #     · 都没有 → 默认 0（框架要接管解析，必须让它不启自己的 DNS 后端）
 dc_ssr_mode_for_profile() {
 	local mode profile
-	mode=$(dc_get ssr mode "")
+	# ⚠️ section 名是 compat，不是 ssr（v0.14.5 修）。
+	#
+	#    配置文件里是 `config ssr 'compat'` —— **类型是 ssr、名字是 compat**。
+	#    `dc_get <name> <option>` 走的是 `uci get dnschain.<name>.<option>`，
+	#    所以必须写 `dc_get compat mode`。写成 `dc_get ssr mode` 查的是
+	#    「名字为 ssr 的 section」，而它不存在 → 恒返回空 → 恒走兜底 "0"。
+	#
+	#    这是 v0.14.4 的 M2 修复**没真正生效**的原因：当时把
+	#    `main profile` 改成了 `ssr mode`，但名字仍然错，所以
+	#    「页面选 7 被静默推翻」这个 bug 依然存在。
+	#    实测：compat.mode=7 时本函数仍返回 0。
+	mode=$(dc_get compat mode "")
 	if [ -n "$mode" ]; then
 		echo "$mode"
 		return 0

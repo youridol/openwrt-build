@@ -52,7 +52,8 @@ reconcile_invariants() {
 	local enforce profile ssr_mode rc entry servers cnt ports
 	rc=0
 
-	enforce=$(dc_get ssr enforce 1)
+	# section 名是 compat（类型才是 ssr），见 dnschain.sh 里 dc_ssr_mode_for_profile 的说明
+	enforce=$(dc_get compat enforce 1)
 	profile=$(dc_get main profile primary)
 
 	# ---- SSR-Plus ----
@@ -80,7 +81,7 @@ reconcile_invariants() {
 		#   2. get_filter_aaaa() 返回 0（不再抑制 AAAA）
 		#   3. 把 dnsmasq 的 filter_aaaa 设为 0
 		# 实测：curl -6 google → 302、youtube → 200、baidu → 200（国内直连）
-		if [ "$(dc_get ssr require_ipv6 1)" = "1" ]; then
+		if [ "$(dc_get compat require_ipv6 1)" = "1" ]; then
 			reconcile_key "shadowsocksr.@global[0].ipv6_support" "1" \
 				"国外 IPv6 也要走代理，否则客户端优先 IPv6 直连被 RST" || rc=1
 		fi

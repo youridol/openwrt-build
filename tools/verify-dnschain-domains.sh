@@ -33,6 +33,7 @@ CSS=package/luci-app-dnschain/htdocs/luci-static/resources/dnschain/dnschain.css
 JS=package/luci-app-dnschain/htdocs/luci-static/resources/dnschain/dnschain.js
 PO=package/luci-app-dnschain/po/zh-cn/luci-app-dnschain.po
 UCI_DEF=files/etc/uci-defaults/99-zz-dnschain
+RECONCILE=files/usr/bin/dnschain-reconcile
 
 pass() { echo "OK   $1"; }
 fail() { echo "FAIL $1" >&2; rc=1; }
@@ -695,6 +696,34 @@ if grep -q 'cmd_flush' "$HEALTH" 2>/dev/null; then
 	pass "dnschain-health 有 flush 子命令"
 else
 	fail "dnschain-health 缺 flush 子命令（dc_flush_cache 会成死代码）"
+fi
+
+# ── section 名必须与 config 里的**名字**一致（不是类型）（v0.14.5）──
+#
+# 配置文件里 `config ssr 'compat'` —— 类型是 ssr、**名字是 compat**。
+# `dc_get <name> <option>` 走 `uci get dnschain.<name>.<option>`，
+# 所以必须写 `dc_get compat mode`。
+#
+# 实测踩过：写成 `dc_get ssr mode` 查的是「名字为 ssr 的 section」，
+# 它不存在 → 恒返回空 → 恒走兜底 "0" → 页面选「7 — 模块内置 DNS」
+# 被静默推翻。v0.14.4 的 M2 修复正是因为名字仍错而**没真正生效**。
+for _bad in "ssr enforce" "ssr mode" "ssr require_ipv6"; do
+	if sed 's/#.*//' "$LIB" 2>/dev/null | grep -q "dc_get $_bad" \
+	   || sed 's/#.*//' "$RECONCILE" 2>/dev/null | grep -q "dc_get $_bad"; then
+		fail "用了错误的 section 名（dc_get $_bad）—— 应为 compat"
+	else
+		pass "未使用错误的 section 名（dc_get $_bad）"
+	fi
+done
+if grep -q 'dc_get compat mode' "$LIB" 2>/dev/null; then
+	pass "dc_ssr_mode_for_profile 读 compat.mode（名字正确）"
+else
+	fail "dc_ssr_mode_for_profile 未读 compat.mode"
+fi
+if grep -q 'dc_get compat enforce' "$RECONCILE" 2>/dev/null; then
+	pass "reconcile 读 compat.enforce"
+else
+	fail "reconcile 未读 compat.enforce"
 fi
 
 # ── health cycle 必须有互斥锁（v0.14.2）──

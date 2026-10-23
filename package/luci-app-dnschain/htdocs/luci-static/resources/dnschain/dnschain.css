@@ -47,9 +47,16 @@
 	--dc-r-md: 8px;
 	--dc-r-lg: 12px;
 
-	/* 文字层级 */
-	--dc-fg:       currentColor;
-	--dc-fg-muted: opacity: 0.65;
+	/* 文字层级：无独立变量。
+	 *
+	 * 原先这里有两个：
+	 *   --dc-fg:       currentColor;
+	 *   --dc-fg-muted: opacity: 0.65;
+	 * 两者全文件零消费者（也未被 Lua/JS 引用），且第二个是**无效值** ——
+	 * 自定义属性里不能放 `opacity: 0.65` 这种声明，浏览器会把它当字符串，
+	 * 真有人 `var(--dc-fg-muted)` 当 opacity 用时得到无效值。
+	 * 弱化文字直接用 `opacity` 属性，不绕变量（v0.14.5 清理）。
+	 */
 }
 
 html[data-darkmode="true"] {

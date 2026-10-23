@@ -467,6 +467,7 @@ dnsmasq:53（唯一缓存 + 唯一分流层）
 | 49 | **`status_layout` 与 `status_map` 必须共用同一套布局计算**（`layout_plan`） | 原两者口径不同：`status_layout` 用 `pairs(rows)` 数**行数**，`status_map` 画**档位数**（最多 5 档，both-bad 恒占一档）；`NH` 也一个硬编码 60、一个随 hint 折行增长。实测 5 档各 1 个域名：实际高 386，报告 406 —— CI 几何断言验的是不存在的布局 | 有（图示断言） |
 | 50 | **「分流规则条数」必须数 `dnschain-split.conf` 的 `server=` 行**，不是 `foreign-split.conf` 的行数 | 后者是「数据库国外 − 自定义国内 − 观测域名」的**纯域名清单**（不含 `server=` 前缀），页面标签「条 server=/域名/」名不副实。实测加 1 个自定义国外域名后：前者 23714、后者 23715，页面数字偏小 | 有（lua 断言） |
 | 51 | **`apply` 的输出必须解析全部 5 条正常出口 + `ERROR=` 失败出口** | `cmd_apply` 出口：`DNSMASQ=restarted/skipped×2/sighup/unchanged` + `ERROR=`。原实现只处理 `restarted`，最常见的 `unchanged`（只改阈值、片段未变）用户点保存后**看不到任何提示**；按钮侧反过来无条件拼 `✓`，`ERROR` 时显示「✓ 已应用」+ 错误正文 | 有（lua 断言） |
+| 52 | **`dc_get` 的第一个参数是 UCI section 的「名字」，不是「类型」**。`config ssr 'compat'` 要写 `dc_get compat mode`，不是 `dc_get ssr mode` | 配置文件里 `config <类型> '<名字>'`，而 `uci get dnschain.<名字>.<选项>` 只认名字。写类型时查的是「名字恰好等于该类型的 section」，通常不存在 → 恒返回空 → 恒走兜底值 → **用户的选择被静默推翻**。实测：`compat.mode=7` 时 `dc_get ssr mode` 返回空、函数返回 `0`；改 `dc_get compat mode` 才返回 `7`。本仓库已两次踩（`upstream`→`cn/foreign`、`ssr`→`compat`） | 有（契约 5 条，含反向断言） |
 
 **改道判定的一句话规则**：首选链不通、且另一条链通 → 切到另一条。
 两条需求规则（国外不通改直连 / 国内不通改代理）是这同一判定的两个实例，

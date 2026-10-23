@@ -575,6 +575,77 @@ FANCY_SLEEP），实测 `sleep 0.05` / `sleep 0.1` **都失败**；
 `...|0|0|1` → 缓存自动失效并重跑 → 准确报出用户描述的那三项 FAIL。
 恢复后回到 20/20。
 
+#### 二十一、落实度复查：修 v0.14.4 未真正生效的修复 + 补审 CSS/config（v0.14.5）
+
+按要求复查「全链路检查是否完全落实」。逐项核验后发现 **v0.14.4 的 M2 修复
+并未真正生效**，另有两处此前未系统审查的区域（CSS 变量、config 键一致性）。
+
+##### 一、[严重] `dc_ssr_mode_for_profile` 改对了逻辑但**写错了 section 名**
+
+v0.14.4 的 M2 把「读不存在的 `main.profile`」改成「读 `ssr.mode`」，
+但配置文件里是 **`config ssr 'compat'`** —— 类型是 `ssr`、**名字是 `compat`**。
+`dc_get <name> <option>` 走 `uci get dnschain.<name>.<option>`，
+所以 `dc_get ssr mode` 查的是「名字为 ssr 的 section」，它不存在 →
+恒返回空 → 恒走兜底 `"0"`。
+
+**即 M2 修复后，页面选「7 — 模块内置 DNS」仍然被静默推翻。**
+
+实测证据：
+```
+uci get dnschain.ssr.mode    = （空）
+uci get dnschain.compat.mode = 7
+compat.mode=7 → dc_ssr_mode_for_profile 返回 0   ← 修复前
+compat.mode=7 → dc_ssr_mode_for_profile 返回 7   ← 修复后
+```
+
+同一错误还有两处（reconcile 一直读不到，恒用默认值 1）：
+- `enforce=$(dc_get ssr enforce 1)`
+- `if [ "$(dc_get ssr require_ipv6 1)" = "1" ]`
+
+修法：三处全部改为 `dc_get compat ...`。
+新增 5 条契约断言锁住（含「禁止出现 `dc_get ssr <opt>`」的反向断言）。
+
+> 教训：**`dc_get` 的第一个参数是 section 名，不是类型**。
+> 本仓库已有同名坑（`config upstream 'cn'` 必须写 `dc_get cn ...`），
+> 这是第二次踩 —— 已在断言里对 `ssr.*` 三处加反向守卫。
+
+##### 二、[中等] CSS 存在无效自定义属性值
+
+```css
+--dc-fg-muted: opacity: 0.65;
+```
+
+自定义属性里不能放 `opacity: 0.65` 这种**声明**，浏览器会把它当字符串；
+真有人 `var(--dc-fg-muted)` 当 opacity 用时得到无效值。
+且 `--dc-fg` 与 `--dc-fg-muted` **全文件零消费者**（Lua/JS 也未引用）。
+
+修法：删掉两个变量并写明理由。弱化文字直接用 `opacity` 属性，不绕变量。
+复查后 CSS 的 18 个变量全部有定义、无悬空引用。
+
+##### 三、[核查] config 47 个键的消费者覆盖
+
+逐键核对 `config` 里 47 个 option/list 的 shell 消费者：
+
+| 类别 | 数量 | 状态 |
+|---|---|---|
+| 有消费者 | 34 | 正常 |
+| list 类型（无值时为空） | 3 | 正常（`dom_*.domain` / `health.watch`） |
+| 有兜底的不存在键 | 1 | `main.profile`（旧配置兼容，代码有默认值） |
+| 已在页面标注「仅作记录」 | 9 | 正常 |
+
+即除本次修的 3 处外，没有发现新的「配了不生效且无提示」的键。
+
+##### 四、复测
+
+```
+本地：dash 8/8、shell 90+23、lua 121、图示 44、契约 126（新增 5）、
+      i18n 426、CI 模拟通过
+路由器：selftest 20/20、:53/:5353/:5336 全 OK、nftset=23714、
+        ss_spec=2、:1234=1、cycle ok=8、零泄漏零残留
+        页面 HTTP 200、157KB、SVG 4、marker 0 重复、Lua 报错 0、响应 2.14s
+        compat.mode=7 → dc_ssr_mode_for_profile 返回 7（修复前恒 0）
+```
+
 #### 二十、Lua 层深审：6 项严重 + 9 项中等 + 9 项轻微缺陷修复（v0.14.4）
 
 对 4 个 Lua 文件（3595 行）做第三轮审查，逐条用 lupa（真实 Lua）实测验证。
