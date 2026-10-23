@@ -100,6 +100,10 @@
    **每条的具体易错点、实测数据与断言位置见
    [`patches/luci-app-trafficctl/README.md`](patches/luci-app-trafficctl/README.md)
    的「本地改动清单」一节** —— 那是本条的完整版，改 trafficctl 前必读。
+
+   ⚠️ `package/luci-app-trafficctl/README.md` 是**上游原文**，其中有 5 处指向
+   上游仓库 `docs/API.md` 等文件的链接在本仓库不存在（上游包里不带这些文档）。
+   这**不是**本仓库的断链，**不要改它** —— 改了会让 patch 重放与上游不一致。
 ---
 
 ## 3. 构建链路关键点（改 CI 前必读）

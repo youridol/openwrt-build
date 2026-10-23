@@ -9,6 +9,38 @@
 
 ---
 
+## 0. 现状对照（2026-10-23 补，v0.14.6）
+
+> **本报告是 2026-10-09 的一次性快照，正文保持原样不改**（那是当时的实测记录）。
+> 下表只标注各项在**当前 HEAD** 的状态，避免读者按旧结论误判。
+
+| 项 | 当前状态 | 依据 |
+|---|---|---|
+| P0-1 上行 50 Mbps 无整形 | **仍未做** | 仓库无 `tc`/`qdisc` 配置；属已知取舍（固件不带整形能力） |
+| P0-2 BBR 声明未生效 | 已处理 | `99-gaming-optimize` 设 `turboacc.config.tcpcca=bbr` + `firewall.@defaults[0].tcpcca=bbr` |
+| P1-3 `filter_aaaa` 仓库值与现网相反 | 已反转 | v0.10.0 起 `dnsmasq.filter_aaaa=0`（见 AGENTS.md §5） |
+| P1-4 mosdns `reject` 排在 `forward` 后 | 已消解 | v0.10.0 移除 chinadns-ng，mosdns 不再由框架管理 |
+| P1-5 `ssr-switch` 667s 是健康检查间隔 | 已撤回 | 原结论有误，报告内已标「撤回」 |
+| P1-6 境外 IPv6 不经代理 | **设计如此** | SSR-Plus 的 IPv6 代理只覆盖 DNS；AGENTS.md §4.3 有说明 |
+| P2-7 `ra_mtu=1452` 与链路 MTU 不一致 | 已处理 | 仓库不再设 `ra_mtu`（改用 `ra_management=0` 纯 SLAAC） |
+| P2-8 两个 DHCPv6 客户端并行 | 已处理 | `99-gaming-optimize` 删 `wan6`、改用 `wan_6` 挂 PPPoE |
+| P2-8b MSS clamp 追加不幂等 | 已处理 | 改为幂等追加（带 `grep -q` 判重） |
+| P2-9 三套机制抢内核旋钮 | 部分处理 | `rc.local` 与 `sysctl.conf` 的 RPS 配置已删（死配置） |
+| P2-9b `nf_conntrack_helper` 写入静默失败 | 已处理 | `rc.local` 已删该写入并注明内核 6.12 无此路径 |
+| P2-10 `tcp_timestamps = 0` | 已处理 | `sysctl.conf` 改为保持内核默认 1 |
+| P2-11 steam 反复回源 | 观察项 | 本次未复现 |
+| P2-12 对外监听面 | 未变 | 属环境事实，非缺陷 |
+| P2-13 dnsmasq 日志被静默丢弃 | **仍未做** | 生成路径已查明（上游 `zzz-default-settings` 每次覆盖），正确做法是 UCI `dhcp.@dnsmasq[0].logfacility`；**待批准** |
+| P2-14 `whitelist_forward.conf` 无效冗余 | 已消解 | 仓库不再 overlay 该文件，用上游默认（已是 fw4 正确写法） |
+| 工程-13 `.gitattributes` 缺 `*.ps1` | 已处理 | 已加 `*.ps1 text eol=lf` |
+| 工程-14 AGENTS.md 三处失实 | 已处理 | 后续版本多次校正 |
+| 工程-15 HEAD 含 v0.3.5 修复但无 tag | 未变 | 仅本地标签现状，不影响代码 |
+
+**结论：19 项里 14 项已处理/已消解，2 项仍待做（P0-1 上行整形、P2-13 dnsmasq 日志），
+1 项设计如此（P1-6），1 项观察项，1 项环境事实。**
+
+---
+
 ## 1. 环境快照
 
 | 项 | 值 |
