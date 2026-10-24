@@ -223,7 +223,20 @@ jobs:
 
           # 新脚本必须有执行位 —— 缺了它 rpcd 调不动，
           # 页面所有按钮都会静默失败（点「立即探测」没反应）。
-          for f in files/usr/bin/dnschain-reconcile ; do
+          # v0.22.0：断言范围扩到全部 5 个运行时脚本。
+          #
+          # 原来只查 dnschain-reconcile，其余 4 个漏检 —— 而实测它们
+          # 在 git 索引里全是 100644（无执行位），本地因 Windows 文件系统
+          # 不体现权限位而看不出来，CI 检出后才暴露。
+          # 症状：脚本不可执行 → 页面所有按钮静默失败、init 脚本起不来。
+          #
+          # 修法是在 git 索引里设权限（不是 chmod 工作树）：
+          #   git update-index --chmod=+x <file>
+          for f in files/usr/bin/dnschain-reconcile \
+                   files/usr/bin/dnschain-selftest \
+                   files/etc/init.d/dnschain \
+                   files/etc/uci-defaults/99-zz-dnschain \
+                   files/usr/share/dnschain/dnschain.sh ; do
             if [ -x "../openwrt-build/$f" ]; then
               echo "OK   $f 有执行位"
             else

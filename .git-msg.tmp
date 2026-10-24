@@ -1,0 +1,25 @@
+fix(ci): 补齐 5 个运行时脚本的 git 执行位，扩充 CI 断言覆盖
+
+v0.22.0 的 master 构建在 2m43s 失败，真实原因：
+
+  FAIL files/usr/bin/dnschain-reconcile 缺执行位（页面按钮会静默失败）
+  Process completed with exit code 1
+
+根因：这些脚本在 git 索引里是 100644（无执行位）。本地看不出来是因为
+Windows 文件系统不体现 Unix 权限位，只有 CI 在 Linux 检出后才暴露。
+
+修复（git 索引，不是 chmod 工作树）：
+
+  git update-index --chmod=+x files/etc/init.d/dnschain
+  git update-index --chmod=+x files/etc/uci-defaults/99-zz-dnschain
+  git update-index --chmod=+x files/usr/bin/dnschain-reconcile
+  git update-index --chmod=+x files/usr/bin/dnschain-selftest
+  git update-index --chmod=+x files/usr/share/dnschain/dnschain.sh
+
+同时把 CI 的执行位断言从「只查 dnschain-reconcile」扩到全部 5 个。
+原来只查一个，所以另外 4 个一直是 100644 却从未被发现 ——
+这正是 AGENTS.md 红线 4 要求「新增此类文件后一并更新 chmod 清单」
+却漏掉的场景。断言扩全后，任何新增脚本漏设权限都会在 CI 立刻暴露。
+
+验证：git ls-files -s 确认 5 个均为 100755；
+本地 verify 150 OK / 0 FAIL、lua 108、diagrams 54、ci-sim RC=0。
