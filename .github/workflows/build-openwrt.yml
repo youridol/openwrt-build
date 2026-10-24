@@ -379,9 +379,18 @@ jobs:
           # 故改成「开闭数量必须相等且 >= 3」—— 数量对得上才是关键，
           # 写死数字会让每次加表格都要改 CI，而改 CI 时最容易
           # 顺手把断言删掉（那就等于没有断言）。
+          #
+          # ⚠️ 「开」的判据只认 `<div class="dc-table-wrap"` 这个**前缀**，
+          # 不能再要求后面紧跟 `"><table class="dc-table`。
+          # v0.16.3 给分诊表格加了额外属性：
+          #   '<div class="dc-table-wrap" data-dc-triage="1"><table class="dc-table">'
+          # 旧的紧邻判据匹配不到它 → 开 6 / 闭 7 → 断言误报失败
+          # （run 40068902046 与 40054362238 都栽在这里）。
+          # 判据放宽到前缀后，加任何属性都不会再误报，而「开闭必须相等」
+          # 这个真正要守的性质不变。
           GEN=package/luci-app-dnschain/luasrc/model/cbi/dnschain/general.lua
           DIA=package/luci-app-dnschain/luasrc/model/cbi/dnschain/diagrams.lua
-          opened=$(grep -c 'dc-table-wrap"><table class="dc-table' "$GEN" || true)
+          opened=$(grep -c 'dc-table-wrap"' "$GEN" || true)
           closed=$(grep -c '</tbody></table></div>' "$GEN" || true)
           if [ "$opened" -ge 3 ] && [ "$opened" = "$closed" ]; then
             echo "OK   $opened 个表格均已套滚动容器（开/闭各 $opened）"
