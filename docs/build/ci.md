@@ -333,6 +333,28 @@ trafficctl 1.21.4 的 `LUCI_DEPENDS` 含 `+iw` 与 `+conntrack`。本仓库已�
 
 ## 8. 构建缓存（dl 镜像 + 工具链）
 
+### 8.0 实测效果（2026-10-24，同一提交的三次构建）
+
+| 步骤 | 无缓存<br>`40069703261` | 仅 dl 缓存<br>`40076999673` | dl + 工具链缓存<br>`40083472916` |
+|---|---|---|---|
+| `Restore dl` | 1s（未命中） | 33s（下载 1.35 GB） | 74s（下载 1.35 GB） |
+| `Restore toolchain` | 0s（未命中） | 1s（未命中） | **50s（下载 780 MB + 325 MB）** |
+| `Download package sources` | **1323s（22 分 03 秒）** | **56s** | **46s** |
+| `Prebuild gn host tool` | 685s | 496s | 600s |
+| `Compile firmware` | 10241s | 7817s | （该 run 卡在 upx，已取消） |
+| **job 总时长** | **3h31m** | **2h27m** | — |
+
+**核心收益**：`Download package sources` 从 **22 分钟降到 46-56 秒**，
+即原先「每次全新克隆都要重抓上千个 tarball」的开销被消除。
+job 总时长从 3h31m 降到 2h27m（省 1h04m）。
+
+注意 `Restore dl` 自己也要花 33-74 秒下载 1.35 GB —— 这笔开销远小于它省下的 22 分钟。
+只有当 `dl/` 已经基本齐全时（例如本地有持久化缓存）才不需要它。
+
+**`Restore toolchain` 的 0s / 1s 是「未命中」的可靠信号**：命中时必然有下载动作，
+耗时不可能是 0 秒。反过来，若某次命中却只花 1 秒，说明资产根本没被下载到
+（应检查 `cache-release.sh restore` 的 pattern 是否匹配）。
+
 ### 8.1 为什么不能用 `actions/cache`
 
 | 维度 | `actions/cache` | Release 资产（本项目采用） |
@@ -514,3 +536,69 @@ python3 tools/verify-workflow-scripts.py             # 抽出所有 run: 块交�
 `verify-workflow-scripts.py` 存在的理由：YAML 能解析 ≠ shell 能解析。
 本仓库最贵的一类失败就是「bash 专有语法写进 CI 脚本，dash 解析期 exit 2，
 一步未执行、编译全 skipped、没有任何产物」。
+
+---
+
+## 10. 首次上线的真实故障（2026-10-24）
+
+记录在这里是因为它们**都通过了本地静态检查**，只在真跑时暴露。
+本地 `dash -n` + YAML 解析 + 单元测试全绿，仍然出现下面三个问题。
+
+### 10.1 `dir-mirror.sh` 在部分路径缺失时静默退出
+
+**现象**：`warm-toolchain` 停在 `Pack toolchain and host tools`，退出码 1，
+但日志里**没有任何错误信息**（工具链那包已成功打出 817 MB，之后就没输出了）。
+
+**根因**：`cmd_pack` 在 `set -eu` 下做
+
+```sh
+matches=$(cd "$SRC" && for m in $p; do [ -e "$m" ] && printf '%s\n' "$m"; done)
+```
+
+命令替换的退出码 = 替换里**最后一条命令**的退出码。当某个 path 参数的 glob
+没匹配到时，`[ -e ]` 返回 1 → 整个赋值返回 1 → `set -e` 让脚本**静默退出**，
+连 `die` 都来不及打印。
+
+**为什么必然触发**：`staging_dir/hostpkg` 只在包构建（`IS_PACKAGE_BUILD`）时产生
+（`rules.mk:195-197`），而 `warm-toolchain` 只跑 `make tools/compile` +
+`make toolchain/compile`，不会创建它。所以这不是偶发。
+
+**修法**：命令替换用显式 `exit 0` 收尾保证恒返回 0；`pack` 容忍「部分路径缺失」
+（只打包存在的那几个），仅在一个都不存在时才 `die`。同时把
+`cache-release.sh` 与 `cache-deps.yml` 里同形态的 `[ -f ] && continue` /
+`[ -e ] && cp` 一律改成 `if`。
+
+**教训**：`set -e` + 命令替换 + 循环体末尾的条件判断是危险组合。
+写这类代码时要么显式 `exit 0` 收尾，要么把条件判断写成 `if`。
+
+### 10.2 表格滚动容器断言误报
+
+**现象**：构建停在 `Add luci-app-dnschain`，报
+`FAIL 表格滚动容器数量不对：开 6 / 闭 7`。
+
+**根因**：断言里「开」的判据要求 wrapper 与 table **紧邻**
+（`grep -c 'dc-table-wrap"><table class="dc-table'`），
+而 v0.16.3 给分诊表格加了额外属性：
+
+```lua
+'<div class="dc-table-wrap" data-dc-triage="1"><table class="dc-table">'
+```
+
+于是它匹配不到「开」，却仍被「闭」的判据数进去 → 6 vs 7。
+真实表格数是 7 开 7 闭，页面本身没有问题。
+
+**修法**：判据放宽到只认 `dc-table-wrap"` 前缀。真正要守的性质是
+「开闭必须相等且 >= 3」，加什么属性都不该影响它；真有表格漏套 wrapper 时，
+开闭数量仍会不等而报错。
+
+### 10.3 runner 侧偶发卡死（非本项目问题）
+
+`40083472916` 在 `Compile firmware` 阶段卡在 upx 编译（51%），
+日志最大时间戳与 `run.updatedAt` 都停在 2.5 小时前，已取消。
+同一提交的 `40076999673` 已 success，说明不是代码问题。
+
+**识别方法**：看 `run.updatedAt` 与日志最大时间戳。
+两者都长期不动 = 真卡住；只有日志不动但 `updatedAt` 在变 = 仍在推进。
+
+**注意**：不要用「日志最后一行的时间戳」判断，日志行不是严格按时间排序的
+（同一次运行的日志里，upx 的 51% 行可能排在后续行之前）。要取**最大**时间戳。
