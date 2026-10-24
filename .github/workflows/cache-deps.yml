@@ -1,0 +1,583 @@
+name: Cache deps (dl + toolchain warmup)
+
+# ============================================================================
+# 这个工作流只做一件事：把「每次全新克隆都要重做」的两件昂贵工作搬到
+# GitHub 内部网络上，做成可复用资产，供 build-openwrt.yml 直接取用。
+#
+#   ┌─ 昂贵工作 ①：dl/ 源码包下载 ──────────────────────────────────┐
+#   │ 全新克隆时 make download 要抓上千个上游 tarball。实测 2026-10-21 │
+#   │ run 39495602665 卡在这一步 5h54m（nasm 从 www.nasm.us 以         │
+#   │ 556 B/s 下载），直到 job 的 6h 上限被取消。                      │
+#   └────────────────────────────────────────────────────────────────┘
+#   ┌─ 昂贵工作 ②：交叉工具链编译 ──────────────────────────────────┐
+#   │ toolchain/{binutils,gcc-initial,libc,kernel-headers,gcc-final}  │
+#   │ 加上 tools/ 下 40 多个宿主工具，每次重建约 30-45 分钟。          │
+#   └────────────────────────────────────────────────────────────────┘
+#
+# 存放位置：GitHub Release 资产（tag 见 env.CACHE_TAG）
+#   - 无总量上限、无下载带宽上限、不会「一周未访问即淘汰」
+#     （actions/cache 三项都不满足：10GB 配额 + 一周淘汰）
+#   - 单文件上限 2GB → 由 tools/dir-mirror.sh 切成 1900MB 分片
+#   - 在 Actions 里用内置 GITHUB_TOKEN 下载，流量不出 GitHub
+#
+# 为什么用 Release 而不是 actions/cache —— 完整对照见 tools/cache-release.sh 头注释。
+#
+# 与 build-openwrt.yml 的关系：
+#   - 两者用**同一个** tools/gen-openwrt-config.sh 生成 .config（否则预热出来
+#     的镜像会与真实构建不一致，缺包时静默回落到慢源）；
+#   - 两者用**同一个** tools/normalize-mtime.sh 归一 mtime（否则 find_md5
+#     不同，工具链缓存永不命中）；
+#   - dl 镜像有两个写入者：本工作流（每天从零补齐）+ build-openwrt.yml
+#     构建成功后回写（补上「预热之后、构建之前」上游新 bump 的版本）。
+#
+# ⚠️ 这个工作流的产物**不是固件**，删除它只会让下一次构建变慢。
+# ============================================================================
+
+on:
+  # 定时：每天 UTC 20:00（北京时间 04:00）。
+  #
+  # 刻意排在 build-openwrt.yml 的 00:00 UTC 定时构建**之前** ——
+  # 那边跑的时候这边刚把缓存刷新好，能直接命中最新镜像。
+  # 排在之后的话，那边会用到「昨天的」缓存，dl 里的包可能已过期。
+  schedule:
+    - cron: '0 20 * * *'
+
+  # 手动触发：改了 .config 配方（tools/gen-openwrt-config.sh）之后
+  # 必须手动跑一次，否则新加的源码包不会进镜像。
+  workflow_dispatch:
+    inputs:
+      skip_dl:
+        description: '跳过 dl 镜像重建（只重建工具链）'
+        type: boolean
+        default: false
+      skip_toolchain:
+        description: '跳过工具链重建（只重建 dl 镜像）'
+        type: boolean
+        default: false
+
+  # 配方或工具脚本变更时自动重建。
+  #
+  # paths 是白名单（只对 push 生效）：本工作流只关心「决定下载什么 /
+  # 编译什么」的输入。改 LuCI 页面、改 DNS 脚本都不会影响这里，
+  # 故不会白跑一次 40 分钟的预热。
+  push:
+    branches: [ master ]
+    paths:
+      - 'tools/gen-openwrt-config.sh'
+      - 'tools/dir-mirror.sh'
+      - 'tools/cache-release.sh'
+      - 'tools/make-download.sh'
+      - 'tools/lede-fingerprint.sh'
+      - 'tools/normalize-mtime.sh'
+      - 'tools/verify-toolchain-cache.sh'
+      - '.github/workflows/cache-deps.yml'
+
+# 内置令牌的最小权限：
+#   contents: write —— 创建/更新缓存 Release、上传/删除资产
+#   actions: read   —— 末尾查本次 run 的元信息（可选，保持与主流程一致）
+#
+# 注意：声明 permissions 后**未列出的 scope 一律为 none**（不回落到
+# 仓库默认值）。故这里必须把用到的 scope 全列出来。
+permissions:
+  contents: write
+  actions: read
+
+env:
+  # 缓存 Release 的 tag。
+  #
+  # 刻意用 `cache-*` 前缀而不是 `v*`：
+  #   1. release.yml 与 build-openwrt.yml 的 tag 触发都是 `v*`，
+  #      用 v 前缀会**误触发一次 3.5 小时的固件构建**；
+  #   2. build-openwrt.yml 的「上传到 Release」只处理 refs/tags/v*，
+  #      不会把固件混进缓存 Release。
+  # 该 Release 标记为 prerelease，且标题写明「这不是发版」。
+  CACHE_TAG: cache-build-v1
+
+  REPO_URL: https://github.com/coolsnowwolf/lede.git
+  REPO_BRANCH: master
+  TARGET: x86_64
+  FEED_CONF: feeds.conf.default
+  JOBS: 2
+
+  # 与 build-openwrt.yml 保持完全一致的镜像顺序。
+  #
+  # download.pl 的 localmirrors() 在 @mirrors **最前面**被调用
+  # （第 241 行），故这里列的镜像优先级最高，慢的 www.nasm.us 会被跳过。
+  DOWNLOAD_MIRROR: >-
+    https://sources.cdn.openwrt.org;
+    https://sources.openwrt.org;
+    https://mirrors.aliyun.com/gnu;
+    https://mirrors.tencent.com/gnu;
+    https://mirrors.ustc.edu.cn/gnu
+  CURL_OPTIONS: "--max-time 300 --retry 3 --retry-delay 2"
+
+jobs:
+  # ==========================================================================
+  # 阶段 1：预热 dl/（源码包镜像）
+  #
+  # 为什么单独一个 job：它不依赖工具链，两者并行能把总时长压到
+  # max(dl, toolchain) 而不是相加。dl 通常 15-25 分钟，工具链 30-45 分钟。
+  # ==========================================================================
+  warm-dl:
+    if: ${{ !inputs.skip_dl }}
+    runs-on: ubuntu-22.04
+    timeout-minutes: 180
+    steps:
+      - name: Checkout openwrt-build (配方与工具脚本)
+        uses: actions/checkout@v4
+        with:
+          path: openwrt-build
+
+      - name: Checkout lede source (浅克隆，只需源码树)
+        uses: actions/checkout@v4
+        with:
+          repository: coolsnowwolf/lede
+          ref: master
+          path: lede
+          # 只要源码树内容，不要历史：dl 镜像与 commit 无关，
+          # 但 Makefile/include 的内容必须是最新的。
+          fetch-depth: 1
+
+      - name: Install build dependencies
+        run: |
+          sudo apt-get update
+          sudo apt-get install -y build-essential clang flex bison g++ gawk gcc-multilib g++-multilib \
+            gettext git libncurses5-dev libssl-dev python3 python3-distutils-extra rsync unzip zlib1g-dev \
+            file wget subversion upx-ucl autoconf automake curl asciidoc libtool
+
+      - name: Free disk space
+        run: |
+          sudo rm -rf /usr/share/dotnet /usr/local/lib/android /opt/ghc /usr/local/share/boost
+          df -h
+
+      # ── 准备源码树：与主构建**同一条**配方 ───────────────────────
+      #
+      # 这一段刻意与 build-openwrt.yml 的对应步骤逐条一致。
+      # 差别只在「不做契约断言」（断言是主构建的职责，预热只要正确
+      # 的 .config 来决定下载清单）。
+      #
+      # ⚠️ 若主流程改了 feed / 本地包 / 主题的引入方式，这里必须同步，
+      #    否则预热出来的 .config 与真实构建不同 → dl 镜像缺包。
+      - name: Prepare source tree (feeds + local packages)
+        working-directory: lede
+        run: |
+          set -e
+
+          # helloworld feed 判重后追加（lede 自 2026 起自带，直接追加会
+          # Duplicate feed name → feeds update exit 25）
+          grep -q '^src-git helloworld' "$FEED_CONF" 2>/dev/null || \
+            echo "src-git helloworld https://github.com/fw876/helloworld" >> "$FEED_CONF"
+
+          # 本地包
+          cp -r ../openwrt-build/package/luci-app-trafficctl package/
+          cp -r ../openwrt-build/package/luci-app-dnschain package/
+
+          # luci-app-dnsproxy：上游 clone + 本地 patch（与主流程同一流程）
+          git clone --depth 1 https://github.com/adm1n5ky/luci-app-dnsproxy.git \
+            package/luci-app-dnsproxy
+          if ! ls ../openwrt-build/patches/luci-app-dnsproxy/*.patch >/dev/null 2>&1; then
+            echo "!!! 未找到 patches/luci-app-dnsproxy/*.patch，预热中止" >&2
+            exit 1
+          fi
+          for patch in ../openwrt-build/patches/luci-app-dnsproxy/*.patch; do
+            abs_patch="$(cd "$(dirname "$patch")" && pwd)/$(basename "$patch")"
+            (cd package/luci-app-dnsproxy && git apply --check "$abs_patch") || {
+              echo "!!! patch 检查失败（上游可能已变更）: $abs_patch" >&2
+              exit 1
+            }
+            (cd package/luci-app-dnsproxy && git apply "$abs_patch")
+          done
+
+          # 默认主题 shadcn（预构建产物，不需要前端构建）
+          THEME_REPO="https://github.com/youridol/luci-theme-shadcn.git"
+          rm -rf /tmp/luci-theme-shadcn package/luci-theme-shadcn
+          git clone --depth 1 --branch main "$THEME_REPO" /tmp/luci-theme-shadcn
+          mkdir -p package/luci-theme-shadcn
+          for item in Makefile root htdocs ucode LICENSE; do
+            [ -e "/tmp/luci-theme-shadcn/$item" ] && \
+              cp -r "/tmp/luci-theme-shadcn/$item" package/luci-theme-shadcn/
+          done
+
+          ./scripts/feeds update -a
+          ./scripts/feeds install -a
+
+          # 强制各 feed 拉到最新 commit（避免预热出来的 dl 对应旧版本源码）
+          #
+          # ⚠️ 这里**不用** `|| true`（与主流程的写法不同，见 docs/build/ci.md §7.4）。
+          # 预热的意义是「镜像里就是最新要编的那一版」；若某个 feed 更新失败
+          # 却静默继续，镜像就会固化一批过期的 PKG_SOURCE/文件名 ——
+          # 下游每次构建都缺同一个包、每次都回落到慢速源，且没有任何报错。
+          # 失败就明确失败，让下一次定时重试。
+          for f in feeds/*/; do
+            [ -d "$f/.git" ] || continue
+            if (cd "$f" && git fetch origin 2>&1); then :; else
+              echo "!!! feed 更新失败（git fetch）: $f" >&2
+              exit 1
+            fi
+            if (cd "$f" && git reset --hard @{upstream} 2>&1); then :; else
+              echo "!!! feed 更新失败（reset 到 @{upstream}）: $f" >&2
+              exit 1
+            fi
+          done
+          ./scripts/feeds install -a
+
+          # dnsproxy feed 链接对齐（helloworld 0.83.0 覆盖 packages 0.56.2）
+          rm -rf package/feeds/packages/dnsproxy
+          mkdir -p package/feeds/helloworld
+          ln -sfn ../../../feeds/helloworld/dnsproxy package/feeds/helloworld/dnsproxy
+
+      - name: Generate .config (single recipe)
+        working-directory: lede
+        run: |
+          # 配方在 tools/gen-openwrt-config.sh —— 与主构建共用同一份，
+          # 否则「预热以为不用某包 → 镜像里永远没有 → 每次构建回落到慢源」。
+          TARGET="$TARGET" sh ../openwrt-build/tools/gen-openwrt-config.sh
+
+      - name: Restore previous dl cache (增量基础)
+        id: restore-dl
+        env:
+          GH_TOKEN: ${{ github.token }}
+          GH_REPO: ${{ github.repository }}
+        run: |
+          # 先取上一轮的 dl 镜像作为基础：只有新增/变更的包需要真下载。
+          #
+          # 退出码 10 = 缓存不存在（首次运行），属正常，不是失败。
+          set +e
+          sh openwrt-build/tools/cache-release.sh restore "$CACHE_TAG" "$RUNNER_TEMP/cache-in" 'dl.*'
+          rc=$?
+          set -e
+          if [ "$rc" -eq 0 ]; then
+            echo "命中上一轮 dl 缓存，解包作为增量基础"
+            sh openwrt-build/tools/dir-mirror.sh unpack dl "$RUNNER_TEMP/cache-in" lede
+            echo "hit=true" >> "$GITHUB_OUTPUT"
+          elif [ "$rc" -eq 10 ]; then
+            echo "没有上一轮 dl 缓存（首次运行），将从零下载"
+            echo "hit=false" >> "$GITHUB_OUTPUT"
+          else
+            echo "!!! 恢复 dl 缓存失败（exit=$rc）" >&2
+            exit 1
+          fi
+          echo "dl/ 现有文件数: $(find lede/dl -maxdepth 1 -type f 2>/dev/null | wc -l | tr -d ' ')"
+
+      - name: make download (with hash-mismatch self-heal + hard timeout)
+        working-directory: lede
+        env:
+          # 脚本会透传这两个变量给 download.pl：
+          #   DOWNLOAD_MIRROR 排在镜像列表最前面
+          #   CURL_OPTIONS    --max-time 让单文件超时后自动换下一个镜像
+          DOWNLOAD_MIRROR: ${{ env.DOWNLOAD_MIRROR }}
+          CURL_OPTIONS: ${{ env.CURL_OPTIONS }}
+        run: |
+          # 为什么用脚本而不是直接 make download：
+          #   ① 缓存里若有旧版本 tarball，download.pl 会 `die`（不是重下），
+          #      长期缓存 dl 之后这是必然事件；脚本会显式删掉并重试。
+          #   ② 单个慢源会拖死整个 job（实测 5h54m），必须套硬超时。
+          # 详见 tools/make-download.sh 头注释。
+          sh ../openwrt-build/tools/make-download.sh . "$JOBS" 3000 3
+
+      - name: Pack dl mirror
+        id: pack
+        run: |
+          set -e
+          N=$(sh openwrt-build/tools/dir-mirror.sh count lede/dl)
+          echo "dl/ 文件数: $N"
+          # 固件构建必然要下载内核源码，它不在就是镜像不完整
+          ls lede/dl/linux-*.tar.* >/dev/null 2>&1 || {
+            echo "!!! dl/ 里没有 linux-*.tar.*，镜像不完整，拒绝上传" >&2
+            exit 1
+          }
+          if [ "$N" -lt 50 ]; then
+            echo "!!! dl/ 只有 $N 个文件，明显偏少（正常是数百到上千），拒绝上传" >&2
+            exit 1
+          fi
+          sh openwrt-build/tools/dir-mirror.sh pack dl lede "$RUNNER_TEMP/cache-out" 1900M dl
+          echo "files=$N" >> "$GITHUB_OUTPUT"
+
+      - name: Save dl mirror to cache Release
+        env:
+          GH_TOKEN: ${{ github.token }}
+          GH_REPO: ${{ github.repository }}
+        run: |
+          # 只传 dl 相关资产。cache-release.sh 的 save 会：
+          #   分片先传 → 清理陈旧分片 → meta 最后传（meta 是一致性提交点）
+          # 这样中途失败时读者看到的仍是旧的一致状态，不会拿到坏镜像。
+          sh openwrt-build/tools/cache-release.sh save "$CACHE_TAG" "$RUNNER_TEMP/cache-out"
+
+      - name: Assert cache assets exist
+        env:
+          GH_TOKEN: ${{ github.token }}
+          GH_REPO: ${{ github.repository }}
+        run: |
+          # 与主构建的「Assert firmware artifact exists」同一思路：
+          # 不信任步骤退出码，直接查 API 的实际计数。
+          # 「流程绿了但资产没上去」是本仓库反复踩过的静默失效形态。
+          set -e
+          parts=$(sh openwrt-build/tools/cache-release.sh list "$CACHE_TAG" | grep -c '^dl\.tar\..*\.part-' || true)
+          meta=$(sh openwrt-build/tools/cache-release.sh list "$CACHE_TAG" | grep -c '^dl\.meta' || true)
+          echo ">>> dl 分片数=$parts  meta=$meta"
+          if [ "${parts:-0}" -lt 1 ] || [ "${meta:-0}" -lt 1 ]; then
+            echo "!!! 缓存 Release 上缺 dl 分片或 meta —— 上传未成功" >&2
+            sh openwrt-build/tools/cache-release.sh list "$CACHE_TAG" >&2 || true
+            exit 1
+          fi
+          echo ">>> dl 缓存资产断言通过"
+
+  # ==========================================================================
+  # 阶段 2：预热交叉工具链 + 宿主工具
+  #
+  # 产出 staging_dir/（含 toolchain-* 与 host/、hostpkg/）与
+  # build_dir/toolchain-*（编译器自己的中间产物）。
+  #
+  # ⚠️ 刻意**不缓存** build_dir/target-* 与 build_dir/host*：
+  #    包编译的中间产物与 .config 强耦合，而且体积大；
+  #    真正贵的是工具链，包本身用 ccache/增量意义有限。
+  # ==========================================================================
+  warm-toolchain:
+    if: ${{ !inputs.skip_toolchain }}
+    runs-on: ubuntu-22.04
+    timeout-minutes: 240
+    # 供 prune 阶段读取：本轮算出的指纹即「应保留的资产前缀」
+    outputs:
+      toolchain_fp: ${{ steps.fp.outputs.toolchain_fp }}
+      host_fp: ${{ steps.fp.outputs.host_fp }}
+    steps:
+      - name: Checkout openwrt-build
+        uses: actions/checkout@v4
+        with:
+          path: openwrt-build
+
+      - name: Checkout lede source
+        uses: actions/checkout@v4
+        with:
+          repository: coolsnowwolf/lede
+          ref: master
+          path: lede
+          fetch-depth: 1
+
+      - name: Install build dependencies
+        run: |
+          sudo apt-get update
+          sudo apt-get install -y build-essential clang flex bison g++ gawk gcc-multilib g++-multilib \
+            gettext git libncurses5-dev libssl-dev python3 python3-distutils-extra rsync unzip zlib1g-dev \
+            file wget subversion upx-ucl autoconf automake curl asciidoc libtool
+
+      - name: Free disk space
+        run: |
+          sudo rm -rf /usr/share/dotnet /usr/local/lib/android /opt/ghc /usr/local/share/boost
+          df -h
+
+      - name: Prepare source tree (feeds + local packages)
+        working-directory: lede
+        run: |
+          set -e
+          grep -q '^src-git helloworld' "$FEED_CONF" 2>/dev/null || \
+            echo "src-git helloworld https://github.com/fw876/helloworld" >> "$FEED_CONF"
+          cp -r ../openwrt-build/package/luci-app-trafficctl package/
+          cp -r ../openwrt-build/package/luci-app-dnschain package/
+          ./scripts/feeds update -a
+          ./scripts/feeds install -a
+          # 同 warm-dl：feed 更新失败必须显式失败，不用 `|| true`。
+          for f in feeds/*/; do
+            [ -d "$f/.git" ] || continue
+            if (cd "$f" && git fetch origin 2>&1); then :; else
+              echo "!!! feed 更新失败（git fetch）: $f" >&2
+              exit 1
+            fi
+            if (cd "$f" && git reset --hard @{upstream} 2>&1); then :; else
+              echo "!!! feed 更新失败（reset 到 @{upstream}）: $f" >&2
+              exit 1
+            fi
+          done
+          ./scripts/feeds install -a
+
+      - name: Generate .config (single recipe)
+        working-directory: lede
+        run: |
+          TARGET="$TARGET" sh ../openwrt-build/tools/gen-openwrt-config.sh
+
+      - name: Normalize source mtimes (must match the build job)
+        working-directory: lede
+        run: |
+          # ⚠️ 这一步必须在编译**之前**，且规则必须与 build-openwrt.yml 完全一致。
+          #
+          # 原因：lede 的宿主工具 stamp 名字里含 find_md5，而 find_md5 用
+          # `find ... -printf "%p%T@"` 把 **mtime** 也算进哈希
+          # （include/depends.mk）。全新 git clone 的 mtime 是"现在"，
+          # 每次 run 都不同 → stamp 文件名每次都不同 →
+          # 预热 job 产出的 stamp 在构建 job 里永远匹配不上 → 缓存白存。
+          #
+          # 归一成固定时刻后，两边的 find_md5 一致，缓存才真的能命中。
+          # 详见 tools/normalize-mtime.sh 头注释。
+          sh ../openwrt-build/tools/normalize-mtime.sh .
+
+      - name: Compute cache fingerprint
+        id: fp
+        run: |
+          # 指纹由「工具链相关文件内容 + .config 里的编译器符号」算出，
+          # 不是 git commit —— 理由见 tools/lede-fingerprint.sh 头注释。
+          sh openwrt-build/tools/lede-fingerprint.sh lede | tee "$RUNNER_TEMP/fp.txt"
+          TFP=$(sed -n 's/^TOOLCHAIN_FP=//p' "$RUNNER_TEMP/fp.txt")
+          HFP=$(sed -n 's/^HOST_FP=//p' "$RUNNER_TEMP/fp.txt")
+          [ -n "$TFP" ] && [ -n "$HFP" ] || { echo "!!! 指纹为空" >&2; exit 1; }
+          echo "toolchain_fp=$TFP" >> "$GITHUB_OUTPUT"
+          echo "host_fp=$HFP" >> "$GITHUB_OUTPUT"
+          echo "资产名前缀: toolchain-$TFP  host-$HFP"
+
+      - name: Restore previous toolchain cache (增量基础)
+        id: restore-tc
+        env:
+          GH_TOKEN: ${{ github.token }}
+          GH_REPO: ${{ github.repository }}
+        run: |
+          # 只有当指纹一致时才是真命中（同一套编译器源码 + 同一套配置）。
+          # 指纹不同就当作没有缓存：继续往下编译，产出新的缓存。
+          set +e
+          sh openwrt-build/tools/cache-release.sh restore "$CACHE_TAG" "$RUNNER_TEMP/tc-in" \
+            "toolchain-${{ steps.fp.outputs.toolchain_fp }}.*" \
+            "host-${{ steps.fp.outputs.host_fp }}.*"
+          rc=$?
+          set -e
+          if [ "$rc" -eq 0 ]; then
+            # 解包失败必须显式失败，不能用 `|| echo 跳过` 吞掉 ——
+            # 那样会「日志显示跳过、实际解出半个树」，后续编译随机报错。
+            # 每一种缓存各自检查资产是否存在，再决定解不解。
+            echo "命中指纹一致的缓存，逐个解包"
+            for kind in "toolchain-${{ steps.fp.outputs.toolchain_fp }}" \
+                        "host-${{ steps.fp.outputs.host_fp }}"; do
+              if [ -f "$RUNNER_TEMP/tc-in/$kind.meta" ]; then
+                sh openwrt-build/tools/dir-mirror.sh unpack "$kind" "$RUNNER_TEMP/tc-in" lede
+              else
+                echo ">>> 本轮没有 $kind 资产（该种类首次生成）"
+              fi
+            done
+            echo "hit=true" >> "$GITHUB_OUTPUT"
+          elif [ "$rc" -eq 10 ]; then
+            echo "指纹无匹配缓存（源码或配置已变），将完整编译工具链"
+            echo "hit=false" >> "$GITHUB_OUTPUT"
+          else
+            echo "!!! 恢复工具链缓存失败（exit=$rc）" >&2
+            exit 1
+          fi
+
+      - name: Download source packages (need toolchain sources)
+        working-directory: lede
+        env:
+          DOWNLOAD_MIRROR: ${{ env.DOWNLOAD_MIRROR }}
+          CURL_OPTIONS: ${{ env.CURL_OPTIONS }}
+        run: |
+          # 工具链自身也要源码（binutils/gcc/musl/linux-headers）。
+          # 这里从上游下载即可 —— 主构建会从 dl 镜像拿，两边不冲突。
+          sh ../openwrt-build/tools/make-download.sh . "$JOBS" 3000 3
+
+      - name: Build host tools and toolchain only
+        working-directory: lede
+        timeout-minutes: 200
+        run: |
+          # 只编宿主工具 + 交叉工具链，**不编任何包、不出固件**。
+          #
+          # tools/compile 与 toolchain/compile 是 lede 的稳定目标
+          # （include/toplevel.mk 的 DEFAULT_SUBDIR_TARGETS 里有 compile），
+          # 且它们只依赖 .config 与源码，不依赖 target 镜像。
+          make -j"$JOBS" tools/compile V=s
+          make -j"$JOBS" toolchain/compile V=s
+
+          # 断言工具链真的产出了编译器（否则缓存的是空目录）
+          TC=$(find staging_dir -maxdepth 1 -type d -name 'toolchain-*' | head -1)
+          [ -n "$TC" ] || { echo "!!! 没有产出 staging_dir/toolchain-*" >&2; exit 1; }
+          echo ">>> 工具链目录: $TC"
+          CC=$(find "$TC/bin" -maxdepth 1 -name '*-openwrt-linux*-gcc' | head -1)
+          [ -n "$CC" ] || { echo "!!! $TC/bin 里没有交叉 gcc" >&2; ls -l "$TC/bin" >&2 || true; exit 1; }
+          echo ">>> 交叉编译器: $CC"
+          "$CC" --version | head -1
+          ls -l staging_dir/host/bin/ | head -20
+
+      - name: Verify toolchain is actually usable before packing
+        run: |
+          # 用与 build-openwrt.yml 完全相同的校验器复核。
+          #
+          # 为什么在**上传前**就要查：缓存不完整的症状是构建到一半
+          # undefined reference，或者静默回退成完整重编（构建照绿但慢）。
+          # 与其让下游吃一份坏缓存，不如在这里失败 —— 反正下一次预热会重来。
+          sh openwrt-build/tools/verify-toolchain-cache.sh lede
+
+      - name: Pack toolchain and host tools
+        id: pack
+        run: |
+          set -e
+          sh openwrt-build/tools/dir-mirror.sh pack "toolchain-${{ steps.fp.outputs.toolchain_fp }}" \
+            lede "$RUNNER_TEMP/tc-out" 1900M 'staging_dir/toolchain-*' 'build_dir/toolchain-*'
+          sh openwrt-build/tools/dir-mirror.sh pack "host-${{ steps.fp.outputs.host_fp }}" \
+            lede "$RUNNER_TEMP/tc-out" 1900M staging_dir/host staging_dir/hostpkg build_dir/host
+          ls -l "$RUNNER_TEMP/tc-out"
+
+      - name: Save toolchain mirror to cache Release
+        env:
+          GH_TOKEN: ${{ github.token }}
+          GH_REPO: ${{ github.repository }}
+        run: |
+          sh openwrt-build/tools/cache-release.sh save "$CACHE_TAG" "$RUNNER_TEMP/tc-out"
+
+      - name: Assert toolchain cache assets exist
+        env:
+          GH_TOKEN: ${{ github.token }}
+          GH_REPO: ${{ github.repository }}
+        run: |
+          set -e
+          L=$(sh openwrt-build/tools/cache-release.sh list "$CACHE_TAG")
+          n_tc=$(printf '%s\n' "$L" | grep -c "^toolchain-${{ steps.fp.outputs.toolchain_fp }}\.tar\..*\.part-" || true)
+          n_tcmeta=$(printf '%s\n' "$L" | grep -c "^toolchain-${{ steps.fp.outputs.toolchain_fp }}\.meta" || true)
+          n_host=$(printf '%s\n' "$L" | grep -c "^host-${{ steps.fp.outputs.host_fp }}\.tar\..*\.part-" || true)
+          n_hostmeta=$(printf '%s\n' "$L" | grep -c "^host-${{ steps.fp.outputs.host_fp }}\.meta" || true)
+          echo ">>> toolchain 分片=$n_tc meta=$n_tcmeta / host 分片=$n_host meta=$n_hostmeta"
+          if [ "${n_tc:-0}" -lt 1 ] || [ "${n_tcmeta:-0}" -lt 1 ] || \
+             [ "${n_host:-0}" -lt 1 ] || [ "${n_hostmeta:-0}" -lt 1 ]; then
+            echo "!!! 工具链缓存资产不完整" >&2
+            printf '%s\n' "$L" >&2
+            exit 1
+          fi
+          echo ">>> 工具链缓存资产断言通过"
+
+  # ==========================================================================
+  # 阶段 3：清理过期缓存（只保留当前指纹 + 上一版）
+  #
+  # Release 资产没有自动淘汰。工具链每次换指纹就多一份（GB 级），
+  # 不清理会无限增长。策略：保留本轮指纹的资产 + dl 资产，
+  # 其余 toolchain-*/host-* 一律删除。
+  #
+  # 为什么不等它自己过期：Release 资产**不会**过期。这是与
+  # actions/cache 的关键差异，必须自己管。
+  # ==========================================================================
+  prune:
+    needs: [warm-toolchain]
+    if: ${{ !cancelled() && !inputs.skip_toolchain }}
+    runs-on: ubuntu-22.04
+    steps:
+      - name: Checkout openwrt-build (only need tools/)
+        uses: actions/checkout@v4
+        with:
+          path: openwrt-build
+          sparse-checkout: tools
+
+      - name: Report cache asset usage (no auto-delete)
+        env:
+          GH_TOKEN: ${{ github.token }}
+          GH_REPO: ${{ github.repository }}
+          KEEP_TC: ${{ needs.warm-toolchain.outputs.toolchain_fp }}
+          KEEP_HOST: ${{ needs.warm-toolchain.outputs.host_fp }}
+        run: |
+          # 保守策略：**不删任何东西**，只报告当前资产占用。
+          #
+          # 为什么不自动删：指纹是内容哈希，一旦某次编译失败或配置
+          # 回退，被删掉的旧指纹缓存就再也拿不回来了（Release 资产不可
+          # 恢复）。而保留成本只是磁盘配额 —— Release 没有总量上限。
+          #
+          # 需要瘦身时手动执行：
+          #   gh release delete-asset cache-build-v1 <资产名> --yes
+          # 或整体删除（下次构建会重新预热）：
+          #   sh tools/cache-release.sh purge cache-build-v1
+          echo "=== 当前缓存资产占用 ==="
+          sh openwrt-build/tools/cache-release.sh list "$CACHE_TAG" | \
+            awk -F'\t' '{s+=$2; printf "%-46s %12d\n", $1, $2} END {printf "---- 合计 %d 字节 (%.2f GB) ----\n", s, s/1024/1024/1024}'
+          echo ""
+          echo "本轮指纹: toolchain=$KEEP_TC host=$KEEP_HOST"
+          echo "（自动清理已禁用：Release 资产删除不可恢复，见本步骤注释）"

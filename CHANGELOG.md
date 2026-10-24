@@ -3,6 +3,152 @@
 本仓库所有功能/配置改动均记录于此。版本判型遵循全局规范（PATCH / MINOR / MAJOR）。
 
 
+## [v0.17.0] - 2026-10-24
+
+### CI：定时预热 dl 镜像与交叉工具链，消除每次构建的重复下载
+
+用户要求：「解决每次提交编译都要重新下载 dl 包和工具链」。
+
+#### 改前
+
+每次 push 都从零开始：`make download` 抓上千个上游 tarball，再完整编译
+交叉工具链与 40 多个宿主工具。两条路径都可能极慢或直接失败。
+
+实测证据（run `39495602665`，2026-10-21）：`make download` 卡了 **5h54m**，
+日志尾部是 `nasm-2.16.03.tar.gz` 从 `www.nasm.us` 以 **556 B/s** 下载，
+直到 job 的 6h 上限被取消。同一轮构建没有任何产物。
+
+#### 改后
+
+新增 `.github/workflows/cache-deps.yml`，把两件昂贵工作搬到 GitHub 内部网络上
+做成可复用资产，供 `build-openwrt.yml` 直接取用：
+
+| 资产 | 内容 | 命中时省下 |
+|---|---|---|
+| `dl` | `dl/` 全部源码包，分片存放 | 15-25 分钟下载，并消除慢源卡死风险 |
+| `toolchain-<FP>` | `staging_dir/toolchain-*` + `build_dir/toolchain-*` | 约 30-45 分钟交叉工具链编译 |
+| `host-<FP>` | `staging_dir/host`、`hostpkg`、`build_dir/host` | 约 40 多个宿主工具编译 |
+
+存放位置是 tag `cache-build-v1` 的 Release（`env.CACHE_TAG`）。**不是发版**：
+标记为 prerelease，标题写明「这不是发版」，删除它只会让下一次构建变慢。
+
+#### 为什么用 Release 资产而不是 `actions/cache`
+
+| 维度 | `actions/cache` | Release 资产 |
+|---|---|---|
+| 单仓库总量 | 10 GB，超出按最后访问时间淘汰 | 无总量上限 |
+| 过期 | **一周未被访问即删除** | 只有手动删除 |
+| 单文件大小 | 需先打成单个 tar | 2 GB（故分片 1900 MB） |
+| 下载路径 | GitHub 缓存服务 | GitHub CDN，流量不出 GitHub |
+
+`dl/` 是 GB 级，且构建不是每天都跑 —— 放 `actions/cache` 既装不下、
+又会被「一周未访问」淘汰，缓存永远命中不了。
+
+#### 工具链指纹用内容哈希，不用 git commit
+
+`tools/lede-fingerprint.sh` 输出 `TOOLCHAIN_FP` / `HOST_FP`，覆盖
+`toolchain/`、`target/linux/generic/`、`tools/`、相关 `include/*.mk` 的
+**文件内容**，加 `.config` 里编译器/libc/binutils/架构相关的符号切片。
+
+- 用 commit 做键会失效：lede master 每天都有提交，缓存几乎永不命中。
+- 用 `git log -1 -- <path>` 更危险：`actions/checkout` 默认浅克隆，
+  HEAD 未触及该路径时返回**空**，于是「空 == 空」把所有版本都判成命中
+  —— 静默用旧工具链。内容哈希与克隆深度无关。
+- `.config` 只取切片：加一个普通包不该让工具链缓存失效。
+
+#### mtime 归一 —— 不做则工具链缓存 100% 不生效
+
+`tools/normalize-mtime.sh` 把源码树 mtime 固定为 `2000-01-01`。理由（读
+`scripts/timestamp.pl` 与 `include/depends.mk` 源码确认）：
+
+- stamp 规则是 `timestamp.pl -n <stamp> <路径> <依赖stamp>`，`-n` 的取值是
+  **peek 而不 shift**，所以 `<stamp>` 自己也在被 stat 的路径列表里；
+  判据是「这批路径里 mtime 最大的那个是不是 `<stamp>` 自己」。
+- 全新 git clone 把所有源码 mtime 写成「现在」→ 缓存里那份旧 stamp 必然更旧
+  → 工具链被判过期 → 完整重编。
+- 宿主工具 stamp 名里含 `find_md5`（`find … -printf "%p%T@"`，也算 mtime），
+  mtime 每次不同 → stamp 文件名每次都不同 → 宿主工具也必然重编。
+
+**预热 job 与构建 job 用同一个脚本、同一套排除规则**，否则两边 `find_md5`
+不同，缓存照样不命中。
+
+#### 哈希不一致的自愈
+
+`scripts/download.pl` 在本地文件哈希不符时是 `die`，**不是重新下载**：
+
+```perl
+if ($sum eq $file_hash) { cleanup(); exit 0; }
+die "Hash of the local file $filename does not match ..."
+```
+
+长期缓存 `dl/` 之后这不是理论风险 —— 上游重打包但文件名不变时必然发生，
+且每次构建都会在同一处硬失败。`tools/make-download.sh` 从日志里精确取出
+不匹配的文件名、逐个删除（打印文件名）、重试最多 3 轮；同时外层套
+`timeout 3000` 防单个慢源拖死 job。
+
+#### `dl/` 双写
+
+| 写入者 | 时机 | 作用 |
+|---|---|---|
+| `cache-deps.yml` 的 `warm-dl` | 每天 UTC 20:00（北京 04:00） | 从零补齐所有源码包 |
+| `build-openwrt.yml` 的 `Refresh dl mirror cache` | 每次**成功**构建后 | 补上「预热之后、构建之前」上游新 bump 的版本 |
+
+只靠定时预热的话，上游在两次预热之间换掉的 tarball 永远补不进镜像。
+构建后回写那一步是 `continue-on-error: true`：缓存是加速手段不是交付物。
+
+#### 新增脚本
+
+| 脚本 | 职责 |
+|---|---|
+| `tools/gen-openwrt-config.sh` | `.config` 的**单一配方**，预热与构建共用；拒绝在 `.config` 已存在时运行 |
+| `tools/dir-mirror.sh` | 通用分片镜像打包/解包（`tar → zstd/gzip` 流式，不落中间包） |
+| `tools/cache-release.sh` | Release 资产的存/取/列/删，用退出码 10 区分「没有缓存」与「缓存坏了」 |
+| `tools/lede-fingerprint.sh` | 工具链/宿主工具的内容指纹 |
+| `tools/normalize-mtime.sh` | 源码树 mtime 归一，并自检有无漏网目录 |
+| `tools/verify-toolchain-cache.sh` | 解包后判定缓存能否复用（含「真编译一个最小 C 程序」） |
+| `tools/make-download.sh` | `make download` + 硬超时 + 哈希自愈 |
+| `tools/verify-workflow-scripts.py` | 抽出工作流里所有 `run:` 块交给 `dash -n` |
+
+#### 修复
+
+- **`.config` 配方抽成脚本**：原先内联在 YAML 里，预热 job 若再抄一份必然漂移，
+  后果是「预热以为不用某包 → 镜像里永远没有 → 每次构建回落到慢速源」。
+- **`chinadns-ng` 的注释与实现相反**：原注释称「dnschain 运行时依赖」，
+  而 v0.10.0 起框架已不依赖它（`docs/adr/0005-remove-chinadns-ng.md`）。
+  已按实况更正为「由 SSR-Plus 的 INCLUDE 带入，显式再声明一次」。
+- **`build-openwrt.yml` 中两段注释与步骤错位**：dl 回写步骤的说明原在
+  「产物兜底断言」上方，产物断言的说明原在 dl 回写步骤上方，已各归其位。
+- **`docs/build/ci.md` 大量行号引用失效**：因新增步骤导致整体下移，
+  已按实际位置重算 §4 步骤表、§4.1 符号表、§5.1-§5.9 断言表、§7 已知问题。
+  同时新增 §8「构建缓存」与 §9「`cache-deps.yml`」两章。
+- **`docs/operations/verification.md` 的 CI 行号**：`verify-dnschain-domains.sh`
+  与 `verify-trafficctl-invariants.sh` 的调用位置改为带文件名的新行号。
+
+#### 验证
+
+本地实跑（Windows + WSL Ubuntu-22.04，`/bin/sh` 为 dash）：
+
+- `dash -n` 全部 7 个新脚本：通过。
+- `python3 tools/verify-workflow-scripts.py`：3 个工作流共 57 个 `run:` 块，
+  0 个语法错误。
+- `dir-mirror.sh` 往返：3 分片打包→解包后 `diff -r` 内容完全一致；
+  删掉一个分片后拒绝解包（`分片数不符：meta 写 4，实际 3`）。
+- `cache-release.sh`（stub 掉 `gh`）：save 覆盖旧分片、只删同 `NAME` 的资产
+  （另一个缓存种类存活）、restore 按 pattern 下载、缺失 Release 返回 10。
+- 完整缓存链路：pack → save → restore → unpack → `diff -r` 三个子树全部一致
+  → `verify-toolchain-cache.sh` 返回 0；删掉分片后解包被拒。
+- `verify-toolchain-cache.sh` 四类负例（缺目录 / 假 gcc / 缺工具链 stamp /
+  缺宿主工具 stamp）均返回 11。
+- `make-download.sh` 四条路径：哈希自愈（删文件后重试）、超时提示、
+  一般失败回显末 40 行、成功计数，行为均符合设计。
+- `gen-openwrt-config.sh` 产出 48 行 `.config`，关键符号齐全；
+  二次运行被拒（`rc=1`）。
+
+未做：真实 GitHub Actions 运行（本机无法执行 3.5 小时构建）。
+首次 push 后需确认三件事：`cache-deps.yml` 三个 job 全绿、
+`cache-build-v1` Release 上有 `dl.meta` 与 `toolchain-*.meta`、
+下一次构建日志里出现 `工具链缓存校验通过`。
+
 ## [v0.16.3] - 2026-10-24
 
 ### 实时诊断链路改为思维导图

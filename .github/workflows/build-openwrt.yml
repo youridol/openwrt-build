@@ -32,6 +32,12 @@ env:
   REPO_BRANCH: master
   TARGET: x86_64
   FEED_CONF: feeds.conf.default
+  # 构建缓存 Release 的 tag，由 .github/workflows/cache-deps.yml 维护。
+  #
+  # 里面是 dl/ 源码包镜像与交叉工具链的分片，**不是固件**。
+  # 用 `cache-` 前缀而不是 `v*`：本工作流的 tag 触发是 `v*`，
+  # 若缓存也用 v 前缀，刷新缓存会误触发一次 3.5 小时的固件构建。
+  CACHE_TAG: cache-build-v1
 
 # 【必须】上传 Release 产物需要 contents: write。
 #
@@ -673,142 +679,14 @@ jobs:
       - name: Generate base .config
         working-directory: lede
         run: |
-          if [ "$TARGET" = "x86_64" ]; then
-            cat >> .config <<EOF
-          CONFIG_TARGET_x86=y
-          CONFIG_TARGET_x86_64=y
-          CONFIG_TARGET_x86_64_DEVICE_generic=y
-          EOF
-          else
-            echo "请在此处添加其他目标平台的 base 配置"
-            exit 1
-          fi
-          make defconfig
-
-      - name: Enable required packages (SSR-Plus, Trafficctl, i18n)
-        working-directory: lede
-        run: |
-          # SSR-Plus 相关
-          echo "CONFIG_PACKAGE_luci-app-ssr-plus=y" >> .config
-          echo "CONFIG_PACKAGE_luci-app-ssr-plus_INCLUDE_Iptables_Transparent_Proxy=y" >> .config
-          echo "# CONFIG_PACKAGE_luci-app-ssr-plus_INCLUDE_Nftables_Transparent_Proxy is not set" >> .config
-          echo "CONFIG_PACKAGE_luci-app-ssr-plus_INCLUDE_Xray=y" >> .config
-          echo "CONFIG_PACKAGE_luci-app-ssr-plus_INCLUDE_ChinaDNS_NG=y" >> .config
-          echo "CONFIG_PACKAGE_luci-app-ssr-plus_INCLUDE_MosDNS=y" >> .config
-          echo "CONFIG_PACKAGE_luci-app-ssr-plus_INCLUDE_Shadow_TLS=y" >> .config
-          echo "CONFIG_PACKAGE_luci-app-ssr-plus_INCLUDE_Kcptun=y" >> .config
-          echo "CONFIG_PACKAGE_luci-app-ssr-plus_INCLUDE_NaiveProxy=y" >> .config
-          echo "CONFIG_PACKAGE_luci-app-ssr-plus_INCLUDE_Shadowsocks_Simple_Obfs=y" >> .config
-          echo "CONFIG_PACKAGE_luci-app-ssr-plus_INCLUDE_Shadowsocks_V2ray_Plugin=y" >> .config
-          echo "CONFIG_PACKAGE_luci-app-ssr-plus_INCLUDE_ShadowsocksR_Libev_Client=y" >> .config
-          echo "CONFIG_PACKAGE_luci-app-ssr-plus_INCLUDE_ShadowsocksR_Libev_Server=y" >> .config
-
-          # 启用 trafficctl 及其中文语言包
-          # i18n 包名由 luci.mk 推导，不是「luci-i18n-<PKG_NAME>-<lang>」：
-          #   LUCI_NAME   = 目录名            = luci-app-trafficctl
-          #   LUCI_TYPE   = 第 2 段           = app
-          #   LUCI_BASENAME = patsubst luci-app-%,%,LUCI_NAME = trafficctl
-          #   LuciTranslation 生成 Package/luci-i18n-$(LUCI_BASENAME)-zh-cn
-          # 故正确符号为 luci-i18n-trafficctl-zh-cn。
-          # 原写 luci-i18n-luci-app-trafficctl-zh-cn 从不匹配任何符号，
-          # 被 confdata.c 静默忽略 → 中文包实际从未编入（本次修正）。
-          echo "CONFIG_PACKAGE_luci-app-trafficctl=y" >> .config
-          echo "CONFIG_PACKAGE_luci-i18n-trafficctl-zh-cn=y" >> .config
-
-          # 启用 dnschain 控制页面及其中文语言包（v0.9.0）
-          # 包名推导规则同 trafficctl：LUCI_BASENAME=dnschain
-          #   → 语言包符号为 luci-i18n-dnschain-zh-cn
-          echo "CONFIG_PACKAGE_luci-app-dnschain=y" >> .config
-          echo "CONFIG_PACKAGE_luci-i18n-dnschain-zh-cn=y" >> .config
-
-          # dnschain 运行时依赖：chinadns-ng 由 SSR-Plus 的
-          # INCLUDE_ChinaDNS_NG 带入；这里显式再声明一次，避免 SSR-Plus
-          # 的 INCLUDE 开关将来被关掉时框架静默失去过滤器二进制。
-          echo "CONFIG_PACKAGE_chinadns-ng=y" >> .config
-
-          # ── LuCI 主题：shadcn 为默认 ────────────────────────────────
+          # 配方已抽到 tools/gen-openwrt-config.sh —— 与
+          # .github/workflows/cache-deps.yml（定时预热 dl 镜像）**共用同一份**。
           #
-          # 只写 =y 不够：LuCI 的默认主题由 luci.main.mediaurlbase 决定，
-          # 而 lede 默认把它指向 bootstrap。两者并存时若 mediaurlbase
-          # 仍指向 bootstrap，shadcn 装了也看不到。故需要：
-          #   (a) shadcn =y
-          #   (b) 默认值在 uci-defaults 里无条件写（见 99-zzz-luci-theme-shadcn）
-          #
-          # ⚠️ **不要试图关掉 bootstrap**（v0.9.1 首次构建踩过）：
-          # lede 的 collections/luci/Makefile（标准 LuCI 集合包）里有
-          #   LUCI_DEPENDS:=+uhttpd ... +luci-mod-admin-full +luci-theme-bootstrap ...
-          # 即它**硬依赖** bootstrap。写 `# CONFIG_PACKAGE_luci-theme-bootstrap
-          # is not set` 会被下一条 make defconfig 的依赖求解再次选回 =y，
-          # 于是断言 `bootstrap 仍被启用` 失败，构建中止
-          # （run 39549176947 就是这样挂的）。
-          #
-          # 正确的做法是**保留 bootstrap 但切换默认**：
-          # 代价只是固件多约 300KB，换来的是可回退 ——
-          # 万一 shadcn 在真机上有兼容问题，把 mediaurlbase 改回
-          # /luci-static/bootstrap 即可，不需要重新编译。
-          echo "CONFIG_PACKAGE_luci-theme-shadcn=y" >> .config
-          # 其余非默认主题仍可关（它们不在集合包的依赖里）
-          for t in material openwrt openwrt-2020 argon design; do
-            echo "# CONFIG_PACKAGE_luci-theme-$t is not set" >> .config
-          done
-
-          # ALL_DOH: dnsproxy + luci-app-dnsproxy + CA 证书（https-dns-proxy 已彻底移除）
-          # 二进制来自 helloworld feed(0.83.0)，init/config 来自 openwrt-build/files
-          echo "CONFIG_PACKAGE_dnsproxy=y" >> .config
-          echo "CONFIG_PACKAGE_luci-app-dnsproxy=y" >> .config
-          echo "CONFIG_PACKAGE_ca-bundle=y" >> .config
-          echo "CONFIG_PACKAGE_ca-certificates=y" >> .config
-
-          # === 游戏网络优化内核模块 ===
-          # TCP BBR 拥塞控制
-          echo "CONFIG_PACKAGE_kmod-tcp-bbr=y" >> .config
-          # Fullcone NAT (游戏 UDP NAT 穿透)
-          echo "CONFIG_PACKAGE_iptables-mod-fullconenat=y" >> .config
-
-          # === SQM / cake 上行整形（控制 50Mbps 上行瓶颈的排队时延）===
-          # 实测现固件缺 tc 与 sch_cake.ko，导致 pppoe-wan 为 noqueue、无任何队列管理。
-          # sqm-scripts 来自 coolsnowwolf/packages feed（v1.6.0 依赖 iptables 而非
-          # nftables，与本固件 fw3/iptables 后端匹配）；tc 来自 iproute2 的 tc-tiny
-          # （默认变体，提供 /sbin/tc）；kmod-sched-core 为 tc 的依赖。
-          echo "CONFIG_PACKAGE_sqm-scripts=y" >> .config
-          echo "CONFIG_PACKAGE_luci-app-sqm=y" >> .config
-          echo "CONFIG_PACKAGE_kmod-sched-cake=y" >> .config
-          echo "CONFIG_PACKAGE_kmod-ifb=y" >> .config
-          echo "CONFIG_PACKAGE_kmod-sched-core=y" >> .config
-          echo "CONFIG_PACKAGE_tc-tiny=y" >> .config
-
-          # === luci-app-trafficctl 的显式依赖 ===
-          # 上游 1.21.4 的 LUCI_DEPENDS 为
-          #   +conntrack +luci-base +rpcd +curl +tc +iw +hostapd-utils
-          #
-          # 本仓库已在 package/luci-app-trafficctl/Makefile 里**去掉
-          # +hostapd-utils**（见该文件的注释）。原因：hostapd-utils 在 lede 中
-          # 声明为 `DEPENDS:=@<某个 hostapd/wpad 变体>` + `VARIANT:=*`，
-          # 而本目标是 x86_64 无 WiFi 硬件 → 该符号永远不可满足 →
-          # 依赖求解把 luci-app-trafficctl **整包**判定为不可选，连带
-          # luci-i18n-trafficctl-zh-cn（DEPENDS:=$(PKG_NAME)）一起从 .config
-          # 消失。症状是构建不报错、界面变英文、i18n 断言失败。
-          #
-          # 这里仍然显式写出 iw 与 conntrack：它们真实存在且可用
-          # （conntrack 实测 opkg 提供 1.4.7-1；iw 见 log 中的 OK 行），
-          # 显式声明可避免「依赖靠自动解析、顺序一变就丢」。
-          # hostapd-utils 不再写入 —— 本目标无 WiFi，且它已不是依赖项。
-          echo "CONFIG_PACKAGE_iw=y" >> .config
-          echo "CONFIG_PACKAGE_conntrack=y" >> .config
-
-          # === 显式排除不用的文件服务 ===
-          # 实测这两个服务对用户无用：vsftpd 监听 0.0.0.0:21 但无实际用途；
-          # ksmbd 未配置任何 share（仅 globals），445 端口空转。
-          # 注意: 必须在 make defconfig 之前写入，否则依赖解析会把它们重新选上。
-          echo "# CONFIG_PACKAGE_vsftpd is not set" >> .config
-          echo "# CONFIG_PACKAGE_luci-app-vsftpd is not set" >> .config
-          echo "# CONFIG_PACKAGE_luci-i18n-vsftpd-zh-cn is not set" >> .config
-          echo "# CONFIG_PACKAGE_ksmbd-server is not set" >> .config
-          echo "# CONFIG_PACKAGE_luci-app-ksmbd is not set" >> .config
-          echo "# CONFIG_PACKAGE_luci-i18n-ksmbd-zh-cn is not set" >> .config
-          echo "# CONFIG_PACKAGE_autosamba is not set" >> .config
-
-          make defconfig
+          # 为什么必须共用：.config 决定「make download 要下哪些源码包」。
+          # 两处各写一份必然漂移，后果是「预热以为不用某包 → 镜像里永远
+          # 没有 → 每次构建都回落到慢速第三方源」这种长期隐性失效
+          # （本仓库的 chinadns-ng 注释与实现相反，就是同类漂移的实例）。
+          TARGET="$TARGET" sh ../openwrt-build/tools/gen-openwrt-config.sh
 
       - name: Verify SQM / i18n enabled and file services excluded
         working-directory: lede
@@ -1518,6 +1396,167 @@ jobs:
           echo "OK   MSS clamp 含 fw4/nftables 分支"
           echo "SSR-Plus uci-defaults 顺序契约校验通过。"
 
+      # ==================================================================
+      # 缓存恢复（两段）：dl/ 源码包镜像 + 交叉工具链
+      #
+      # 两段都**允许失败**（缓存没有/坏了就回退到完整流程），
+      # 但「失败」与「没有」必须分开处理：前者是 bug，后者是正常。
+      # 故用退出码 10（没有缓存）与其它非 0（真的出错）区分。
+      #
+      # 顺序要求：必须在 .config 生成之后（指纹要读 .config）、
+      #          必须在 make download 之前（先放缓存再补缺）。
+      # ==================================================================
+      - name: Compute cache fingerprint
+        id: fp
+        working-directory: lede
+        run: |
+          # 指纹 = 「工具链相关文件内容 + .config 里的编译器符号」的内容哈希。
+          # 不用 git commit：lede 每天都有提交，用 commit 做键缓存几乎永不命中。
+          # 详细理由见 tools/lede-fingerprint.sh 头注释。
+          sh ../openwrt-build/tools/lede-fingerprint.sh . | tee "$RUNNER_TEMP/fp.txt"
+          TFP=$(sed -n 's/^TOOLCHAIN_FP=//p' "$RUNNER_TEMP/fp.txt")
+          HFP=$(sed -n 's/^HOST_FP=//p' "$RUNNER_TEMP/fp.txt")
+          [ -n "$TFP" ] && [ -n "$HFP" ] || {
+            echo "!!! 指纹为空，缓存策略无法工作" >&2
+            exit 1
+          }
+          echo "toolchain_fp=$TFP" >> "$GITHUB_OUTPUT"
+          echo "host_fp=$HFP" >> "$GITHUB_OUTPUT"
+          echo ">>> toolchain 指纹: $TFP"
+          echo ">>> host 指纹:      $HFP"
+
+      - name: Normalize source mtimes (toolchain cache prerequisite)
+        working-directory: lede
+        run: |
+          # 必须做，否则工具链缓存 100% 不会被复用 —— 而且是静默失效。
+          #
+          # 原因：lede 用 scripts/timestamp.pl 按 mtime 判断「要不要重编」，
+          # 而全新 git clone 会把所有源码 mtime 写成"现在"，
+          # 于是缓存里那份旧 stamp 永远被判为过期。
+          # 同时 host-build.mk 的 stamp 名里含 find_md5（也用 mtime），
+          # mtime 每次都不同 → stamp 文件名每次都不同 → 宿主工具也必然重编。
+          # 详见 tools/normalize-mtime.sh 头注释。
+          #
+          # ⚠️ 预热工作流（cache-deps.yml）用的是同一份归一规则，
+          #    两边必须一致，否则 find_md5 不同、缓存照样不命中。
+          sh ../openwrt-build/tools/normalize-mtime.sh .
+
+      - name: Restore dl mirror from cache Release
+        id: restore-dl
+        env:
+          GH_TOKEN: ${{ github.token }}
+          GH_REPO: ${{ github.repository }}
+        run: |
+          # dl/ 镜像存放在 Release 资产里（tag 见 env.CACHE_TAG），
+          # 由 cache-deps.yml 定时刷新。理由见 tools/cache-release.sh 头注释：
+          # actions/cache 有 10GB 配额且「一周未访问即淘汰」，装不下 GB 级 dl/。
+          #
+          # 退出码 10 = 缓存不存在（首次运行/被清理），属正常。
+          set +e
+          sh openwrt-build/tools/cache-release.sh restore "$CACHE_TAG" "$RUNNER_TEMP/dl-in" 'dl.*'
+          rc=$?
+          set -e
+          case "$rc" in
+          0)
+            echo ">>> 命中 dl 镜像，解包作为增量基础"
+            sh openwrt-build/tools/dir-mirror.sh unpack dl "$RUNNER_TEMP/dl-in" lede
+            echo "hit=true" >> "$GITHUB_OUTPUT"
+            ;;
+          10)
+            echo ">>> 没有 dl 镜像（首次运行），将从上游完整下载"
+            echo "hit=false" >> "$GITHUB_OUTPUT"
+            ;;
+          *)
+            echo "!!! 恢复 dl 镜像失败（exit=$rc）—— 这是 bug，不是「没有缓存」" >&2
+            exit 1
+            ;;
+          esac
+          echo "dl/ 文件数: $(find lede/dl -maxdepth 1 -type f 2>/dev/null | wc -l | tr -d ' ')"
+
+      - name: Restore toolchain cache from cache Release
+        id: restore-tc
+        env:
+          GH_TOKEN: ${{ github.token }}
+          GH_REPO: ${{ github.repository }}
+        run: |
+          # 只取**指纹一致**的工具链：同一套 toolchain 源码 + 同一套编译器配置。
+          # 指纹不同就当没有缓存（继续完整编译，产出新缓存）。
+          #
+          # 解包后必须过 verify-toolchain-cache.sh 才敢信任：
+          # 缓存不完整的症状是「编译到一半 undefined reference」或
+          # 「静默回退成完整重编」，都很难从构建输出反推。详见该脚本头注释。
+          set +e
+          sh openwrt-build/tools/cache-release.sh restore "$CACHE_TAG" "$RUNNER_TEMP/tc-in" \
+            "toolchain-${{ steps.fp.outputs.toolchain_fp }}.*" \
+            "host-${{ steps.fp.outputs.host_fp }}.*"
+          rc=$?
+          set -e
+
+          if [ "$rc" -eq 10 ]; then
+            echo ">>> 指纹无匹配缓存，将完整编译工具链"
+            echo "hit=false" >> "$GITHUB_OUTPUT"
+            exit 0
+          elif [ "$rc" -ne 0 ]; then
+            echo "!!! 恢复工具链缓存失败（exit=$rc）—— 这是 bug，不是「没有缓存」" >&2
+            exit 1
+          fi
+
+          sh openwrt-build/tools/dir-mirror.sh unpack "toolchain-${{ steps.fp.outputs.toolchain_fp }}" \
+            "$RUNNER_TEMP/tc-in" lede
+          sh openwrt-build/tools/dir-mirror.sh unpack "host-${{ steps.fp.outputs.host_fp }}" \
+            "$RUNNER_TEMP/tc-in" lede
+
+          set +e
+          sh openwrt-build/tools/verify-toolchain-cache.sh lede
+          vrc=$?
+          set -e
+          if [ "$vrc" -eq 0 ]; then
+            # 再用 lede **自己的判据**复核一次。
+            #
+            # subdir.mk 的 stampfile 规则是：
+            #   $(stamp): $(TMP_DIR)/.build ...
+            #     @+$(SCRIPT_DIR)/timestamp.pl -n $(stamp) <路径> <依赖stamp> || \
+            #       $(MAKE) ... compile
+            # 而 timestamp.pl 的判据本质是「这些路径里最新的文件是不是就是
+            # stamp 自己」（它取 mtime 最大的那个，比较名字）。
+            # 对工具链：stamp = staging_dir/toolchain-*/stamp/.toolchain_compile，
+            #           路径 = toolchain/ 与 .gcc_final_installed。
+            #
+            # 为什么还要这一步：verify-toolchain-cache.sh 只证明「缓存内容
+            # 是完整的」，这里证明「lede 会真的跳过它」。两者不是一回事 ——
+            # mtime 归一漏了某个目录时，前者全过、后者判重编，
+            # 于是缓存命中却白拿不到时间（构建照绿但慢 40 分钟）。
+            #
+            # 这里直接比较 mtime 而不是调 timestamp.pl：
+            # 逻辑等价，但不依赖 cwd 与相对路径，且能打印出到底是哪个文件
+            # 比 stamp 新（timestamp.pl 只返回布尔值，排障时看不到原因）。
+            STAMP=$(find lede/staging_dir -maxdepth 3 -name '.toolchain_compile' 2>/dev/null | head -1)
+            if [ -n "$STAMP" ]; then
+              STAMP_TS=$(stat -c %Y "$STAMP")
+              NEWER=$(find lede/toolchain -type f -newermt "@$STAMP_TS" 2>/dev/null | head -3)
+              if [ -z "$NEWER" ]; then
+                echo ">>> 复核通过：toolchain/ 里没有比 stamp 更新的文件 → 会跳过工具链编译"
+                echo "hit=true" >> "$GITHUB_OUTPUT"
+              else
+                echo ">>> ⚠️ toolchain/ 里有比 stamp 更新的文件 → lede 仍会重编工具链："
+                printf '      %s\n' $NEWER
+                echo "    多半是 mtime 归一漏了目录。构建继续（正确性不受影响），"
+                echo "    但本轮不会节省时间；请检查 tools/normalize-mtime.sh 的排除列表。"
+                echo "hit=false" >> "$GITHUB_OUTPUT"
+              fi
+            else
+              echo ">>> 找不到 .toolchain_compile stamp，无法复核（按命中处理）"
+              echo "hit=true" >> "$GITHUB_OUTPUT"
+            fi
+          else
+            # 缓存不可用：清掉解包出来的东西，回退到完整编译。
+            # 这里**不清空 dl/**（那是另一份资产，且与工具链无关）。
+            echo ">>> 工具链缓存校验未通过（rc=$vrc），回退到完整编译"
+            echo "    旧缓存会在本轮编译成功后由 cache-deps 覆盖"
+            rm -rf lede/staging_dir lede/build_dir/toolchain-* lede/build_dir/host lede/build_dir/hostpkg
+            echo "hit=false" >> "$GITHUB_OUTPUT"
+          fi
+
       - name: Download package sources
         working-directory: lede
         timeout-minutes: 60
@@ -1565,22 +1604,15 @@ jobs:
             echo "  $code  $m"
           done
 
-          echo "=== make download（单文件超时 ${CURL_OPTIONS}）==="
-          # 外层再加一次硬超时：即使 curl 的 --max-time 没生效（例如
-          # download.pl 走了 aria2c 分支），也不会拖死整个 job。
-          # 50 分钟足够正常下载（前几次构建该步骤约 4 分钟）；
-          # 超时则明确失败，而不是无限等待后被 job 级 6h 上限取消。
-          timeout 3000 make download -j${JOBS} V=s || {
-            rc=$?
-            if [ "$rc" -eq 124 ]; then
-              echo "!!! make download 超过 50 分钟被强制中止。" >&2
-              echo "    这说明某个上游下载源极慢。查上面的镜像探测结果，" >&2
-              echo "    并把可用的镜像补进 DOWNLOAD_MIRROR（分号分隔）。" >&2
-            else
-              echo "!!! make download 失败（exit=$rc）" >&2
-            fi
-            exit 1
-          }
+          echo "=== make download（dl 缓存命中=${{ steps.restore-dl.outputs.hit }}）==="
+          # 用脚本而不是直接 make download，两个理由：
+          #   ① 缓存里若有旧版本 tarball，download.pl 会 **die** 而不是重下
+          #      （见 scripts/download.pl 的 "Hash of the local file ... does
+          #      not match" 分支）。长期缓存 dl/ 之后这是必然事件；
+          #      脚本会精确删掉不匹配的文件并重试，且逐条打印。
+          #   ② 外层硬超时 + 自愈重试都封装在脚本里，YAML 里不再重复。
+          # 详见 tools/make-download.sh 头注释。
+          sh ../openwrt-build/tools/make-download.sh . "$JOBS" 3000 3
 
           echo "=== 下载结果核对 ==="
           ls dl/*.tar.* 2>/dev/null | wc -l | xargs echo "  dl/ 下的压缩包数量:"
@@ -1588,6 +1620,30 @@ jobs:
           for f in dl/nasm-2.16.03.tar.gz dl/linux-*.tar.* dl/gcc-13*.tar.*; do
             [ -f "$f" ] && echo "  OK   $(basename "$f")" || echo "  MISS $(basename "$f")"
           done
+
+          # 关于 mtime 的说明（读 scripts/timestamp.pl 源码确认，勿凭印象改）：
+          #
+          #   stampfile 规则调用的是
+          #     timestamp.pl -n <stamp> <路径> <依赖stamp>
+          #   timestamp.pl 对 `-n` 的处理是 **peek 而不 shift**：
+          #       elsif ($path =~ /^-n/) { my $arg = $ARGV[0]; $options{$path}=$arg; }
+          #   所以 <stamp> 自己**也在后续的路径列表里**被 stat 一次。
+          #   最终判据是「这批路径里 mtime 最大的那个是不是 <stamp> 自己」。
+          #
+          #   由此可得两条结论：
+          #     ① 判定只在 <stamp>、源码目录、依赖 stamp 三者间比较；
+          #        `tmp/.build` 虽然出现在 make 规则的依赖里（会让配方重跑，
+          #        代价极小），但**不参与**这个比较。
+          #        所以 make download 去 touch tmp/.build 不会导致工具链重编。
+          #     ② 真正决定复用的是「stamp 是否比源码新」，而源码 mtime 来自
+          #        全新 git clone（= 现在）。故必须在解包缓存**之前**做
+          #        mtime 归一 —— 那一步已经在前面做过了。
+          #   这里不需要再归一一次。
+          if [ "${{ steps.restore-tc.outputs.hit }}" = "true" ]; then
+            echo "=== 工具链缓存校验通过：本步骤只补下载 dl/ 里缺的包 ==="
+          else
+            echo "=== 工具链缓存未命中：本轮将完整编译工具链 ==="
+          fi
 
       - name: Prebuild gn host tool with gcc-13 (fix gcc-12 ranges compile error)
         working-directory: lede
@@ -1736,6 +1792,38 @@ jobs:
             exit 1
           fi
           echo ">>> 产物断言通过"
+
+      # ------------------------------------------------------------------
+      # 把本轮补齐后的 dl/ 回写成缓存镜像。
+      #
+      # 为什么构建流程也要写缓存（不只是 cache-deps 定时任务）：
+      #   lede master 随时会 bump 某个包的版本（新的 PKG_SOURCE/文件名）。
+      #   定时预热是每天一次；若只在预热时更新镜像，那么「预热之后、
+      #   构建之前」上游发生的版本变更就永远补不进镜像 —— 表现为每次构建
+      #   都在 dl 里缺同一个包、每次都要回落到慢速源。构建成功时顺手回写，
+      #   镜像就能与真实构建保持同步。
+      #
+      # 放在编译**之后**、且只在成功时执行（默认 if 就是 success()），
+      # 失败构建不去污染缓存。上传失败也不影响固件交付 —— 故这一步
+      # 明确 `continue-on-error: true`：缓存是加速手段，不是交付物，
+      # 它坏了不该让一次成功的固件构建变红。
+      # ------------------------------------------------------------------
+      - name: Refresh dl mirror cache (best effort)
+        continue-on-error: true
+        env:
+          GH_TOKEN: ${{ github.token }}
+          GH_REPO: ${{ github.repository }}
+        run: |
+          set -e
+          N=$(sh openwrt-build/tools/dir-mirror.sh count lede/dl)
+          echo ">>> 本轮 dl/ 文件数: $N"
+          if [ "$N" -lt 50 ]; then
+            echo "!!! dl/ 只有 $N 个文件，拒绝用它覆盖缓存镜像" >&2
+            exit 1
+          fi
+          sh openwrt-build/tools/dir-mirror.sh pack dl lede "$RUNNER_TEMP/dl-out" 1900M dl
+          sh openwrt-build/tools/cache-release.sh save "$CACHE_TAG" "$RUNNER_TEMP/dl-out"
+          echo ">>> dl 缓存镜像已刷新"
 
       # ------------------------------------------------------------------
       # 发版（tag v* push）时：把编译产物上传到 GitHub Release。
