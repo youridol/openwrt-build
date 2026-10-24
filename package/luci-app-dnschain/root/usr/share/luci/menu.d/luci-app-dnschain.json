@@ -1,6 +1,6 @@
 {
 	"admin/services/dns_chain": {
-		"title": "DNS 链路",
+		"title": "DNS 分流",
 		"order": 20,
 		"action": {
 			"type": "cbi",

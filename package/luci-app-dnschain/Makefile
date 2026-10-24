@@ -7,7 +7,7 @@
 include $(TOPDIR)/rules.mk
 
 PKG_NAME:=luci-app-dnschain
-PKG_VERSION:=1.3.3
+PKG_VERSION:=1.8.0
 PKG_RELEASE:=1
 
 PKG_LICENSE:=Apache-2.0
@@ -29,12 +29,14 @@ define Package/luci-app-dnschain
 endef
 
 define Package/luci-app-dnschain/description
- DNS 链路框架控制页面（服务 → DNS 链路）。
+ DNS 分流框架控制页面（服务 → DNS 分流）。
  设计依据：docs/adr/0003-dns-chain-framework.md
            docs/adr/0006-domain-routing-and-reroute.md
  运行时组件（init/config/脚本）由 files/ overlay 提供。
  v0.13.0 起含「域名」tab：自定义国内外域名列表、判定链路图、
  改道状态图与明细表（链路健康探测与自动改道）。
+ v0.16.4 起含「分诊结果」：未知目标的试直连/试代理/标 dead 与落库，
+ 表格带序号、时间戳与 IP 段，已入库的行折叠留档。
 endef
 
 include $(TOPDIR)/feeds/luci/luci.mk

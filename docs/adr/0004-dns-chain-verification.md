@@ -1,4 +1,4 @@
-# ADR-0004：DNS 链路全链路验证规程
+# ADR-0004：DNS 分流全链路验证规程
 
 - 状态：**生效**（2026-10-20；2026-10-23 按 v0.10.0–v0.14.8 代码逐项更正）
 - 适用：刷入含 `dnschain` 框架的固件后，逐项验证链路是否按
@@ -113,7 +113,7 @@ LuCI 找不到翻译时回退到原文，而原文就是中文。
 `http://192.168.3.254/cgi-bin/luci/admin/services/dns_chain`。
 
 **【已更正】** 原文写 `admin/network/dns_chain`。v0.12.1 起页面移到
-**服务 → DNS 链路**，`order=20`，紧接 ShadowSocksR Plus+（`order=10`）下一行：
+**服务 → DNS 分流**，`order=20`，紧接 ShadowSocksR Plus+（`order=10`）下一行：
 
 - `package/luci-app-dnschain/root/usr/share/luci/menu.d/luci-app-dnschain.json:2`
   （`"admin/services/dns_chain"`）

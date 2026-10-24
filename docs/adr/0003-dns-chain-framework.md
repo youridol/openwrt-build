@@ -1,4 +1,4 @@
-# ADR-0003：DNS 链路框架 —— dnsmasq 唯一缓存与分流 + 双 dnsproxy 实例
+# ADR-0003：DNS 分流框架 —— dnsmasq 唯一缓存与分流 + 双 dnsproxy 实例
 
 - 状态：**部分被取代（v0.10.0）** —— 原文的「框架自持 chinadns-ng `:5335` 策略过滤器」
   与「国外 IP 形式 DoT」已由 [ADR-0005](0005-remove-chinadns-ng.md) 取代；
@@ -483,7 +483,7 @@ config ssr 'compat'
 
 ### 8.3 页面结构
 
-- 菜单：**服务 → DNS 链路**（`admin/services/dns_chain`），`order=20`，
+- 菜单：**服务 → DNS 分流**（`admin/services/dns_chain`），`order=20`，
   紧接在 ShadowSocksR Plus+（`order=10`）下一行
   （`package/luci-app-dnschain/root/usr/share/luci/menu.d/luci-app-dnschain.json:2-12`、
   `package/luci-app-dnschain/luasrc/controller/dnschain.lua:37-39`）。
@@ -491,7 +491,7 @@ config ssr 'compat'
   （`general.lua:98-106`）。
 
 ```
-服务 → DNS 链路 (admin/services/dns_chain)
+服务 → DNS 分流 (admin/services/dns_chain)
 ├─ 概览    当前状态（结论行 + 链路图 + 指标 + 组件状态）
 ├─ 域名    自定义域名（国内/国外）+ 判定链路 + 改道状态 + 改道明细
 │          + 观测与阈值 + 域名操作

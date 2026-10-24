@@ -363,17 +363,34 @@ end
 -----------------------------------------------------------------------
 -- 判定链路图（思维链路图）
 --
--- 要回答的问题是「这个域名会怎么走、在哪一步出的问题」，所以图分
--- **上下两段**，对应两个阶段：
+-- ── v0.16.4 重画：与「最新分流链路标准」逐节点对齐 ──────────────
 --
---   上段：域名 → 归属 → 首选链路     （静态判定，只看配置与名单）
---   下段：首选链探测 → 结论           （动态判定，看链路通不通）
+-- 用户给的标准（需求原文，不可改写）：
 --
--- 为什么按「结果」分组而不是按「来源」分组：
---   用户真正想知道的是「它走直连还是走代理」，按结果分组时
---   每两条线汇聚到同一个节点，一眼就能看出归属与去向的对应关系；
---   按来源分组则会出现两条长斜线跨越整张图（uncovered → 直连
---   要跨过 代理 那一行），正是「看起来像断链」的典型形态。
+--   入口条件：不在 GFW 名单、不在 blacklist、不在 china、不在任何数据库
+--   ① 试直连（真实发请求）
+--        通 → 落库：IP 写入 china 集合，域名写入 custom-domestic.txt
+--        不通 → ②
+--   ② 试代理（移入 blacklist 后再发请求）
+--        通 → 落库：IP 写入 blacklist 集合，域名写入 custom-foreign.txt
+--        不通 → ③
+--   ③ 标记 dead，不加入任何集合
+--
+-- 旧图画的是**另一套逻辑**（域名 → 归属 → 首选链探测 → 保持/改道），
+-- 那是 v0.13.0 的「健康探测 + 自动改道」，与上面的分诊标准不是一回事。
+-- 两张图并列摆在同一页时，用户无法判断「到底哪套在起作用」——
+-- 这正是本次要求「思维导图与最新分流逻辑一一对应」要解决的问题。
+--
+-- 新图的节点与标准逐条对应（左→右三段）：
+--
+--   入口判定 ─┬→ ① 试直连 ─┬→ 直连通 → 落库 china / custom-domestic
+--             │             └→ 不通 → ②
+--             ├→ ② 试代理 ─┬→ 代理通 → 落库 blacklist / custom-foreign
+--             │             └→ 都不通 → ③
+--             └→ 已有归属（跳过，不参与分诊）
+--
+-- 为什么仍然保留「已有归属」这一支：入口条件写的是「不在任何库里」才
+-- 进入分诊，画上这一支才能表达「为什么有的目标不走这三步」。
 --
 -- opts 全部可选，缺省时显示静态说明（不依赖运行时数据）。
 --
@@ -390,7 +407,7 @@ end
 --
 --   实测证据（v0.14.1 页面）：`grep -o 'id="dcrt[^"]*"'` 有 5 个重复。
 -----------------------------------------------------------------------
-local ROUTE_W, ROUTE_H = 720, 520
+local ROUTE_W, ROUTE_H = 860, 330
 
 function D.route_map(opts)
 	opts = opts or {}
@@ -400,150 +417,129 @@ function D.route_map(opts)
 	-- 用 rawget 而不是 opts.id_prefix：lupa（测试用的真实 Lua 解释器）
 	-- 把 Python dict 桥接成 Lua 表时，**缺失的键会抛 KeyError 而不是返回
 	-- nil**，因为 Lua 侧的 __index 落到了 Python 的 __getitem__。
-	-- 生产环境（原生 Lua 表）两种写法等价，但 rawget 在两种环境下都安全。
+	-- 生产环境（原生 Lua 表）两者等价，但 rawget 在两种环境下都安全。
 	local p = rawget(opts, "id_prefix") or "dcrt"
-	local NW2, NW3 = 196, 208
-	local X1, X2, X3 = 14, 190, 440
-	local NH, GAP = 46, 14
 
-	-- 上段四行（按去向分组：前两行→直连，后两行→代理）
-	local A_Y = { 16, 76, 136, 196 }
-	local y_dom = A_Y[1]
-	local y_for = A_Y[3]
-	local y_merged_dom = math.floor((A_Y[1] + A_Y[2]) / 2) - math.floor(NH / 2)
-	local y_merged_for = math.floor((A_Y[3] + A_Y[4]) / 2) - math.floor(NH / 2)
-
-	-- 下段三行
-	local B_Y = { 292, 352, 412 }
-	local y_root_b = 292 - NH - 20
-
-	-- 底部两行说明的基线。
+	-- ── 布局（改坐标必须同步改 route_layout，CI 有几何断言）────────
 	--
-	-- ⚠️ 必须给下段最后一个节点（双链故障，底边 = B_Y[3] + NH = 458）
-	-- 留出字高（10px 字号的上沿约在基线 −8）。v0.13.0 初版把第一行
-	-- 放在 486-26 = 460，只比节点底边低 2px，实际渲染时文字压进了
-	-- 「双链故障」那个框里 —— 而纯几何断言（只看 viewBox 越界）发现不了。
-	-- 现在改成 486 / 504，并让 viewBox 高度留到 520（504 + 字高 + 余量）。
-	local y_note1 = 486
-	local y_note2 = 504
+	-- 三列：
+	--   C1 入口 / 跳过判定      x=14  w=150
+	--   C2 两个探测步骤          x=214 w=200
+	--   C3 落库 / dead 结果      x=470 w=250
+	--
+	-- 三行（NH=64，GAP=24）：
+	--   R1 y=16   未知目标     ① 试直连       直连通 → 落库
+	--   R2 y=104  —            ② 试代理       代理通 → 落库
+	--   R3 y=192  已有归属     ③ 标记 dead    不加入任何集合
+	--
+	-- ⚠️ 「已有归属」必须放 C1 而不是 C2。
+	--
+	--   放 C2 会占住 R3 的中间列，于是 ② → ③ 的竖线要么穿过它，
+	--   要么被迫绕到 C2/C3 之间的空隙、又与 R3 的横向连线交叉。
+	--   移到 C1 后，C2 列只剩 ①② 两个探测步骤，② → ③ 是一条
+	--   24px 的短竖线，全程不碰任何节点。
+	--
+	-- ⚠️ NH 必须 ≥ 64：box() 的三行分别落在 y+21 / y+37 / y+51。
+	--   取 48 时第三行（note）跑到框外，视觉上是「文字压在框的下边框上」，
+	--   而只查 viewBox 越界的断言发现不了。
+	local NW1, NW2, NW3 = 150, 200, 250
+	local X1, X2, X3 = 14, 214, 470
+	local NH, GAP = 64, 24
+
+	local R1, R2, R3 = 16, 104, 192
+
+	local y_note1 = 286
+	local y_note2 = 304
 
 	local o = {}
 	-- ⚠️ 必须同时给出 width/height 固有尺寸（v0.13.0 实测修正）。
 	--
 	-- 只写 viewBox 时，SVG 没有「固有尺寸」，CSS 的 `width:auto`
-	-- 会回落到 `100%` —— 图被拉伸到容器宽度 1246px，高度等比放大到
-	-- 900px（520 × 1246/720），字号从 11px 涨到 19px。
-	-- 症状：一张 720×520 的图占满整屏还多，用户滚动时只看到几个
-	-- 放大的框，反馈「导图看不到」。DOM 里 SVG 在、内容完整、
-	-- 纯几何断言全绿 —— 问题只在「没有固有尺寸」这一点上。
+	-- 会回落到 `100%` —— 图被拉伸到容器宽度，高度等比放大，
+	-- 字号跟着涨。症状：图占满整屏还多，用户滚动时只看到几个放大的框，
+	-- 反馈「导图看不到」。DOM 里 SVG 在、内容完整、纯几何断言全绿 ——
+	-- 问题只在「没有固有尺寸」这一点上。
 	--
-	-- 写死 width/height 后浏览器按 720×520 渲染，CSS 里再用
+	-- 写死 width/height 后浏览器按原始尺寸渲染，CSS 里再用
 	-- max-width:100% 兜住窄屏。
 	o[#o + 1] = string.format(
 		'<div class="dc-chain dc-chain--map"><svg viewBox="0 0 %d %d" ' ..
 		'width="%d" height="%d" role="img" ' ..
 		'aria-label="%s">', ROUTE_W, ROUTE_H, ROUTE_W, ROUTE_H,
-		esc(translate("域名判定链路图")))
+		esc(translate("未知目标分诊链路图")))
 	o[#o + 1] = "<g" .. figure_attr(p) .. ">"
 
-	--------------------------------------------------------------------
-	-- 上段连线
-	--------------------------------------------------------------------
-	local x_root_r = X1 + 120
+	local half = math.floor(NH / 2)
+	local x1_r = X1 + NW1
 	local x2_l = X2
 	local x2_r = X2 + NW2
 	local x3_l = X3
 
-	-- 根 → 四个归属分支（从同一点放射，错开会在节点边缘留小尖角）
-	local root_cy = A_Y[1] + math.floor(NH / 2) - 12
-	for i = 1, 4 do
-		local cy = A_Y[i] + math.floor(NH / 2)
-		o[#o + 1] = curve(x_root_r, root_cy, x2_l, cy, "info", p)
-	end
-
-	-- 四个归属 → 两个去向
-	o[#o + 1] = curve(x2_r, A_Y[1] + math.floor(NH / 2), x3_l,
-		y_merged_dom + math.floor(NH / 2), "ok", p)
-	o[#o + 1] = curve(x2_r, A_Y[2] + math.floor(NH / 2), x3_l,
-		y_merged_dom + math.floor(NH / 2), "ok", p)
-	o[#o + 1] = curve(x2_r, A_Y[3] + math.floor(NH / 2), x3_l,
-		y_merged_for + math.floor(NH / 2), "info", p)
-	o[#o + 1] = curve(x2_r, A_Y[4] + math.floor(NH / 2), x3_l,
-		y_merged_for + math.floor(NH / 2), "info", p)
-
 	--------------------------------------------------------------------
-	-- 上段节点
-	--------------------------------------------------------------------
-	o[#o + 1] = box(X1, A_Y[1], 120, NH, translate("域名"), translate("用户录入"), nil, "info")
-
-	o[#o + 1] = box(X2, A_Y[1], NW2, NH, translate("自定义 · 国内"),
-		"domains.domestic", nil, "ok")
-	o[#o + 1] = box(X2, A_Y[2], NW2, NH, translate("未覆盖"),
-		translate("名单里没有"), nil, "warn")
-	o[#o + 1] = box(X2, A_Y[3], NW2, NH, translate("自定义 · 国外"),
-		"domains.foreign", nil, "info")
-	o[#o + 1] = box(X2, A_Y[4], NW2, NH, translate("数据库命中"),
-		translate("gfw 名单"), nil, "info")
-
-	o[#o + 1] = box(X3, y_merged_dom, NW3, NH, translate("直连链路"),
-		":" .. tostring(opts.entry_port or "5353"), nil, "ok")
-	o[#o + 1] = box(X3, y_merged_for, NW3, NH, translate("代理链路"),
-		":" .. tostring(opts.foreign_port or "5336"), nil, "info")
-
-	--------------------------------------------------------------------
-	-- 上段 → 下段的跨段连接
-	--------------------------------------------------------------------
-	o[#o + 1] = vline(X1 + 60, A_Y[1] + NH + 2, y_root_b - 2, "mute", p)
-	o[#o + 1] = label(X1 + 68, A_Y[1] + NH + 40, translate("归属确定后"), "mute", 10, "0.6")
-	o[#o + 1] = label(X1 + 68, A_Y[1] + NH + 54, translate("进入链路探测"), "mute", 10, "0.6")
-
-	--------------------------------------------------------------------
-	-- 下段连线
-	--------------------------------------------------------------------
-	local b_root_r = X1 + 120
-	local b_root_cy = y_root_b + math.floor(NH / 2)
-	o[#o + 1] = curve(b_root_r, b_root_cy, X2, B_Y[1] + math.floor(NH / 2), "info", p)
-	o[#o + 1] = curve(b_root_r, b_root_cy, X2, B_Y[2] + math.floor(NH / 2), "info", p)
-
-	-- 首选链探测 → 保持 / 改道
-	o[#o + 1] = curve(x2_r, B_Y[1] + math.floor(NH / 2), x3_l,
-		B_Y[1] + math.floor(NH / 2), "ok", p)
-	o[#o + 1] = curve(x2_r, B_Y[1] + math.floor(NH / 2), x3_l,
-		B_Y[2] + math.floor(NH / 2), "warn", p)
-	-- 另一条链探测 → 改道 / 双链故障
-	o[#o + 1] = curve(x2_r, B_Y[2] + math.floor(NH / 2), x3_l,
-		B_Y[2] + math.floor(NH / 2), "warn", p)
-	o[#o + 1] = curve(x2_r, B_Y[2] + math.floor(NH / 2), x3_l,
-		B_Y[3] + math.floor(NH / 2), "bad", p)
-
-	--------------------------------------------------------------------
-	-- 下段节点
-	--------------------------------------------------------------------
-	o[#o + 1] = box(X1, y_root_b, 120, NH, translate("链路探测"),
-		translate("阈值判定"), nil, "info")
-	o[#o + 1] = box(X2, B_Y[1], NW2, NH, translate("探测首选链路"),
-		translate("超时 + 重试"), nil, "ok")
-	o[#o + 1] = box(X2, B_Y[2], NW2, NH, translate("探测另一条链路"),
-		translate("仅在首选失败时"), nil, "warn")
-
-	o[#o + 1] = box(X3, B_Y[1], NW3, NH, translate("保持"),
-		translate("首选链可达"), nil, "ok")
-	o[#o + 1] = box(X3, B_Y[2], NW3, NH, translate("改道"),
-		translate("首选不通 · 另一条通"), nil, "warn")
-	o[#o + 1] = box(X3, B_Y[3], NW3, NH, translate("双链故障"),
-		translate("都不通 → 不改道"), nil, "bad")
-
-	--------------------------------------------------------------------
-	-- 底部说明：把两条需求规则原样写出来
+	-- 连线
 	--
-	-- 图能表达结构，但「国外不通改直连 / 国内不通改代理」是**规则**，
+	-- ⚠️ 入口**只连 ①**，② 与 ③ 由「不通则下一步」的竖线引入。
+	--
+	--   初版从入口同时连出 ① 与 ② 两条曲线，语义上等于「入口可以直接
+	--   去试代理」，与标准里的「① 不通 → 才进 ②」矛盾。图上多画一条线，
+	--   读者就会以为存在一条不存在的路径。
+	--------------------------------------------------------------------
+	-- 入口 → ①（同排直线）
+	o[#o + 1] = curve(x1_r, R1 + half, x2_l, R1 + half, "ok", p)
+	-- 入口 → 已有归属（C1 列内竖虚线，全程不碰任何框：
+	--   X1 列在 R2 那一排是空的）
+	o[#o + 1] = vline(X1 + math.floor(NW1 / 2), R1 + NH + 2,
+		R3 - 2, "mute", p)
+
+	-- ① → 直连通
+	o[#o + 1] = curve(x2_r, R1 + half, x3_l, R1 + half, "ok", p)
+	-- ② → 代理通
+	o[#o + 1] = curve(x2_r, R2 + half, x3_l, R2 + half, "warn", p)
+	-- ③ → 不加入任何集合
+	o[#o + 1] = curve(x2_r, R3 + half, x3_l, R3 + half, "bad", p)
+
+	-- 「不通则下一步」：① → ②、② → ③
+	--
+	-- 两段都落在 C2 列中线、只跨 24px 的行间空隙，不碰任何节点。
+	-- 用虚线（vline 自带 dasharray）表达「条件性推进」而非「必然流向」。
+	o[#o + 1] = vline(X2 + math.floor(NW2 / 2), R1 + NH + 2, R2 - 2, "warn", p)
+	o[#o + 1] = vline(X2 + math.floor(NW2 / 2), R2 + NH + 2, R3 - 2, "bad", p)
+
+	--------------------------------------------------------------------
+	-- 节点
+	--------------------------------------------------------------------
+	o[#o + 1] = box(X1, R1, NW1, NH, translate("未知目标"),
+		translate("不在任何库"), translate("入口条件"), "info")
+	o[#o + 1] = box(X1, R3, NW1, NH, translate("已有归属"),
+		translate("跳过，不干预"), nil, "mute")
+
+	o[#o + 1] = box(X2, R1, NW2, NH, translate("① 试直连"),
+		translate("真实发请求"), nil, "ok")
+	o[#o + 1] = box(X2, R2, NW2, NH, translate("② 试代理"),
+		translate("先移入 blacklist"), translate("再发真实请求"), "warn")
+	o[#o + 1] = box(X2, R3, NW2, NH, translate("③ 标记 dead"),
+		translate("两条链路都不通"), nil, "bad")
+
+	o[#o + 1] = box(X3, R1, NW3, NH, translate("直连通 → 落库"),
+		translate("IP → china 集合"),
+		translate("域名 → custom-domestic.txt"), "ok")
+	o[#o + 1] = box(X3, R2, NW3, NH, translate("代理通 → 落库"),
+		translate("IP → blacklist 集合"),
+		translate("域名 → custom-foreign.txt"), "warn")
+	o[#o + 1] = box(X3, R3, NW3, NH, translate("不加入任何集合"),
+		translate("下一轮重新分诊"), nil, "bad")
+
+	--------------------------------------------------------------------
+	-- 底部说明：把标准的硬约束原样写出来
+	--
+	-- 图能表达结构，但「IP 一律转段入库」「dead 不入库」是**规则**，
 	-- 只画线会让人自己推导；写在图下方才是可核对的。
 	--------------------------------------------------------------------
 	o[#o + 1] = label(X1 + 2, y_note1,
-		translate("未录入自定义列表的域名：访问国外链路不通 → 自动改走直连；访问国内链路不通 → 自动改走代理"),
+		translate("IP 一律先算成 CIDR 段再入库（已知网段表优先，否则 /24），不写单个 /32"),
 		nil, 10, "0.7")
 	o[#o + 1] = label(X1 + 2, y_note2,
-		translate("两条链都不通时不改道 —— 那是链路故障，改道只会掩盖问题"),
+		translate("dead 不进任何集合 —— 它没有可用链路，写进去只会把错误答案固化"),
 		"mute", 10, "0.55")
 
 	o[#o + 1] = "</g></svg></div>"
@@ -560,65 +556,69 @@ function D.route_layout()
 	return {
 		w = ROUTE_W,
 		h = ROUTE_H,
-		node_h = 46,
-		-- 下段最后一个节点（双链故障）的底边
-		last_node_bottom = 412 + 46,
-		note1 = 486,
-		note2 = 504,
+		node_h = 64,
+		-- 最后一个节点的底边（R3 + NH = 192 + 64）
+		last_node_bottom = 192 + 64,
+		note1 = 286,
+		note2 = 304,
 	}
 end
 
------------------------------------------------------------------------
--- 改道状态图（状态思维导图）
+-- ══════════════════════════════════════════════════════════════
+-- v0.21.0：triage_map / triage_layout 已删除
 --
--- 要回答的问题是「现在哪些域名不正常、该去查什么」，所以它是
--- **按状态分组**的：一个根分出五种状态，每种状态带计数与域名清单，
--- 问题状态（降级 / 改道 / 双链故障）额外给一句「下一步查什么」。
---
--- 为什么状态是这五档（而不是「正常 / 异常」两档）：
---   「异常」把「已自动改道并恢复可用」和「两条链都不通」混在一起，
---   前者不需要人介入、后者必须人介入。分档之后红黄绿各自含义唯一，
---   用户看到红色就知道要动手，看到黄色知道系统正在自愈。
---
--- rows：dnschain-health status 的 ROW 行（见 dnschain.lua health_rows）
--- summary：SUM 行（可选，只用于总数）
---
--- ⚠️ v0.14.0：原来的 "fixed" 档（「固定归属 / 不参与改道」）已删除。
---
---   自定义列表的定位改成了「补全数据库归属」—— 它只决定**首选**链，
---   仍然参与健康检测与自动改道。于是「固定不改道」这个状态不再存在，
---   再画一档会让页面说一套、运行时做另一套。
---
---   自定义域名现在归入正常的 ok / degraded / rerouted / both-bad 档，
---   由 class 字段（custom-*）体现「归属来自用户补全」。
--- -----------------------------------------------------------------------
-local STATUS_ORDER = { "ok", "degraded", "rerouted", "both-bad", "unknown" }
+-- 它们画「分诊结果的落点分布」（直连通 / 代理通 / dead 各多少条）。
+-- 分诊功能整体移除后没有数据源，也没有存在的意义 ——
+-- 未覆盖域名由 dnsproxy 的 --fallback 自动兜底，不再产生「落点」。
+-- ══════════════════════════════════════════════════════════════
 
+-----------------------------------------------------------------------
+-- DNS 分流去向图（状态思维导图）
+--
+-- ── v0.21.0：语义重写 ────────────────────────────────────────────
+--
+-- 原图按「五档健康状态」分组（走首选链 / 首选链不稳 / 已切另一链 /
+-- 双链故障 / 未探测），数据来自 dnschain-health 的探测结果。
+--
+-- 健康探测与自动改道在 v0.21.0 整体删除后，那五档失去了数据源。
+-- 但用户明确要求**保留这张图**，改为显示**静态分流去向**：
+--
+--   根（分流去向）
+--     ├─ 走直连 ── 自定义国内列表 + 未覆盖域名（默认 :5353）
+--     └─ 走代理 ── 自定义国外列表 + gfw 名单（:5336）
+--
+-- 这张图回答的是「这个域名（及其子域名）现在走哪条链」，
+-- 数据来自归属判定（dc_domain_class），是**静态事实**，不需要探测。
+--
+-- ── 为什么仍是两档而不是三档 ─────────────────────────────────────
+--
+-- 删除「首选链不稳 / 已切另一链 / 双链故障」三档，因为：
+--   · 没有探测就没有「稳不稳」这个事实
+--   · 直连不通时由 dnsproxy 的 --fallback 自动切 :5336，
+--     那不是「改道」，是上游层的兜底，对用户不可见也不需要显示
+--
+-- 「未探测」档也删除 —— 静态分流不需要探测就能确定去向。
+--
+-- rows：{ { domain=..., chain="domestic"|"foreign", class=... }, ... }
+--   由 general.lua 的 status_map cfgvalue 从归属判定构造。
+-- summary：保留参数位以兼容旧调用（只用于总数，可传 nil）
+-----------------------------------------------------------------------
+local STATUS_ORDER = { "domestic", "foreign" }
+
+-- 两档的标题、说明与语义色
+--
+-- tone 沿用既有的 ok / warn 配色：
+--   直连 → ok（绿）  代理 → warn（黄，需要经代理，稍慢是正常的）
 local STATUS_META = {
-	["ok"] = {
-		title = translate("正常"),
+	["domestic"] = {
+		title = translate("走直连"),
 		tone = "ok",
-		hint = translate("首选链路可达"),
+		hint = translate("国内直连出口，不经代理"),
 	},
-	["degraded"] = {
-		title = translate("降级中"),
+	["foreign"] = {
+		title = translate("走代理"),
 		tone = "warn",
-		hint = translate("首选链开始失败，未达改道阈值"),
-	},
-	["rerouted"] = {
-		title = translate("已改道"),
-		tone = "warn",
-		hint = translate("自动切到另一条链，恢复后会自动回切"),
-	},
-	["both-bad"] = {
-		title = translate("双链故障"),
-		tone = "bad",
-		hint = translate("两条链都不通 → 先查 dnsproxy 与代理"),
-	},
-	["unknown"] = {
-		title = translate("未探测"),
-		tone = "mute",
-		hint = translate("等一轮间隔或手动触发探测"),
+		hint = translate("经代理出口，可访问境外站点"),
 	},
 }
 
@@ -642,57 +642,36 @@ local STATUS_META = {
 --      —— 这样任意数量的域名都能均匀铺开，不会出现半行空白
 local STATUS_W = 900
 
--- 把一行的 state 归一到「可画」的档位。
---
--- ⚠️ 未知/空 state 必须归入 unknown（v0.14.4 修）。
---
---   原实现 `local st = r.state or "unknown"` 只兜 nil，空串与任何
---   未知值（如脚本将来新增 `probing`）会落进 groups 里一个**不在
---   STATUS_ORDER 中**的键。而 `present` 只遍历 STATUS_ORDER、
---   `n_all` 也只累加 STATUS_ORDER 的组 —— 这些行被**静默丢弃**。
---
---   实测：3 行（state 分别为 ok / "" / weird-state）只画出 1 个域名，
---   根节点也写「观测 1 个」。看起来像「只有 1 个域名需要关注」，
---   没有任何提示。状态文件被手工改坏、或脚本新增状态值时会踩到。
---
---   现在统一归入 unknown 档，保证「画出的行数 == 输入行数」。
-local function normalize_state(st)
-	if type(st) ~= "string" then return "unknown" end
-	for _, known in ipairs(STATUS_ORDER) do
-		if st == known then return st end
-	end
-	return "unknown"
-end
+-- v0.21.0：normalize_state 已删除（状态档位从五档减到两档，
+-- 未知值在 layout_plan 里直接归 domestic，不需要单独归一函数）
 
 -- 状态图的分组与布局计算（status_map 与 status_layout 共用）。
 --
 -- ⚠️ 抽出来的理由（v0.14.4）：原来 status_map 与 status_layout 各算一遍，
 -- 口径不同 —— status_layout 用 `pairs(rows)` 数**数据行数**，而
--- status_map 画的是**状态档位数**（最多 5 档，both-bad 恒占一档）；
+-- status_map 画的是**档位数**（v0.21.0 起固定 2 档：直连 / 代理）；
 -- status_layout 还把 NH 硬编码成 60，而 status_map 的 NH 随 hint
--- 折行数增长。实测 5 档各 1 个域名时：status_map 实际高 386，
+-- 折行数增长。历史教训：5 档各 1 个域名时 status_map 实际高 386，
 -- status_layout 报 406 —— CI 的几何断言一直在验一个不存在的布局。
 local function layout_plan(rows)
 	rows = rows or {}
 
-	-- 按状态分组（未知 state 归入 unknown，不丢弃）
+	-- 按链路分组（v0.21.0：只看 r.chain，未知值归 domestic）
+	--
+	-- 两档都**始终画出来**，即使某档为空 —— 空档本身是信息：
+	-- 「走代理 0 个」说明用户还没录任何国外域名，这是有用的状态，
+	-- 藏起来会让用户以为图坏了。
 	local groups = {}
 	for _, st in ipairs(STATUS_ORDER) do groups[st] = {} end
 	for _, r in ipairs(rows) do
-		local st = normalize_state(r.state)
-		if not groups[st] then groups[st] = {} end
+		local st = (r.chain == "foreign") and "foreign" or "domestic"
 		groups[st][#groups[st] + 1] = r
 	end
 
-	-- 只画有内容的状态 + 始终画 both-bad（即使为 0，也要让用户看见
-	-- 「这个档存在且现在是空的」—— 隐藏它会让「为什么没有红色」变成疑问）
 	local present = {}
 	for _, st in ipairs(STATUS_ORDER) do
-		if #groups[st] > 0 or st == "both-bad" then
-			present[#present + 1] = st
-		end
+		present[#present + 1] = st
 	end
-	if #present == 0 then present = { "unknown" } end
 
 	local n_all = 0
 	for _, st in ipairs(STATUS_ORDER) do n_all = n_all + #groups[st] end
@@ -800,7 +779,7 @@ function D.status_map(rows, summary, id_prefix)
 		'<div class="dc-chain dc-chain--map"><svg viewBox="0 0 %d %d" ' ..
 		'width="%d" height="%d" role="img" ' ..
 		'aria-label="%s">', STATUS_W, H, STATUS_W, H,
-		esc(translate("改道状态思维导图")))
+		esc(translate("DNS 分流去向导图")))
 	o[#o + 1] = "<g" .. figure_attr(p) .. ">"
 
 	local x_root_r = X1 + ROOT_W
@@ -823,15 +802,11 @@ function D.status_map(rows, summary, id_prefix)
 	-- 根节点
 	local n_all = 0
 	for _, st in ipairs(present) do n_all = n_all + #groups[st] end
+	-- 根节点恒为绿色：两档都是「正常工作」，没有故障态可言
 	local root_tone = "ok"
-	if #groups["both-bad"] > 0 then
-		root_tone = "bad"
-	elseif #groups["rerouted"] > 0 or #groups["degraded"] > 0 then
-		root_tone = "warn"
-	end
 
-	o[#o + 1] = box(X1, root_y, ROOT_W, NH, translate("改道状态"),
-		string.format(translate("观测 %d 个"), n_all), nil, root_tone)
+	o[#o + 1] = box(X1, root_y, ROOT_W, NH, translate("分流去向"),
+		string.format(translate("共 %d 个"), n_all), nil, root_tone)
 
 	-- 状态节点 + 域名清单
 	for i, st in ipairs(present) do
@@ -862,14 +837,11 @@ function D.status_map(rows, summary, id_prefix)
 		--   · 边框色跟随该档的语义色（绿/黄/红/灰），但更淡
 		--
 		-- 这样视觉上就是「状态框 ──→ 清单框」的完整链路。
+		-- v0.21.0：不再显示「域名 → 代理/直连」的改道箭头 ——
+		-- 没有改道了，每个域名只属于它所在的那一档。
 		local names = {}
 		for _, r in ipairs(list) do
-			local tag = r.domain or "?"
-			if r.active and r.pref and r.active ~= r.pref then
-				tag = string.format("%s → %s", tag,
-					r.active == "foreign" and translate("代理") or translate("直连"))
-			end
-			names[#names + 1] = tag
+			names[#names + 1] = r.domain or "?"
 		end
 
 		-- 清单容器框左右内边距（v0.15.2：加框后从 6 增到 10）
@@ -989,12 +961,12 @@ end
 --
 --   原实现有两处口径不一致，导致 CI 的几何断言验的是一个不存在的布局：
 --     ① `for _ in pairs(rows)` 数的是**数据行数**，而 status_map 画的是
---        **状态档位数**（最多 5 档，且 both-bad 恒占一档）。行数 ≠ 档位数
+--        **档位数**（v0.21.0 起固定 2 档）。行数 ≠ 档位数
 --        时必然不等。
 --     ② `NH` 硬编码 60，而 status_map 的 NH 会随 hint 折行数增长
 --        （math.max(NH_MIN, 21+16+max_hint_lines*14+8)）。
 --
---   实测（5 档各 1 个域名）：status_map 实际 viewBox 高 386，
+--   历史实测（当时的 5 档各 1 个域名）：status_map 实际 viewBox 高 386，
 --   本函数报 406 —— 差 20px。断言「说明文字不压节点」用的是错值，
 --   即使真把文字压进节点也未必能发现。
 --
@@ -1044,19 +1016,44 @@ end
 --   truncate 截断并加省略号。
 ------------------------------------------------------------------------
 local LIVE_W = 1180
-local LIVE_NH = 52          -- 阶段节点高
-local LIVE_GAP = 14         -- 阶段之间垂直间距
+local LIVE_NH = 58          -- 阶段节点高（v0.18.0 从 52 提到 58，多一行徽标）
+local LIVE_GAP = 16         -- 阶段之间垂直间距
 local LIVE_ROOT_W = 150     -- 根节点宽
-local LIVE_STAGE_W = 168    -- 阶段节点宽
+local LIVE_STAGE_W = 176    -- 阶段节点宽（v0.18.0 从 168 微调，容下徽标文字）
 local LIVE_EVID_W = 420     -- 证据框宽
 local LIVE_X1 = 14          -- 根节点 x
 local LIVE_X2 = 208         -- 阶段节点 x
 local LIVE_X3 = 424         -- 证据框 x
 local LIVE_TOP = 16         -- 首个阶段顶部
 
---- 实时诊断链路思维导图
+--- 链路拓扑图（v0.18.0 合并「解析链路」+「实时诊断链路」）
 --
--- 参数 stages：{ { id, label, tone, n_pass, n_fail, n_skip, evidence }, ... }
+-- ── 为什么合并（ADR-0007 §2.3）──────────────────────────────────
+--
+-- 概览原本有两张图：
+--   · 解析链路  —— 拓扑：dnsmasq→dnsproxy:5353/:5336→:1234 通不通
+--   · 实时诊断链路 —— 20 项自检按 8 个阶段重分组
+--
+-- 两张都在讲「链路」，一张是结构、一张是阶段，并列要求用户在脑中做
+-- 两次映射（「图 A 的那段」↔「图 B 的那个阶段」）。用户要的是
+-- 「一眼看出哪里有问题」，一张「拓扑 + 每节点状态徽标」正好是这个效果。
+--
+-- ── 视觉语义（与旧版的区别）─────────────────────────────────────
+--
+--   · 节点串成**一条链**（竖直），表达「流量依次经过这些阶段」，
+--     而不是旧版从根节点发散成 8 条平行支路（那读起来像「8 个独立检查」）
+--   · 每个节点带状态徽标（PASS/FAIL/SKIP 计数），红的即断点
+--   · 相邻节点之间画**箭头状连线**，断点处线条变红并加粗
+--   · 证据框仍挂在节点右侧，但只在有证据时出现
+--
+-- ── 为什么保留函数名 live_diag_map ──────────────────────────────
+--
+-- 改名会连带改 general.lua 的调用、断言里的 `dclive` 标记、
+-- 以及三处钉着 aria-label 的断言。收益（名字更准）远小于成本，
+-- 所以保留名字，只改语义 —— 在 aria-label 上体现新定位。
+--
+-- 参数 stages：{ { id, label, tone, n_pass, n_fail, n_skip, evidence, note }, ... }
+--   note 是可选副标题（兜底阶段用它显示「未归入链路阶段（共 N 项）」）
 -- 返回：完整 SVG 字符串（含外层 <div>）
 function D.live_diag_map(stages)
 	stages = stages or {}
@@ -1083,17 +1080,27 @@ function D.live_diag_map(stages)
 	o[#o + 1] = string.format(
 		'<div class="dc-chain dc-chain--live"><svg viewBox="0 0 %d %d" ' ..
 		'width="%d" height="%d" role="img" aria-label="%s">',
-		LIVE_W, H, LIVE_W, H, esc(translate("实时诊断链路思维导图")))
+		LIVE_W, H, LIVE_W, H, esc(translate("链路拓扑图")))
 	o[#o + 1] = "<g" .. figure_attr(p) .. ">"
 
 	local root_right = LIVE_X1 + LIVE_ROOT_W
 
-	-- ── 根 → 各阶段的连线 ──────────────────────────────────
-	-- 用该阶段的状态色：一眼看出哪条支路是红的
-	for i, st in ipairs(stages) do
-		local y = LIVE_TOP + (i - 1) * (LIVE_NH + LIVE_GAP)
-		o[#o + 1] = curve(root_right, root_cy, LIVE_X2,
-			y + math.floor(LIVE_NH / 2), st.tone, p)
+	-- ── 根 → 首个阶段（链路入口）──────────────────────────────
+	o[#o + 1] = curve(root_right, root_cy, LIVE_X2,
+		LIVE_TOP + math.floor(LIVE_NH / 2), stages[1].tone or "ok", p)
+
+	-- ── 阶段之间的连线：竖直、带箭头语义（v0.18.0 新增）─────────
+	--
+	-- 旧版是「根 → 每个阶段」的发散结构，读起来像 8 个独立检查。
+	-- 新版串成一条链：流量依次经过这些阶段，断了就往下传不过去。
+	--
+	-- 线条颜色取**上游节点**的状态色：上游坏了，下游这段就是红的。
+	for i = 1, n - 1 do
+		local y1 = LIVE_TOP + (i - 1) * (LIVE_NH + LIVE_GAP) + LIVE_NH
+		local y2 = LIVE_TOP + i * (LIVE_NH + LIVE_GAP)
+		local x  = LIVE_X2 + math.floor(LIVE_STAGE_W / 2)
+		local tone = stages[i].tone or "ok"
+		o[#o + 1] = vline(x, y1, y2, tone, p)
 	end
 
 	-- ── 阶段 → 证据的连线（细虚线，表示「附带说明」而非「下游」）──
@@ -1129,13 +1136,20 @@ function D.live_diag_map(stages)
 	for i, st in ipairs(stages) do
 		local y = LIVE_TOP + (i - 1) * (LIVE_NH + LIVE_GAP)
 
-		-- 阶段节点：标题 = 阶段名，副标题 = PASS/FAIL 计数
-		local cnt = string.format("PASS %d", st.n_pass or 0)
-		if (st.n_fail or 0) > 0 then
-			cnt = cnt .. string.format(" · FAIL %d", st.n_fail)
-		end
-		if (st.n_skip or 0) > 0 then
-			cnt = cnt .. string.format(" · SKIP %d", st.n_skip)
+		-- 阶段节点：标题 = 阶段名，副标题 = 计数（或兜底阶段的 note）
+		local cnt
+		if st.note and st.note ~= "" then
+			-- 兜底阶段：优先显示「未归入链路阶段（共 N 项）」，
+			-- 这比 PASS/FAIL 计数更有信息量 —— 它在提示维护者去归组
+			cnt = st.note
+		else
+			cnt = string.format("PASS %d", st.n_pass or 0)
+			if (st.n_fail or 0) > 0 then
+				cnt = cnt .. string.format(" · FAIL %d", st.n_fail)
+			end
+			if (st.n_skip or 0) > 0 then
+				cnt = cnt .. string.format(" · SKIP %d", st.n_skip)
+			end
 		end
 
 		o[#o + 1] = box(LIVE_X2, y, LIVE_STAGE_W, LIVE_NH,
@@ -1158,6 +1172,20 @@ function D.live_diag_map(stages)
 
 	o[#o + 1] = "</g></svg></div>"
 	return table.concat(o)
+end
+
+--- 链路拓扑图的几何（供断言核对）
+function D.live_diag_layout(stages)
+	local n = #(stages or {})
+	local h = LIVE_TOP * 2 + n * LIVE_NH + (n - 1) * LIVE_GAP
+	return {
+		w = LIVE_W,
+		h = h,
+		node_h = LIVE_NH,
+		gap = LIVE_GAP,
+		stages = n,
+		last_node_bottom = LIVE_TOP + n * LIVE_NH + (n - 1) * LIVE_GAP,
+	}
 end
 
 return D

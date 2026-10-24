@@ -262,10 +262,9 @@ reconcile_lists() {
 
 	# 重建域名文件
 	#
-	# v0.13.0 起要重建**三个**派生物，缺一个就会出现「页面与生效不一致」：
-	#   1. db-domains.txt     归属判定的输入（数据库域名集合）
+	# v0.21.0：从三个派生物减到两个 —— watch.servers 随健康改道一起删除。
+	#   1. db-domains.txt      归属判定的输入（数据库域名集合）
 	#   2. dnschain-split.conf 静态分流片段（需要 restart 才生效）
-	#   3. watch.servers      观测域名的动态上游（SIGHUP 即生效）
 	#
 	# 注意顺序：db-domains 必须先更新，否则 split 会按旧集合生成。
 	dc_gen_db_domains >/dev/null 2>&1
@@ -283,8 +282,6 @@ reconcile_lists() {
 	#    自愈已移到 reconcile_invariants（每次收敛都跑）。
 	dc_gen_dnsmasq_split >/dev/null 2>&1 || \
 		dnschain_log "WARN: 重建 dnschain-split.conf 失败"
-
-	dc_gen_watch_servers >/dev/null 2>&1
 
 	# 行数变化是否超过阈值
 	threshold=$(dc_get lists restart_threshold 1)
@@ -405,27 +402,13 @@ main() {
 		/etc/init.d/dnsmasq restart >/dev/null 2>&1 || rc=1
 	fi
 
-	# --------------------------------------------------------
-	# 重放分诊结果（v0.16.0）
+	# v0.21.0：分诊结果重放已删除（分诊功能整体移除）。
 	#
-	# 为什么每轮都要跑：nft 的 `china` / `blacklist` 集合由上游
-	# SSR-Plus 在每次 start 时重建（`ssr-rules` 里 `flush set` +
-	# 重新灌入），分诊增补的元素会被清掉。
+	# 原来这里每轮跑 `dnschain-triage apply` 把分诊写入的 IP 元素重新灌回
+	# nft 的 china / blacklist 集合 —— 因为 SSR-Plus 每次 start 会 flush 集合。
 	#
-	# 实测（2026-10-24）：清掉后 cdn.staticsfile.org 立刻 000，
-	# 重放后恢复 200 / 114541 字节。
-	#
-	# apply 只读持久化记录、不做探测，开销是几个 nft 调用。
-	# --------------------------------------------------------
-	if [ -x /usr/bin/dnschain-triage ]; then
-		local tri_n
-		tri_n=$(/usr/bin/dnschain-triage apply 2>/dev/null \
-			| sed -n 's/^SUMMARY applied=//p')
-		case "$tri_n" in
-			''|0) : ;;
-			*) dnschain_log "已重放 ${tri_n} 条分诊结果" ;;
-		esac
-	fi
+	# 分诊删除后不再有「分诊增补的元素」，也就没有需要重放的东西。
+	# 集合内容完全由 SSR-Plus 自己维护（国内 IP 段 + gfw 域名解析结果）。
 
 	if [ "$rc" -ne 0 ]; then
 		dnschain_log "收敛完成，但有错误（见上方日志）"

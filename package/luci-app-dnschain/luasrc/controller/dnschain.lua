@@ -11,11 +11,11 @@ function index()
 		return
 	end
 
-	-- 侧边栏位置：服务 → DNS 链路，紧接在「ShadowSocksR Plus+」下一行。
+	-- 侧边栏位置：服务 → DNS 分流，紧接在「ShadowSocksR Plus+」下一行。
 	--
 	-- 排序依据（实测 2026-10-22，浏览器侧边栏实际顺序）：
 	--   ShadowSocksR Plus+  order=10   ← /usr/lib/lua/luci/controller/shadowsocksr.lua
-	--   DNS 链路            order=20   ← 本页（v0.12.1 从「网络」移到这里）
+	--   DNS 分流            order=20   ← 本页（v0.12.1 从「网络」移到这里）
 	--   动态 DNS            order=59
 	--   DNS Proxy           order=60
 	--   带宽监控            order=80
@@ -30,12 +30,16 @@ function index()
 	-- 这一项直接消失。实测原因是 leaf 节点在生成的菜单树 JSON 里带
 	-- `"wildcard": true`，而 LuCI 前端把 wildcard 节点当作「占位/通配」
 	-- 不渲染成菜单链接：
-	--   "nodespec": { …, "order": 20, "title": "DNS 链路",
+	--   "nodespec": { …, "order": 20, "title": "DNS 分流",
 	--                 "wildcard": true, "readonly": false }
 	-- 去掉 leaf 后侧边栏正常显示，且 CBI 页面本来就不会被缓存
 	-- （dispatcher 每次请求都重新执行 controller 与 model）。
+	--
+	-- ⚠️ v0.16.4 全局改名：「DNS 链路」→「DNS 分流」（只改显示文案，
+	--    路由名 dns_chain 与包名 luci-app-dnschain 保持不变，理由见
+	--    CHANGELOG 对应版本段）。
 	local page = entry({"admin", "services", "dns_chain"},
 		cbi("dnschain/general"),
-		_("DNS 链路"), 20)
+		_("DNS 分流"), 20)
 	page.dependent = false
 end

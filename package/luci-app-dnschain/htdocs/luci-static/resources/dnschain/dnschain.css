@@ -682,6 +682,36 @@ html[data-darkmode="true"] {
 	line-height: 1.6;
 }
 
+/* ── 折叠区（分诊结果「已入库」留档，v0.16.4）───────────────────── */
+
+/*
+ * 用原生 <details>/<summary>：不需要 JS，键盘可达，浏览器默认记住展开态
+ * （同一会话内）。分诊表里已入库的行收进这里，默认关闭。
+ *
+ * 为什么要给 summary 显式样式：默认的三角标在深色主题下是黑色的，
+ * 几乎看不见；而 .dc-details 内部又是白底卡片，三角标会落在卡片外。
+ */
+.dc-details {
+	margin-top: 10px;
+	border: 1px solid var(--dc-border, rgba(127, 127, 127, 0.22));
+	border-radius: 8px;
+	padding: 0 10px 10px;
+}
+
+.dc-details > summary {
+	cursor: pointer;
+	padding: 8px 0;
+	font-size: 12px;
+	font-weight: 600;
+	color: inherit;
+	opacity: 0.75;
+	list-style-position: inside;
+}
+
+.dc-details > summary:hover { opacity: 1; }
+
+.dc-details[open] > summary { margin-bottom: 8px; }
+
 /* ── 图示容器（两张思维导图共用）───────────────────────────────── */
 
 /*

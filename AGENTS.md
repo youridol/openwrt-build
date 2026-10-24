@@ -20,7 +20,7 @@
 | `patches/luci-app-trafficctl/*.patch` | trafficctl 相对上游的差分记录（**不参与构建**，供跟进上游 + CI 一致性校验） | 由 `tools/regen-trafficctl-patches.py` 生成，勿手改 |
 | `tools/sync-trafficctl.sh` | 升级 trafficctl 到指定上游 tag（覆盖包目录 + 重算 patch + 回放校验） | 直接用 |
 | `tools/check-trafficctl-i18n.py` | 校验中文翻译覆盖率；`--write-pot` 重生成 pot 模板 | 直接用 |
-| `tools/verify-dnschain-domains.sh` | 域名归属与自动改道的 129 条契约断言（CI 与本地同一份） | 直接用 |
+| `tools/verify-dnschain-domains.sh` | 域名归属与分流规则的 148 条契约断言（CI 与本地同一份；§12 是性能不变量） | 直接用 |
 | `tools/check-dnschain-lua.py` | 用 lupa（真实 Lua）跑语法 + 模型 + **真实渲染页面每个 `cfgvalue()`** | 直接用 |
 | `tools/render-dnschain-diagrams.py` | 两张思维导图的纯几何校验 + 输出可打开的 HTML 预览 | 直接用 |
 | `tools/extract-dnschain-i18n.py` | 提取 `translate()` 中文并比对 PO（`--write` 追加缺失） | 直接用 |
@@ -29,8 +29,8 @@
 | `CHANGELOG.md` | 变更的唯一权威记录；版本判型 PATCH/MINOR/MAJOR | 每次功能改动必须追加 |
 | `.gitattributes` | 强制关键文件 LF 行尾 —— **极其重要，见红线 1** | 按需扩规则 |
 | `patches/luci-app-dnsproxy/README.md` | patch 维护规范（单一职责/最小修改/幂等） | — |
-| `docs/` | 分层文档。**入口 `docs/README.md`（按任务找文档）；`docs/routes.md` 是全部 LuCI 路由的唯一登记处**。其余：`docs/packages/`（每个 LuCI 包）、`docs/runtime/`（DNS 链路与 overlay 清单）、`docs/build/ci.md`、`docs/operations/verification.md`、`docs/adr/`（架构决定） | 改代码后按 `docs/README.md` §5 联动更新 |
-| `GLOSSARY.md` | 易混术语（归属/首选/当前、分流、nftset、watch.servers…），每条带代码落点 | 新增术语时同步 |
+| `docs/` | 分层文档。**入口 `docs/README.md`（按任务找文档）；`docs/routes.md` 是全部 LuCI 路由的唯一登记处**。其余：`docs/packages/`（每个 LuCI 包）、`docs/runtime/`（DNS 分流与 overlay 清单）、`docs/build/ci.md`、`docs/operations/verification.md`、`docs/adr/`（架构决定） | 改代码后按 `docs/README.md` §5 联动更新 |
+| `GLOSSARY.md` | 易混术语（归属/首选/当前、分流、nftset、fallback…），每条带代码落点 | 新增术语时同步 |
 
 固件产物：`lede/bin/targets/x86/64/*.img.gz`，artifact 名 `openwrt-x86-64-ssrplus`。
 
@@ -172,7 +172,7 @@ LAN 客户端
 > **刷机后的逐项验证见 [`docs/adr/0004-dns-chain-verification.md`](docs/adr/0004-dns-chain-verification.md)。**
 > **运行时的实际形态见 [`docs/runtime/dns-chain.md`](docs/runtime/dns-chain.md)（按代码取证，逐条带行号）。**
 >
-> 该 ADR 定义了取代上述现状的 DNS 链路框架：**dnsmasq 唯一缓存 + 唯一分流层，
+> 该 ADR 定义了取代上述现状的 DNS 分流框架：**dnsmasq 唯一缓存 + 唯一分流层，
 > dnsproxy 两个不带缓存的实例（`:5353` 国内 / `:5336` 国外）**。
 > ⚠️ ADR-0003 正文写于 v0.9.x，其中「框架自持 chinadns-ng 策略过滤器」
 > 已被 v0.10.0 推翻（见 `docs/adr/0005-remove-chinadns-ng.md`）；
@@ -182,15 +182,20 @@ LAN 客户端
 > 已落地：
 > - 运行时：`files/etc/config/dnschain`、`files/usr/share/dnschain/dnschain.sh`、
 >   `files/etc/init.d/dnschain`、`files/usr/bin/dnschain-reconcile`、
->   `files/usr/bin/dnschain-selftest`、`files/usr/bin/dnschain-health`、
->   `files/etc/uci-defaults/99-zz-dnschain`
-> - v0.16.0：`files/usr/bin/dnschain-triage` —— 未知目标的
->   「试直连 → 直连不通试代理 → 都不通标 dead」分诊，按实测结果把
->   IP 段写进 `china`/`blacklist`、域名写进 UCI `dom_domestic`/`dom_foreign`
+>   `files/usr/bin/dnschain-selftest`、`files/etc/uci-defaults/99-zz-dnschain`
 > - P3：`files/etc/config/dnsproxy` 已关闭缓存、删除 fallback
 > - P4：`init.d/dnsproxy` 让位逻辑、`files/etc/ssrplus/applechina.conf` overlay、
 >   853 拒绝的 `-151` 优先级（路由器实测通过）
 > - 页面：`package/luci-app-dnschain/`
+>
+> 🚨 **v0.22.0 变更：`dnschain-health` 与 `dnschain-triage` 已删除**
+> （分诊 1710 行 + 健康改道 448 行）。理由：用户要求「直连不通自动改走代理」，
+> 这由 `dnsproxy --fallback`（`:5353` → `:5336`）在上游层完成，不需要应用层
+> 探测判定。而且 `watch.servers` 与 `dnschain-split.conf` 是两套并存的
+> `server=` 源，同域名两处都有规则时 dnsmasq 当**候选**而非覆盖 ——
+> 实测 `www.wikipedia.org` 因此拿到污染答案 `31.13.106.4`，
+> 而两条 dnsproxy 链本身都返回正确的 `103.102.166.224`。
+> 详见 `CHANGELOG.md` v0.22.0 与下方 §4.0「分流语义」。
 >
 > **但「代码在仓库」≠「现网已切换」**：需刷机后按 ADR-0004 逐项验证。
 > 判断现网是否已切换，看三样：
@@ -198,7 +203,7 @@ LAN 客户端
 > netstat -lnup | grep -E ':(5335|5353|5336)'
 >   # :5353 与 :5336 各应有一个 dnsproxy；:5335 应**无**监听（chinadns-ng 已移除）
 > uci -q get shadowsocksr.@global[0].pdnsd_enable   # 0 = 交给框架；4 = MosDNS
-> /usr/bin/dnschain-selftest                        # 20 项
+> /usr/bin/dnschain-selftest                        # 20 项（18/19 已改为「通道已清理」检查）
 > ```
 >
 > 该 ADR 取代了两份已撤回的文档（`0003-dns-chain-architecture.md`、
@@ -230,19 +235,29 @@ dnsmasq:53（唯一缓存 + 唯一分流层）
 | 3 | **分流只能由 dnsmasq 的 `server=/域名/` 承担，不能用 dnsproxy 的 `[/域名/]`** | dnsproxy 为每域名注册一条 reserved 上游 → 资源耗尽 → `connection timed out` |
 | 8 | **`init.d/dnsproxy` 必须保留 `dnschain_takes_over` 让位逻辑** | 两个 procd 实例抢 `:5353`，后起的静默失败 |
 | 12 | **`dnsmasq.filter_aaaa` 必须为 0** | 连国内 AAAA 一起砍（v0.10.0 起国外 AAAA 保留，见 §5.1） |
-| 17 | **`dhcp.@dnsmasq[0].serversfile` 必须下发且进程真带 `--servers-file`** | 只写文件不生效：页面显示「已改道」，实际没生效 |
+| 17 | ~~`dhcp.@dnsmasq[0].serversfile` 必须下发~~ **v0.22.0 起该通道已删除**：改由 `dnsproxy --fallback` 承担「直连不通改走代理」。`serversfile` 若有残留会被 `init.d/dnschain` 的 `clear_serversfile` 清掉 | 残留会让 dnsmasq 读不存在的文件并刷日志；若文件里还有旧规则，会与 `split.conf` 冲突并把正确分流覆盖成错误的 |
 | 33 | **清缓存/发 SIGHUP 必须用 `dc_dnsmasq_pid`（按 `:53` socket 反查），不得用 `pidof` 第一个** | 第一个 PID 是 ujail 辅助子进程，SIGHUP 是**空操作** → 按钮点了完全无效，页面却报成功 |
 | 41 | **一次配置应用只能重启 dnsmasq 一次**（标记文件 `/var/run/dnschain/.dnsmasq-dirty`） | 原调用链重启 3 次，一次保存断 9 秒以上 |
 
-**改道判定的一句话规则**：首选链不通、且另一条链通 → 切到另一条。
-**双链都不通时不改道** —— 那是链路故障，改道只会掩盖问题，页面标 `both-bad` 红档。
+**v0.22.0 起的分流语义**：客户机所有流量**先走直连**（`:5353`），
+直连上游不可用时由 `dnsproxy --fallback 127.0.0.1:5336` **自动改走代理**。
+不再有应用层的探测、判定、改道 —— 那套机制（`dc_health_cycle` +
+`watch.servers`）已整体删除。
+
+⚠️ `--fallback` 的地址格式必须是 `127.0.0.1:5336`（**冒号**），
+不能写 dnsmasq 的 `127.0.0.1#5336`。实测写成 `#` 时 dnsproxy
+直接拒绝启动，进程退出后端口无人监听、客户机全部无法解析。
+
+⚠️ `--fallback` 只在「上游不可用」时触发，**不判断答案是否被污染**。
+所以 gfw 名单仍必须保留（显式写 `server=/域名/#5336`）：
+名单兜「通但脏」，fallback 兜「真的不通」，两者互补。
 
 **改这一块之后必须跑**：
 
 ```sh
-sh tools/verify-dnschain-domains.sh          # 129 条契约断言（CI 也跑）
-python3 tools/check-dnschain-lua.py          # 121 条（需 PYTHONIOENCODING=utf-8）
-python3 tools/render-dnschain-diagrams.py    # 44 条
+sh tools/verify-dnschain-domains.sh          # 148 条契约断言（CI 也跑）
+python3 tools/check-dnschain-lua.py          # 108 条（需 PYTHONIOENCODING=utf-8）
+python3 tools/render-dnschain-diagrams.py    # 54 条
 python3 tools/extract-dnschain-i18n.py       # 中文文案完整性
 sh tools/verify-dnschain-ci-sim.sh           # 复现 CI 的目录场景
 ```
@@ -437,7 +452,7 @@ grep -n 'dnsmasq reload\|dnsmasq restart' /etc/init.d/shadowsocksr
 **⚠️ 仓库 overlay 与固件实况已漂移（同期发现）。** 路由器上两处调用确实是
 `reload`（符合意图），但仓库 `files/etc/uci-defaults/99-gaming-optimize:503`
 生成的代码**仍是** `/etc/init.d/dnsmasq restart`。下一次刷机可能把 reload 改回
-restart。落地 DNS 链路框架时须一并修正（见 `docs/adr/0003-dns-chain-framework.md` §2.7 D8）。
+restart。落地 DNS 分流框架时须一并修正（见 `docs/adr/0003-dns-chain-framework.md` §2.7 D8）。
 
 **⚠️ 但 `reload` 有一个已知副作用（v0.8.6 实测，尚未修）：它不重读 conf-dir。**
 dnsmasq 的 `SIGHUP` 只清缓存、不重新解析配置文件；而 OpenWrt 的

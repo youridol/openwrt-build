@@ -1,6 +1,6 @@
 #!/bin/sh /etc/rc.common
 # ============================================================
-# dnschain — DNS 链路框架服务脚本（procd）
+# dnschain — DNS 分流框架服务脚本（procd）
 # ------------------------------------------------------------
 # 本文件由 openwrt-build 仓库 files/ overlay 提供（非上游源码）。
 # 设计依据：docs/adr/0003-dns-chain-framework.md
@@ -63,8 +63,7 @@ generate_all() {
 	dnschain_log "生成国外 dnsproxy 参数..."
 	dc_gen_foreign_args >/dev/null || return 1
 
-	# 观测域名的动态上游（改道只改这个文件 + SIGHUP）
-	dc_gen_watch_servers >/dev/null || return 1
+	# v0.21.0：不再生成 watch.servers（健康改道已删除，见库文件注释）。
 
 	# 记录本次名单指纹，供收敛器判断是否需要重导
 	dc_lists_fingerprint > "$DNSCHAIN_STATE_DIR/lists.fingerprint"
@@ -118,39 +117,53 @@ update_dnsmasq_split() {
 }
 
 # ------------------------------------------------------------
-# 让 dnsmasq 加载 watch.servers（观测域名的动态上游）
+# v0.21.0：update_serversfile 已删除
 #
-# 通过 UCI 的 serversfile 选项下发 —— OpenWrt 的 dnsmasq init 脚本
-# 会把它转成 --servers-file（dnsmasq.init 里
-# `config_get serversfile "$cfg" "serversfile"` 那段）。
+# 它原本把 dhcp.@dnsmasq[0].serversfile 设为 watch.servers，让 dnsmasq
+# 通过 --servers-file 加载观测域名的动态上游（改道只 SIGHUP 不重启）。
 #
-# 为什么要走 UCI 而不是写 /etc/dnsmasq.conf：
-#   /etc/dnsmasq.conf 是用户可编辑文件，且 OpenWrt 的 init 会先加载它
-#   再追加 UCI 生成的行；两处都写会让同一个选项出现两次。
-#   写 UCI 只有一处真相，且页面能显示它。
+# 健康改道删除后不再需要这条通道。而且它正是缺陷根源：
+# watch.servers 与 dnschain-split.conf 是两套并存的 server= 源，
+# 同域名在两处都有规则时 dnsmasq 当**候选**而非覆盖，取哪条不确定 ——
+# 实测 www.wikipedia.org 因此拿到污染答案 31.13.106.4。
 #
-# ⚠️ 路径必须是 ujail 已挂载的目录（v0.13.0 实测踩过）：
-#   dnsmasq 由 ujail 降权到 uid 453 运行，只能看到 init 脚本里
-#   `procd_add_jail_mount` 声明过的路径。serversfile 指向别处时
-#   **既不报错也不生效** —— SIGHUP 成功、日志干净，改道却完全没发生。
-#   故 DNSCHAIN_WATCH_SERVERS 指向 /var/run/dnsmasq/（已 -rw 挂载）。
-#   验证方式：把它临时指向不存在的端口，改道应立即失效（详见
-#   docs/adr/0006 的「改道通道」一节）。
+# ⚠️ 删除前已实测确认（路由器 2026-10-25）：
+#   去掉 serversfile 后 dnsmasq 仍正常加载 split.conf
+#   （split.conf 走 conf-dir=/tmp/dnsmasq.d，与 servers-file 是两套独立机制）。
+#   去掉后 www.wikipedia.org 解析为 103.102.166.224（正确），
+#   且 dnsmasq 进程参数里 servers-file 确实消失。
+#
+# 若将来 dhcp.@dnsmasq[0].serversfile 仍残留旧值，dnsmasq 会尝试读一个
+# 可能不存在的文件并报错 —— 所以 start() 里要主动清掉它（见下方）。
 # ------------------------------------------------------------
-update_serversfile() {
-	local cur want
 
-	want="$DNSCHAIN_WATCH_SERVERS"
+# ------------------------------------------------------------
+# 清掉 dnsmasq 的 serversfile 设置（v0.21.0）
+#
+# 老版本会把 dhcp.@dnsmasq[0].serversfile 设成 watch.servers。
+# 升级到本版后该文件不再生成，但 UCI 里的旧值**不会自动消失** ——
+# dnsmasq 启动时会去读一个不存在的文件，在日志里报
+# `cannot read /var/run/dnsmasq/watch.servers: No such file`。
+#
+# 所以要主动清。判据用「值是否等于旧的 watch.servers 路径」而不是
+# 「值是否非空」—— 用户可能自己配了 serversfile 指向别处，那是他的选择，
+# 不该被我们清掉。
+# ------------------------------------------------------------
+clear_serversfile() {
+	local cur
+
 	cur=$(uci -q get dhcp.@dnsmasq[0].serversfile 2>/dev/null)
+	[ -n "$cur" ] || return 0
 
-	[ "$cur" = "$want" ] && return 0
+	# 只清我们自己以前写的那个值
+	[ "$cur" = "$DNSCHAIN_WATCH_SERVERS" ] || return 0
 
-	uci -q set "dhcp.@dnsmasq[0].serversfile=${want}" || {
-		dnschain_log "ERROR: 写入 dhcp.@dnsmasq[0].serversfile 失败"
+	uci -q delete dhcp.@dnsmasq[0].serversfile || {
+		dnschain_log "ERROR: 清理 dhcp.@dnsmasq[0].serversfile 失败"
 		return 1
 	}
 	uci -q commit dhcp
-	dnschain_log "已设置 serversfile=${want}（观测域名改道无需重启 dnsmasq）"
+	dnschain_log "已清理遗留的 serversfile=${cur}（改道通道已废弃）"
 	return 0
 }
 
@@ -399,9 +412,9 @@ start_service() {
 		return 1
 	fi
 
-	# 先生成 dnsmasq 的分流片段与动态上游文件，再启动两个 dnsproxy 实例
+	# 先生成 dnsmasq 的分流片段，再启动两个 dnsproxy 实例
 	update_dnsmasq_split
-	update_serversfile
+	clear_serversfile
 	reload_dnsmasq
 
 	start_dnsproxy
@@ -431,28 +444,20 @@ stop_service() {
 		# dnschain: 服务已停止（由 init.d/dnschain 管理）
 	EOF
 
-	# 健康状态是运行时事实：服务停了就该丢掉，否则下次启动会带着
-	# 上次的「已改道」状态继续跑，而那时链路可能是好的。
+	# v0.21.0：健康状态与 watch.servers 都已随改道功能删除。
+	#
+	# 原来这里做两件事：
+	#   ① rm -f health.state       —— 丢掉「已改道」状态
+	#   ② 把 watch.servers 清成注释占位 —— 防 dnsmasq 重启后读到
+	#      指向已停端口的 server=，导致观测域名稳定解析失败
+	#
+	# 两者都不再需要：没有改道就没有 health.state，也不再生成 watch.servers。
+	# 但**仍要清掉可能残留的 watch.servers 文件** —— 从老版本升级上来时
+	# 它可能还在 tmpfs 里（tmpfs 不随 stop 消失），而 dnsmasq 若仍带着
+	# --servers-file 就会读它。clear_serversfile 已清掉 UCI 设置，
+	# 这里把文件本身也删掉，双保险。
 	rm -f "$DNSCHAIN_HEALTH_STATE" 2>/dev/null
-
-	# ⚠️ 必须清空 watch.servers（v0.14.3 修），且**必须在重启 dnsmasq 之前**。
-	#
-	#   原实现没清它。而 `/var/run/dnsmasq/watch.servers` 是 tmpfs 文件、
-	#   不会随 stop 消失，且 `dhcp.@dnsmasq[0].serversfile` 仍指着它。
-	#   于是 stop 后重启 dnsmasq 会**重新读取**它，里面若有
-	#   `server=/github.com/127.0.0.1#5336` 而 :5336 已无人监听，
-	#   这些观测域名就变成稳定解析失败 —— 用户看到的是
-	#   「关掉框架后 github 打不开了」，而日志干净。
-	#
-	#   清成注释占位而不是删除：文件必须继续存在，否则 dnsmasq 启动时
-	#   读不到 serversfile 会在日志里报错（同 update_dot_reject 的理由）。
-	if [ -n "$DNSCHAIN_WATCH_SERVERS" ]; then
-		mkdir -p "$(dirname "$DNSCHAIN_WATCH_SERVERS")" 2>/dev/null
-		cat > "$DNSCHAIN_WATCH_SERVERS" <<-EOF
-			# dnschain: 服务已停止（由 init.d/dnschain 管理）
-		EOF
-		chmod 0644 "$DNSCHAIN_WATCH_SERVERS" 2>/dev/null
-	fi
+	[ -n "$DNSCHAIN_WATCH_SERVERS" ] && rm -f "$DNSCHAIN_WATCH_SERVERS" 2>/dev/null
 
 	if [ -x /etc/init.d/firewall ]; then
 		/etc/init.d/firewall reload >/dev/null 2>&1
@@ -476,9 +481,7 @@ reload_service() {
 		preflight || { rm -f "$DNSCHAIN_RESTART_FLAG"; return 1; }
 	fi
 	update_dnsmasq_split
-	update_serversfile
-	# 配置变了，旧的改道结论不再可信：清状态，按新归属重新开始
-	rm -f "$DNSCHAIN_HEALTH_STATE" 2>/dev/null
+	clear_serversfile
 	update_dot_reject
 
 	# 让 procd 重启实例（内部两次 reload_dnsmasq 都只登记）

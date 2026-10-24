@@ -361,6 +361,47 @@ def check_text_inside_boxes(name, svg):
         ok("%s 框内文字均在框宽内（%d 条已核对）" % (name, checked))
 
 
+def check_hint_not_overflow(name, svg):
+    """hint 文本必须落在它所在的框内（不折行也必须不越界）。
+
+    v0.21.0：档位从五档减到两档，hint 文案也变短，不再需要强制折行。
+    但「hint 画到框外」这个缺陷仍要防 —— 它曾导致
+    「两条链都不通 → 先查 dnsproxy 与代理」溢出 20px。
+    """
+    rects = []
+    for m in re.finditer(r'<rect x="(\d+)" y="(\d+)" width="(\d+)" height="(\d+)"', svg):
+        x, y, w, h = (int(g) for g in m.groups())
+        rects.append({"x": x, "y": y, "right": x + w, "bottom": y + h})
+
+    bad_n = 0
+    for m in re.finditer(
+        r'<text x="(\d+)" y="(\d+)" font-size="(\d+)"[^>]*>([^<]*)</text>', svg
+    ):
+        tx, ty, fs, raw = int(m.group(1)), int(m.group(2)), int(m.group(3)), m.group(4)
+        if fs != 10:
+            continue
+        txt = (raw.replace("&amp;", "&").replace("&lt;", "<")
+                  .replace("&gt;", ">").replace("&quot;", '"'))
+        if not txt.strip():
+            continue
+        w = text_width_px(txt, fs)
+        # 找到包住这条文本的框
+        host = None
+        for r in rects:
+            if r["x"] <= tx <= r["right"] and r["y"] <= ty <= r["bottom"]:
+                if host is None or r["w"] < host["w"]:
+                    host = r
+        if host is None:
+            continue
+        if tx + w > host["right"] + 2:
+            bad_n += 1
+
+    if bad_n == 0:
+        ok("%s hint 不溢出所在框" % name)
+    else:
+        bad("%s hint 溢出" % name, "%d 条文本越界" % bad_n)
+
+
 def check_hint_wrapped(name, svg):
     """状态图里带长 hint 的档必须真的折行。
 
@@ -423,31 +464,19 @@ def check_escaped(D):
 
 
 def sample_rows():
-    """构造一组覆盖全部状态档位的假数据。"""
-    return [
-        {"domain": "www.baidu.com", "class": "custom-domestic", "pref": "domestic",
-         "active": "domestic", "fail": 0, "ok": 0, "last": 1700000000,
-         "result": "OK", "state": "ok"},
-        {"domain": "www.google.com", "class": "custom-foreign", "pref": "foreign",
-         "active": "foreign", "fail": 0, "ok": 0, "last": 1700000000,
-         "result": "switch:OK->OK", "state": "rerouted"},
-        {"domain": "github.com", "class": "db-foreign", "pref": "foreign",
-         "active": "domestic", "fail": 0, "ok": 0, "last": 1700000000,
-         "result": "switch:TIMEOUT->OK", "state": "rerouted"},
-        {"domain": "www.wikipedia.org", "class": "db-foreign", "pref": "foreign",
-         "active": "foreign", "fail": 1, "ok": 0, "last": 1700000000,
-         "result": "probe:TIMEOUT", "state": "degraded"},
-        {"domain": "www.qq.com", "class": "uncovered", "pref": "domestic",
-         "active": "domestic", "fail": 0, "ok": 0, "last": 1700000000,
-         "result": "OK", "state": "ok"},
-        {"domain": "www.youtube.com", "class": "db-foreign", "pref": "foreign",
-         "active": "foreign", "fail": 0, "ok": 0, "last": 1700000000,
-         "result": "both-bad:TIMEOUT/TIMEOUT", "state": "both-bad"},
-        {"domain": "www.taobao.com", "class": "uncovered", "pref": "domestic",
-         "active": "domestic", "fail": 0, "ok": 0, "last": 0,
-         "result": "", "state": "unknown"},
-    ]
+    """构造一组覆盖两个链路的假数据（v0.21.0：五档 → 两档）。
 
+    字段从 state（健康状态）改为 chain（分流去向）：
+    status_map 现在只按 chain 分「走直连 / 走代理」两组。
+    """
+    return [
+        {"domain": "www.baidu.com",      "chain": "domestic"},
+        {"domain": "www.qq.com",         "chain": "domestic"},
+        {"domain": "www.taobao.com",     "chain": "domestic"},
+        {"domain": "www.google.com",     "chain": "foreign"},
+        {"domain": "www.youtube.com",    "chain": "foreign"},
+        {"domain": "github.com",         "chain": "foreign"},
+    ]
 
 def lua_table(L, py):
     t = L.eval("{}")
@@ -496,8 +525,9 @@ def main():
 
     layout = D.route_layout()
     check_note_clearance("判定链路图", route, layout)
-    # 判定链路图的节点只有两行（标题 + 副标题），没有第三行说明
-    check_text_fits_boxes("判定链路图", route, layout, lines=2)
+    # v0.16.4：落库节点现在带第三行说明（「域名 → custom-domestic.txt」），
+    # 故按 3 行校验下内边距。NH 已从 48 提到 64，64-53=11px ≥ 5。
+    check_text_fits_boxes("判定链路图", route, layout, lines=3)
 
     print("=== 改道状态图 ===")
     rows = lua_table(L, sample_rows())
@@ -511,7 +541,10 @@ def main():
         check_no_arrows("改道状态图", g2)
     check_intrinsic_size("改道状态图", status)
     check_text_inside_boxes("改道状态图", status)
-    check_hint_wrapped("改道状态图", status)
+    # v0.21.0：两档的 hint 都短（「国内直连出口，不经代理」≈12 字），
+    # 在 168px 折行上限内一行放得下 —— 不再要求「必须折行」。
+    # 但「不溢出」仍由 check_text_fits_boxes 保证，那才是真正要防的。
+    check_hint_not_overflow("改道状态图", status)
 
     # 状态图的档位数随数据变，用**真实行数据**算布局
     #
@@ -526,21 +559,21 @@ def main():
 
     # ── v0.14.4：未知 state 必须进图（行数守恒）─────────────────────
     weird = lua_table(L, [
-        {"domain": "a.example.com", "state": "ok"},
-        {"domain": "b.example.com", "state": ""},
-        {"domain": "c.example.com", "state": "weird-state"},
+        {"domain": "a.example.com", "chain": "domestic"},
+        {"domain": "b.example.com", "chain": ""},
+        {"domain": "c.example.com", "chain": "weird-chain"},
     ])
     wsvg = str(D.status_map(weird, L.eval("{}")))
     drawn = sum(1 for d in ("a.example.com", "b.example.com", "c.example.com")
                 if d in wsvg)
     if drawn == 3:
-        ok("未知/空 state 不丢弃（3 行进 3 个域名）")
+        ok("未知/空 chain 不丢弃（3 行进 3 个域名）")
     else:
-        bad("未知/空 state 不丢弃", "只画出 %d / 3 个域名" % drawn)
-    if "观测 3 个" in wsvg:
-        ok("根节点计数含未知 state（观测 3 个）")
+        bad("未知/空 chain 不丢弃", "只画出 %d / 3 个域名" % drawn)
+    if "共 3 个" in wsvg:
+        ok("根节点计数含全部行（共 3 个）")
     else:
-        bad("根节点计数含未知 state", "未出现「观测 3 个」")
+        bad("根节点计数含全部行", "未出现「共 3 个」")
 
     # ── v0.14.4：status_layout 与 status_map 必须一致 ────────────────
     import re as _re
@@ -742,8 +775,8 @@ def main():
     else:
         bad("status_map 支持 id_prefix 参数", "未找到 data-dc-figure=dcst-x")
 
-    # 状态图必须覆盖全部六档（数据里六档都有）
-    for st in ["正常", "降级中", "已改道", "双链故障", "未探测"]:
+    # 状态图必须覆盖全部两档（v0.21.0：五档健康状态 → 两档分流去向）
+    for st in ["走直连", "走代理"]:
         if st in status:
             ok("状态图含「%s」档" % st)
         else:
@@ -859,6 +892,17 @@ def main():
     else:
         bad("实时诊断图空数据时不报错", empty_live[:100])
 
+    # v0.21.0：分诊结果思维导图已删除（triage_map / triage_layout 移除）。
+    # 分诊功能整体删除后没有数据源，这张图也失去意义。
+    print("=== 分诊结果思维导图（已删除，跳过）===")
+    # D 是 lupa 的 Lua 表包装，hasattr 对它恒为 True（任何键都返回 nil
+    # 而不是抛 AttributeError），所以直接调用并捕获 TypeError 更可靠。
+    try:
+        _ = D.triage_map(L.eval("{}"))
+        bad("triage_map 已删除", "仍可调用")
+    except TypeError:
+        ok("triage_map 已删除")
+
     print("=== 空数据兜底 ===")
     empty = str(D.status_map(L.eval("{}"), L.eval("{}")))
     if "<svg" in empty:
@@ -900,11 +944,13 @@ def main():
 <label class="toggle"><input type="checkbox" onchange="
 	document.documentElement.setAttribute('data-darkmode', this.checked ? 'true' : 'false')">
 暗色主题</label>
-<h2>判定链路图（思维链路图）</h2>
+<h2>判定链路图（未知目标分诊规则）</h2>
 %s
 <h2>改道状态图（状态思维导图）</h2>
 %s
-</body></html>""" % (css, route, status)
+<h2>分诊结果思维导图（落点分布）</h2>
+%s
+</body></html>""" % (css, route, status, tri)
         with open(OUT, "w", encoding="utf-8") as f:
             f.write(html)
         print("")

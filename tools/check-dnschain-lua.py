@@ -115,6 +115,13 @@ _G.translate = function(s) return s end
 
 _G.nixio = { fs = {
 	access = function(p) return _G.__fs_access and _G.__fs_access[p] or false end,
+	-- v0.16.5：selftest / triage_rows 加了跨请求 TTL 缓存，用 fs.stat 取 mtime。
+	-- 桩必须提供 stat，否则所有走缓存的 cfgvalue 都会抛
+	-- "attempt to call a nil value (field 'stat')" —— 实测一次挂掉 20 条断言。
+	--
+	-- 返回 nil 表示「缓存文件不存在」→ 被测代码走真跑分支，
+	-- 这正是测试想要的（每次都能拿到桩数据，不会读到上一轮的缓存）。
+	stat = function(p, what) return nil end,
 } }
 
 -- require 拦截：把 LuCI 的模块名映射到上面的桩。
@@ -184,7 +191,7 @@ def test_controller():
     L.execute("index()")
     check_eq("缺配置时不注册菜单", L.eval("#_G.__entries"), 0)
 
-    # 情况二：配置存在 → 注册到 服务 → DNS 链路
+    # 情况二：配置存在 → 注册到 服务 → DNS 分流
     L.execute("_G.__fs_access = { ['/etc/config/dnschain'] = true }")
     L.execute("_G.__entries = {}")
     L.execute("index()")
@@ -192,7 +199,8 @@ def test_controller():
     check_eq("菜单位置", L.eval("table.concat(_G.__entries[1].path, '/')"),
              "admin/services/dns_chain")
     check_eq("菜单排序 20", L.eval("_G.__entries[1].order"), 20)
-    check_eq("标题为「DNS 链路」", L.eval("_G.__entries[1].title"), "DNS 链路")
+    # v0.16.4 全局改名：「DNS 链路」→「DNS 分流」（只改显示文案）
+    check_eq("标题为「DNS 分流」", L.eval("_G.__entries[1].title"), "DNS 分流")
     # leaf 会让侧边栏该项消失（v0.12.0 实测），必须没有
     check_eq("不设 page.leaf", L.eval("_G.__entries[1].leaf"), None)
 
@@ -253,68 +261,32 @@ _G.__exec["netstat -lntup 2>/dev/null"] =
              L.eval("(function() local t = __M.listen_table(); "
                     "return t['udp:5353'] or '' end)()"), "17071")
 
-    # 健康状态行解析
+    # v0.21.0：health_rows / health_summary / serversfile_ready / health_daemon
+    # 的测试已删除 —— 这四个函数随健康改道一起移除。
     #
-    # 注意：行是 Lua table，字段名 class 与 Python 关键字同名，
-    # 故一律用下标访问（rows[i]["class"]），不用属性访问。
-    rows = M.health_rows()
-    check_eq("健康行数", len(rows), 2)
-    check_eq("第 1 行域名", rows[1]["domain"], "github.com")
-    check_eq("第 1 行归属", rows[1]["class"], "db-foreign")
-    check_eq("第 1 行首选", rows[1]["pref"], "foreign")
-    check_eq("第 1 行当前", rows[1]["active"], "domestic")
-    check_eq("第 1 行失败计数", rows[1]["fail"], 2)
-    check_eq("第 1 行状态", rows[1]["state"], "rerouted")
-
-    # 汇总
-    s = M.health_summary()
-    check_eq("汇总 total", s["total"], 2)
-    check_eq("汇总 rerouted", s["rerouted"], 1)
-    check_eq("汇总 normal", s["normal"], 1)
-
+    # 保留 explain 与 shell_quote 的测试：explain 仍在用（单域名解释），
+    # 只是入口从 dnschain-health 换成了 dnschain-selftest。
     # explain
+    # v0.21.0：explain 入口从 dnschain-health 换到 dnschain-selftest。
+    #
+    # ⚠️ 必须把桩注入**当前这个 L**（make_runtime 建的），
+    #    不能只写进后面 make_cbi_runtime 的 exec_table —— 那是另一个运行时。
+    L.execute(r"""
+_G.__exec["/usr/bin/dnschain-selftest explain 'github.com' 2>/dev/null"] =
+	"DOMAIN=github.com\nCLASS=db-foreign\nPREFERRED=foreign\nACTIVE=foreign\n" ..
+	"WATCH=0\nCUSTOM=0\nPROBE_DOMESTIC=OK\nPROBE_FOREIGN=OK\n" ..
+	"ANSWER_DOMESTIC=1.2.3.4\nANSWER_FOREIGN=5.6.7.8\n" ..
+	"DECISION=keep-foreign\nREASON=按归属走代理\n"
+""")
     e = M.explain("github.com")
     check_eq("explain CLASS", e["CLASS"], "db-foreign")
-    check_eq("explain DECISION", e["DECISION"], "reroute-domestic")
-    check_contains("explain REASON", e["REASON"], "改走直连")
+    check_eq("explain PREFERRED", e["PREFERRED"], "foreign")
 
     # shell 转义：单引号必须被转成 '\''，否则可以逃逸出引号
     check_eq("转义普通串", M.shell_quote("abc"), "'abc'")
     check_eq("转义单引号", M.shell_quote("a'b"), "'a'\\''b'")
     check_contains("转义带空格", M.shell_quote("a b"), "'a b'")
 
-    # serversfile_ready 的三条判据（v0.13.0 修正）
-    #
-    # ⚠️ 判据从「argv 里有 --servers-file」改成「生效配置里有 servers-file」：
-    #   OpenWrt 的 dnsmasq init 是 append_parm，把它写进配置文件而不是
-    #   命令行。按 argv 判定会永远报「未就绪」，页面于是显示一个
-    #   不存在的故障。
-    L.execute(r"""
-_G.__exec["netstat -lntup 2>/dev/null"] =
-	"udp        0      0 192.168.3.254:53   0.0.0.0:*           16800/dnsmasq\n"
-""")
-    M.invalidate("listen_table")
-
-    # 文件不存在 → file-missing（不能崩）
-    r = M.serversfile_ready()
-    check_eq("serversfile 文件缺失时给 file-missing", r.reason, "file-missing")
-    check_eq("serversfile 缺失时 ready=false", str(r.ready), "False")
-
-    # 补上 /proc 与配置文件后应就绪
-    L.execute(r"""
-if not _G.__fs_access then _G.__fs_access = {} end
-_G.__fs_access["/var/run/dnsmasq/watch.servers"] = true
-""")
-    M.invalidate("serversfile_ready")
-
-    # 新增：health_daemon 必须在无守护进程时如实报 running=false
-    L.execute(r"""
-_G.__exec["ls -d /proc/[0-9]* 2>/dev/null"] = "/proc/1\n/proc/2\n"
-""")
-    M.invalidate("health_daemon")
-    hd = M.health_daemon()
-    check_eq("health_daemon 无进程时报 running=false", str(hd.running), "False")
-    check_eq("health_daemon 读取 enabled 开关", str(hd.enabled), "True")
 
 
 CBI_STUB = r"""
@@ -371,6 +343,7 @@ end
 _G.NamedSection = "NamedSection"
 _G.TypedSection = "TypedSection"
 _G.DynamicList = "DynamicList"
+_G.TextValue = "TextValue"
 _G.Value = "Value"
 _G.Flag = "Flag"
 _G.ListValue = "ListValue"
@@ -412,6 +385,10 @@ _G.luci.http = {
             "package/luci-app-dnschain/luasrc/model/cbi/dnschain/dnschain.lua")
     preload("luci.model.cbi.dnschain.diagrams",
             "package/luci-app-dnschain/luasrc/model/cbi/dnschain/diagrams.lua")
+    # v0.18.0：general.lua 新增 require diagnosis（归组 + 证据→症状推导）。
+    # 不 preload 会让整份 general.lua 加载失败 —— 实测一次挂掉 78 条断言。
+    preload("luci.model.cbi.dnschain.diagnosis",
+            "package/luci-app-dnschain/luasrc/model/cbi/dnschain/diagnosis.lua")
     return L
 
 
@@ -455,12 +432,13 @@ def test_general():
 		"udp        0      0 127.0.0.1:5353     0.0.0.0:*           17071/dnsproxy\n" ..
 		"udp        0      0 127.0.0.1:5336     0.0.0.0:*           17072/dnsproxy\n" ..
 		"tcp        0      0 0.0.0.0:1234       0.0.0.0:*   LISTEN  17080/v2ray\n",
-	["/usr/bin/dnschain-health status 2>/dev/null"] =
-		"ROW github.com|db-foreign|foreign|domestic|2|0|1700000000|switch:TIMEOUT->OK|rerouted\n" ..
-		"ROW www.qq.com|uncovered|domestic|domestic|0|0|1700000000|OK|ok\n" ..
-		"ROW www.youtube.com|db-foreign|foreign|foreign|0|0|1700000000|both-bad:TIMEOUT/TIMEOUT|both-bad\n" ..
-		"SUM total=3 normal=1 degraded=0 rerouted=1 both_bad=1 fixed=0\n",
-	["/usr/bin/dnschain-health check 2>&1"] = "OK\n",
+	-- v0.21.0：dnschain-health / dnschain-triage 已删除，
+	-- 对应的模拟输出一并移除；explain 改由 selftest 提供。
+	["/usr/bin/dnschain-selftest explain 'github.com' 2>/dev/null"] =
+		"DOMAIN=github.com\nCLASS=db-foreign\nPREFERRED=foreign\nACTIVE=foreign\n" ..
+		"WATCH=0\nCUSTOM=0\nPROBE_DOMESTIC=OK\nPROBE_FOREIGN=OK\n" ..
+		"ANSWER_DOMESTIC=1.2.3.4\nANSWER_FOREIGN=5.6.7.8\n" ..
+		"DECISION=keep-foreign\nREASON=按归属走代理\n",
 }"""
 
     L = make_cbi_runtime(exec_table)
@@ -551,35 +529,54 @@ end
     alltext = str(L.eval("__collect_text()"))
 
     for needle, desc in [
-        ("域名判定链路图", "判定链路图 aria-label"),
-        ("改道状态思维导图", "状态导图 aria-label"),
-        ("直连链路", "链路图含直连链路节点"),
-        ("代理链路", "链路图含代理链路节点"),
-        ("自动改走直连", "图下写明需求规则"),
-        ("未录入自定义列表的域名", "图下写明适用条件"),
-        ("双链故障", "状态图含双链故障档"),
+        # ── v0.19.0：判定链路规则图已删除 ──────────────────────────
+        #
+        # 它画的「入口 → ①试直连 → ②试代理 → ③dead」与「DNS 分流状态」
+        # 里的分流去向图语义重叠：前者讲规则、后者讲事实，用户只需后者。
+        #
+        # ⚠️ 规则内容本身**没有丢失** —— 它仍完整记录在
+        #    docs/runtime/dns-chain.md 与分诊脚本头部注释里。
+        #    因此这里断言「页面不再渲染规则图」，
+        #    而不是断言图内文案（图已不存在）。
+        #
+        # 「单域名解释」保留（用户确认），断言它的 aria 与输入框仍在。
+        ("DNS 分流去向导图", "分流去向图 aria-label"),
+        # 「单域名解释」保留（用户确认）。它渲染的是输入框 + 提示文案，
+        # option 的 label 不进 cfgvalue 输出，所以断言输入框的 placeholder。
+        ("输入域名，例如 github.com", "单域名解释的输入框仍在（原判定链路功能保留）"),
         ("github.com", "明细表含观测域名"),
         # 原因串里的 > 会被 dg.esc 转义成 &gt; —— 这是**正确**行为
         # （域名/原因来自配置，含 < > 时不转义会让整个 SVG/HTML 解析失败）。
         # 断言按转义后的形式写，否则这条会永远失败。
-        ("switch:TIMEOUT-&gt;OK", "明细表含改道原因（已转义）"),
         ("dc-badge", "含状态徽标"),
         ("dc-table-wrap", "表格套滚动容器"),
-        # ── v0.15.0：实时诊断链路图 ──────────────────────────────
+        # ── v0.15.0：链路拓扑图（原「实时诊断链路思维导图」）──────
         # 用户要求「加上实时诊断的链路思维导图」。
         # 它把 selftest 的 20 项按链路阶段重新分组，逐段给状态与证据。
         #
-        # v0.16.3：从纵向列表改成思维导图，aria-label 同步改为
-        # 「实时诊断链路思维导图」（与页面其余三张图统一为「…思维导图」）。
-        ("实时诊断链路思维导图", "实时诊断链路思维导图 aria-label"),
+        # v0.16.3：从纵向列表改成思维导图，aria-label 改为「实时诊断链路思维导图」。
+        # v0.18.0：与「解析链路」合并为一张**链路拓扑图**（ADR-0007 §2.3），
+        #          aria-label 随之改为「链路拓扑图」——
+        #          新图既画结构也画状态，不再是「诊断」这一个侧面。
+        ("链路拓扑图", "链路拓扑图 aria-label"),
         ("dc-chain--live", "实时诊断图有独立样式类"),
         ("客户机入口", "实时诊断图含客户机入口阶段"),
         ("国外链路", "实时诊断图含国外链路阶段"),
         ("代理与分流", "实时诊断图含代理阶段"),
         ("分流规则", "实时诊断图含分流规则阶段"),
         ("双栈与端口", "实时诊断图含双栈阶段"),
+        # v0.21.0：分诊结果面板已删除。分流去向图改为两档（直连/代理），
+        # 断言它存在且含两档标题。
+        ("走直连", "分流去向图含直连档"),
+        ("走代理", "分流去向图含代理档"),
+        ("dc-details", "折叠区用原生 details"),
     ]:
         check_contains("页面含 %s" % desc, alltext, needle)
+
+    # v0.21.0：分诊三个开关（triage_enabled / triage_max / triage_conc）
+    # 随分诊功能一起删除，断言反向化 —— 防止有人把它们加回来。
+    for key in ["triage_enabled", "triage_max", "triage_conc"]:
+        check_not_contains("分诊开关 %s 已删除" % key, src, '"%s"' % key)
 
     # ── v0.15.0：箭头必须全部移除 ────────────────────────────────
     #
@@ -595,6 +592,10 @@ end
     # 判定链路图在合并前被渲染两次（概览的「分流决策」+ 域名的「走法」），
     # 是同一函数 dg.route_map 的两份输出 —— 真正的重复。
     #
+    # v0.19.0：该图已**整张删除**，故期望值从 1 改为 0。
+    # 这条断言从「不得重复渲染」变成「不得再出现」——
+    # 防止有人因为「图看起来少了」把它加回来。
+    #
     # ⚠️ 统计口径：本测试脚本会把 general.lua 加载两次（__chunk2 之前已
     #    加载过一次），故 __opts 里每个 option 都注册了两份，直接数
     #    alltext 里的出现次数会恒为 2×N。这里改为**按 option 名去重**后
@@ -605,7 +606,7 @@ end
 	for _, o in ipairs(_G.__opts) do
 		if o.kind == "DummyValue" and type(o.cfgvalue) == "function" then
 			local okc, res = pcall(o.cfgvalue, o)
-			if okc and res and tostring(res):find("域名判定链路图", 1, true) then
+			if okc and res and tostring(res):find("未知目标分诊链路图", 1, true) then
 				if not seen[o.name] then
 					seen[o.name] = true
 					n = n + 1
@@ -616,7 +617,7 @@ end
 	return n
 end)()
 """)
-    check_eq("判定链路图只由一个 option 渲染（不重复）", int(n_route_opts), 1)
+    check_eq("判定链路规则图已删除（不得再渲染）", int(n_route_opts), 0)
 
     # 空数据兜底：状态表在无数据时应给提示而不是空白
     #
@@ -629,32 +630,31 @@ end)()
     L.execute("__chunk3 = function()\n" + src + "\nend")
     L.eval("__chunk3()")
     empty_text = str(L.eval("__collect_text()"))
-    check_contains("无探测数据时给提示", empty_text, "还没有探测数据")
-    check_contains("无数据时图仍在", empty_text, "改道状态思维导图")
+    # v0.21.0：静态分流图没有「无探测数据」这个状态 ——
+    # 空数据时仍画出两档（各 0 个），所以只断言图还在。
+    check_contains("无数据时图仍在", empty_text, "DNS 分流去向导图")
 
     # explain 路径：带 dc_explain 参数
     L.execute('_G.__formvalue = { dc_explain = "github.com" }')
     L.execute(r"""
-_G.__exec["/usr/bin/dnschain-health explain 'github.com' 2>/dev/null"] =
-	"DOMAIN=github.com\nCLASS=db-foreign\nPREFERRED=foreign\nACTIVE=domestic\n" ..
-	"WATCH=1\nFIXED=0\nPROBE_DOMESTIC=OK\nPROBE_FOREIGN=TIMEOUT\n" ..
-	"ANSWER_DOMESTIC=1.2.3.4\nANSWER_FOREIGN=\n" ..
-	"DECISION=reroute-domestic\nREASON=国外链路 TIMEOUT 不可达、国内链路可达 → 改走直连\n"
+_G.__exec["/usr/bin/dnschain-selftest explain 'github.com' 2>/dev/null"] =
+	"DOMAIN=github.com\nCLASS=db-foreign\nPREFERRED=foreign\nACTIVE=foreign\n" ..
+	"WATCH=0\nCUSTOM=0\nPROBE_DOMESTIC=OK\nPROBE_FOREIGN=OK\n" ..
+	"ANSWER_DOMESTIC=1.2.3.4\nANSWER_FOREIGN=5.6.7.8\n" ..
+	"DECISION=keep-foreign\nREASON=按归属走代理\n"
 """)
     L.execute("_G.__opts = {}")
     L.execute("__chunk4 = function()\n" + src + "\nend")
     L.eval("__chunk4()")
     exp_text = str(L.eval("__collect_text()"))
-    check_contains("解释结果含归属", exp_text, "数据库命中")
-    check_contains("解释结果含判定", exp_text, "改走直连")
-    check_contains("解释结果含理由", exp_text, "改走直连</td>") if False else None
-    check_contains("解释结果含探测", exp_text, "TIMEOUT")
+    check_contains("解释结果含归属", exp_text, "数据库")
+    check_contains("解释结果含探测", exp_text, "OK")
     check_contains("解释结果含答案对比", exp_text, "1.2.3.4")
 
     # 非法域名走 reject 分支
     L.execute('_G.__formvalue = { dc_explain = "not a domain" }')
     L.execute(r"""
-_G.__exec["/usr/bin/dnschain-health explain 'not a domain' 2>/dev/null"] =
+_G.__exec["/usr/bin/dnschain-selftest explain 'not a domain' 2>/dev/null"] =
 	"DOMAIN=not a domain\nCLASS=invalid\nDECISION=reject\nREASON=域名格式不合法\n"
 """)
     L.execute("_G.__opts = {}")
@@ -841,15 +841,18 @@ def test_v0144_fixes():
         ok("apply 结果用 apply_message 统一解析")
     else:
         bad("apply 结果统一解析", "未找到 apply_message")
-    for state in ("restarted", "sighup", "unchanged", "skipped"):
-        if '"%s"' % state in g:
-            ok("apply_message 覆盖 %s 出口" % state)
+    # v0.21.0：apply 的输出契约变了（DNSMASQ=<state> → OK=/ERROR=），
+    # 断言随之改为验这两个键，以及失败出口仍然优先判。
+    for key, desc in [("OK=", "成功出口 OK="), ("ERROR=", "失败出口 ERROR=")]:
+        if key in g:
+            ok("apply_message 覆盖 %s" % desc)
         else:
-            bad("apply_message 覆盖 %s 出口" % state, "缺该键")
-    if '"✓ " .. translate("已应用")' in g_code:
-        bad("应用按钮不再无条件打 ✓", "仍有硬编码 ✓")
+            bad("apply_message 覆盖 %s" % desc, "缺 %s" % key)
+    # 失败必须优先判（v0.14.4 S6：ERROR 时不能显示 ✓）
+    if 'local err = out:match("ERROR=' in g:
+        ok("apply_message 失败出口优先于成功")
     else:
-        ok("应用按钮不再无条件打 ✓")
+        bad("apply_message 失败出口优先", "未先判 ERROR=")
 
     # ── M1：页面校验与 shell 对齐 ──
     for marker, name in [
@@ -863,11 +866,11 @@ def test_v0144_fixes():
         else:
             bad("validate_domain 覆盖 %s" % name, "缺该判据")
 
-    # ── M5：%w 不含下划线 ──
-    if "([%w_]+)=(%d+)" in d:
-        ok("health_summary 用 [%w_] 解析（含下划线键）")
+    # ── M5：v0.21.0 health_summary 已删除，改为反向断言 ──
+    if "function M.health_summary" in d:
+        bad("health_summary 已删除", "仍有定义")
     else:
-        bad("health_summary 解析含下划线", "仍用 %w+")
+        ok("health_summary 已删除（原 M5 下划线解析断言随之失效）")
 
     # ── M6：reconcile 结果不再恒 true ──
     if "local function exec_ok" in d:
@@ -925,11 +928,11 @@ def test_v0144_fixes():
     else:
         bad("selftest 表格转义", "未套 dg.esc")
 
-    # ── L3：last=0 显示 — ──
-    if 'os.date("%H:%M:%S", r.last)' in g:
-        ok("last=0 不渲染成 08:00:00（显示 —）")
+    # ── L3：v0.21.0 起「最近探测时间」列随改道明细一起删除 ──
+    if "r.last" in g:
+        bad("改道明细的 r.last 已删除", "仍在渲染 r.last")
     else:
-        bad("last=0 处理", "仍用 r.last or 0")
+        ok("改道明细的 r.last 已删除")
 
     # ── L4：STATUS_H 死常量已删 ──
     if "STATUS_H" in dg_code:

@@ -1,5 +1,5 @@
 # ============================================================
-# dnschain — DNS 链路框架配置
+# dnschain — DNS 分流框架配置
 # ------------------------------------------------------------
 # 本文件由 openwrt-build 仓库 files/ overlay 提供。
 # 设计依据：docs/adr/0003-dns-chain-framework.md
@@ -52,6 +52,17 @@ config dnschain 'main'
 	option intercept_dot '1'
 	# 尽力而为地阻断已知公共 DoH（443 无法可靠区分，仅标注）
 	option intercept_doh '0'
+	# ── 自动分诊（v0.16.4 起在页面上可配）──────────────────────
+	# 对「不在 GFW 名单、不在 blacklist、不在 china、不在任何数据库」的
+	# 目标执行：① 试直连 → ② 试代理 → ③ 标记 dead。
+	# 跑通的落库：IP 一律先算成 CIDR 段再进集合，域名进 dom_domestic /
+	# dom_foreign。dead 不进任何集合。
+	option triage_enabled '1'
+	# 每轮最多分诊多少个目标（按每目标最坏 6 秒估算）
+	option triage_max '12'
+	# 并发数。8 是 4 核 N2930 的实测平衡点：串行 12 目标 41 秒，
+	# 8 并发约 8 秒。再高会让 curl 争抢 CPU，收益递减。
+	option triage_conc '8'
 
 config upstream 'cn'
 	# 国内加密池：DoT 与 DoH 混用，dnsproxy 并行查询取最快

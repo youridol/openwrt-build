@@ -1,5 +1,5 @@
 -- Copyright (C) 2026 openwrt-build
--- 网络 → DNS 链路
+-- 服务 → DNS 分流
 -- 设计依据: docs/adr/0003-dns-chain-framework.md / 0005-remove-chinadns-ng.md
 --
 -- 页面定位：DNS 配置总控台。集中管理 dnsmasq / dnsproxy / SSR-Plus
@@ -35,11 +35,14 @@
 
 local ds = require "luci.model.cbi.dnschain.dnschain"
 local dg = require "luci.model.cbi.dnschain.diagrams"
+-- v0.18.0：归组规则与「证据→症状」推导独立成模块（纯函数，可单测）。
+-- 别名 dg2 是为了不与 dg（绘图层）混淆：dg 只管画，dg2 只管判断。
+local dg2 = require "luci.model.cbi.dnschain.diagnosis"
 
 local m, s, o
 
-m = Map("dnschain", translate("DNS 链路"),
-	translate("集中控制 DNS 解析链路。dnsmasq / dnsproxy / SSR-Plus " ..
+m = Map("dnschain", translate("DNS 分流"),
+	translate("集中控制 DNS 解析分流。dnsmasq / dnsproxy / SSR-Plus " ..
 		"三层的可控参数都在这里，按功能分 Tab。"))
 
 ------------------------------------------------------------------------
@@ -95,13 +98,20 @@ end
 --   故映射表用 translate 后的值建键。
 ------------------------------------------------------------------------
 
+-- v0.19.0：6 个 tab 重划为 4 个（依据见下方 SECTION_TAB 顶部注释）。
+--
+-- 旧的 overview/resolve/split/proxy/dhcp 五个 id 合并为 status/upstream/lists：
+--   overview          → status
+--   resolve+proxy+dhcp → upstream
+--   split             → lists
+--   domains           → domains（不变）
+--
+-- ⚠️ 改这里必须同步改 dnschain.js 的 TAB_ORDER，否则 tab 不显示或顺序错乱。
 local TAB_LABELS = {
-	overview = translate("概览与诊断"),
+	status   = translate("状态"),
 	domains  = translate("域名"),
-	resolve  = translate("解析"),
-	split    = translate("分流"),
-	proxy    = translate("代理"),
-	dhcp     = translate("DHCP"),
+	upstream = translate("上游"),
+	lists    = translate("名单"),
 }
 
 -- section 标题 → tab
@@ -131,34 +141,66 @@ local TAB_LABELS = {
 --      端口/进程的实时快照、后者是端到端判定，视角不同，都保留。
 --
 -- 合并后 tab 由 7 个减为 6 个，「诊断」不再是独立 tab。
+--
+-- ══ v0.19.0：tab 由 6 个重划为 4 个 ══════════════════════════════
+--
+-- ── 重划依据：DNS 分流只有三个动作，且都已自动化 ────────────────
+--
+--   判定（该走哪条链）→ 分诊实测 + 归属库 + 健康改道   已自动
+--   落地（写成 dnsmasq 规则）→ dc_gen_dnsmasq_split    已自动
+--   生效（让 dnsmasq 读到）→ apply_on_parse（保存即生效）已自动
+--
+--   所以页面只需提供两件事：
+--     ① 告诉用户「现在什么状态」
+--     ② 让用户输入「我认为该走哪条链」的域名
+--   其余全是参数与诊断。
+--
+-- ── 4 个 tab ───────────────────────────────────────────────────
+--
+--   status  状态：现在通不通、分流到哪了        ← 原 overview
+--   domains 域名：哪些域名我指定了走哪条        ← 原 domains
+--   upstream 上游：往哪儿问、怎么问             ← 原 resolve + proxy + dhcp
+--   lists   名单：规则库从哪来、多大、怎么体检   ← 原 split + 观测阈值 + 自检
+--
+-- 删除的两个 tab：
+--   「分流」只有「名单规模」一个 section → 并入 lists
+--   「代理」「DHCP」都是上游行为 → 并入 upstream
 local SECTION_TAB = {
-	-- 概览与诊断（合并）
-	[translate("当前状态")]      = "overview",
-	[translate("自检")]          = "overview",
-	[translate("操作")]          = "overview",
+	-- ── 状态 ───────────────────────────────────────────────────
+	[translate("当前状态")]      = "status",
+	-- v0.22.0：改名为「DNS 分流去向」（原「DNS 分流状态」），并**登记进本表**。
+	--
+	-- ⚠️ 登记是必须的，漏了会让它在**每个 tab 都显示**。
+	--    dnschain.js 的 activate() 对未归组 section 的处理是
+	--    `if (!sec.tab) { sec.el.hidden = false; return; }` ——
+	--    原意是「避免新增 section 后莫名消失」，但代价是它永远可见。
+	--    实测（v0.22.0 改造后）：这张图在状态/域名/上游/名单 4 个 tab
+	--    全都渲染，用户要求「仅保留状态 tab 里的这张图」。
+	[translate("DNS 分流去向")]  = "status",
+	[translate("操作")]          = "status",
+	-- 自检是「状态检查」，与断点诊断同类，放状态 tab（用户确认 Q5）
+	[translate("自检")]          = "status",
 
-	-- 域名 tab（v0.13.0）：自定义列表 + 判定链路 + 状态导图 + 改道表
+	-- ── 域名 ───────────────────────────────────────────────────
 	[translate("自定义域名 · 国内（补全归属）")] = "domains",
 	[translate("自定义域名 · 国外（补全归属）")] = "domains",
-	[translate("判定链路")]      = "domains",
-	[translate("改道状态")]      = "domains",
-	[translate("改道明细")]      = "domains",
-	[translate("分诊结果")]      = "domains",
-	[translate("观测与阈值")]    = "domains",
-	[translate("域名操作")]      = "domains",
+	-- v0.18.0：原先它挂在 dom_foreign 的 `s` 下（渲染在国外 section 内），
+	-- 但内容是「国内+国外两个清单的合并只读视图」，语义不属国外。
+	[translate("已录入清单")]     = "domains",
 
-	[translate("国内上游")]      = "resolve",
-	[translate("国外上游")]      = "resolve",
-	[translate("双栈策略")]      = "resolve",
-	[translate("端口与实例")]    = "resolve",
-	[translate("缓存")]          = "resolve",
+	-- ── 上游 ───────────────────────────────────────────────────
+	[translate("国内上游")]      = "upstream",
+	[translate("国外上游")]      = "upstream",
+	[translate("双栈策略")]      = "upstream",
+	[translate("端口与实例")]    = "upstream",
+	[translate("缓存")]          = "upstream",
+	[translate("SSR-Plus 兼容")] = "upstream",
+	[translate("拦截与框架开关")] = "upstream",
+	[translate("DHCP 下发 DNS（明文）")] = "upstream",
 
-	[translate("名单规模")]      = "split",
-
-	[translate("SSR-Plus 兼容")] = "proxy",
-	[translate("拦截与框架开关")] = "proxy",
-
-	[translate("DHCP 下发 DNS（明文）")] = "dhcp",
+	-- ── 名单 ───────────────────────────────────────────────────
+	[translate("名单规模")]      = "lists",
+	-- v0.22.0：观测与阈值 section 已随健康探测删除，本条随之移除。
 }
 
 --- 输出 tab 元数据 + 加载静态资源
@@ -221,7 +263,7 @@ local function emit_tab_meta(map)
 		--   （tools/check-dnschain-lua.py）的桩缺失而整个文件加载失败
 		--   （实测 PASS 从 132 掉到 78，报 "general.lua 能加载 FAIL"）。
 		--   包版本是常量、无依赖，且语义正好 —— 「包升级了，资源该重拉」。
-		local ver = "?v=1.3.3"
+		local ver = "?v=1.8.0"
 
 		return string.format(
 			'<link rel="stylesheet" href="%s/dnschain/dnschain.css%s">' ..
@@ -300,411 +342,201 @@ function o.cfgvalue()
 	return string.format('<span class="dc-badge dc-badge--%s">%s</span>', tone, concl)
 end
 
--- ── 链路图 ────────────────────────────────────────────────────────
-o = s:option(DummyValue, "_chain_graph", translate("解析链路"))
-o.rawhtml = true
-function o.cfgvalue()
-	local sn = ds.chain_snapshot()
-
-	-- 颜色取自 CSS 变量，跟随明暗主题（不在 Lua 里硬编码色值）
-	local function c(alive, warn)
-		if warn then return "var(--dc-warn)" end
-		return alive and "var(--dc-ok)" or "var(--dc-bad)"
-	end
-
-	-- ── 思维导图布局 ──────────────────────────────────────────────
-	--
-	-- 结构：左起单主干，在 dnsmasq 处一分为二（国内 / 国外两支），
-	-- 之后各支再向右延伸。这正是实际的解析路径。
-	--
-	--        ┌─ dnsproxy国内 ── 国内上游
-	-- LAN ─ dnsmasq ─┤
-	--        └─ dnsproxy国外 ── SSR-Plus ── 国外上游
-	--
-	-- 连线全部用三次贝塞尔（C 指令）：
-	--   v0.12.5 之前用直角折线（H V H），分叉处是硬拐角，视觉上像
-	--   「断链」；改成贝塞尔后曲率连续，从节点边缘平滑出发。
-	--
-	-- ⚠️ 几何约束（改坐标必须同步改 W，CI 有断言）：
-	--   最右节点 x = X5 = X4 + NW + GAP
-	--   右边缘     = X5 + NW
-	--   viewBox 宽 = W 必须 > 右边缘，留出边距
-	--
-	-- 列间距的取舍（v0.12.5）：
-	--   dnsmasq 到 dnsproxy 那一列必须留出足够水平空间，否则分叉曲线
-	--   的控制点无处安放（dx 上限 = 跨度/2），只能画成近乎垂直的折线。
-	--   实测 X2→X3 从 188 拉到 216 后，曲线才有明显弧度。
-	local W, H = 1120, 372
-	local NW, NH = 128, 54
-	local X1, X2, X3, X4 = 12, 228, 444, 720
-	local GAP = 88
-	local X5 = X4 + NW + GAP
-	local YT, YB = 58, 226
-
-	-- 各节点的垂直中心
-	local YC = (YT + YB) / 2 + NH / 2   -- 主干中线
-	local YTC = YT + NH / 2
-	local YBC = YB + NH / 2
-
-	local p = {}
-	-- 给固有尺寸（width/height）：与两张导图一致，避免 CSS `width:auto`
-	-- 在缺固有尺寸时回落到 100% 而放大。概览图本来就要自适应宽度，
-	-- 由 `.dc-chain svg { width:100%; height:auto }` 覆盖这里的属性值，
-	-- 所以写上是「有据可依的默认值」，不影响现有自适应行为。
-	p[#p + 1] = string.format(
-		'<div class="dc-chain"><svg viewBox="0 0 %d %d" width="%d" height="%d" ' ..
-		'role="img" aria-label="%s">',
-		W, H, W, H, translate("DNS 解析链路图"))
-
-	-- 箭头标记：v0.15.0 按用户要求**全部移除**。
-	--
-	-- 原实现按状态色定义 3 个 <marker>（dc-a-ok/warn/bad）并给每条线
-	-- 加 marker-end。移除后：
-	--   · 连线只靠颜色与曲线形状表达走向
-	--   · 不再需要 <defs>，也不再占用文档级 id
-	--   · 与 diagrams.lua 的两张图口径一致（那边也移除了）
-	-- 注意 hline/curve 的签名仍保留 color 参数 —— 它决定描边色，与箭头无关。
-
-	--- 水平连线（两端节点垂直对齐时用）
-	--
-	-- 思维导图风格：轻微下沉的弧线，比直线更有「生长感」，
-	-- 同时保持两端水平相接（起止切线水平，不会在节点边缘留缝）。
-	local function hline(x1, x2, y, color)
-		local mid = math.floor((x1 + x2) / 2)
-		local dip = 3   -- 中点下沉像素
-		return string.format(
-			'<path d="M %d %d Q %d %d, %d %d" stroke="%s" stroke-width="2.5" ' ..
-			'fill="none" stroke-linecap="round"/>',
-			x1, y, mid, y + dip, x2, y, color)
-	end
-
-	--- 贝塞尔连线：从 (x1,y1) 平滑过渡到 (x2,y2)
-	--
-	-- 控制点取「水平各伸出 dx」的位置，形成 S 形。
-	--
-	-- ⚠️ dx 有硬上限 (x2-x1)/2（v0.12.5 修）：
-	--   控制点必须满足 x1+dx <= x2-dx，否则第二控制点跑到第一控制点
-	--   左边，曲线在中间兜回来、出现自交的 S 扭结 —— 看起来就是「断链」。
-	--   实测踩过：dx=51 而 (x2-x1)/2=30，生成
-	--     C 415 169, 373 85, 424 85    ← 415 > 373，扭结
-	--
-	-- 取值优先级：
-	--   理想值 = 垂直落差 × 0.62（让起点切线约 30°，弧度明显且平滑）
-	--   上限   = (x2-x1)/2（保证控制点不交叉）
-	local function curve(x1, y1, x2, y2, color)
-		local dy = math.abs(y2 - y1)
-		local dx = math.floor(dy * 0.62)
-		local cap = math.floor((x2 - x1) / 2)
-		if dx > cap then dx = cap end
-		if dx < 6 then dx = 6 end
-		return string.format(
-			'<path d="M %d %d C %d %d, %d %d, %d %d" stroke="%s" ' ..
-			'stroke-width="2.5" fill="none" stroke-linecap="round"/>',
-			x1, y1, x1 + dx, y1, x2 - dx, y2, x2, y2, color)
-	end
-
-	-- 节点：状态点 + 标题 + 副标题 + 说明
-	--
-	-- 填充用 --dc-surface 而不是 none：连线画在节点下层，
-	-- 无填充时线会从节点内部透出来，看起来像「断链」。
-	local function node(x, y, title, sub, alive, note)
-		local col = c(alive)
-		local s2 = string.format(
-			'<g><rect x="%d" y="%d" width="%d" height="%d" rx="9" ' ..
-			'fill="var(--dc-surface)" stroke="%s" stroke-width="2"/>' ..
-			'<circle cx="%d" cy="%d" r="4" fill="%s"/>' ..
-			'<text x="%d" y="%d" font-size="13" font-weight="600" fill="%s">%s</text>' ..
-			'<text x="%d" y="%d" font-size="11" fill="%s" opacity="0.72">%s</text>',
-			x, y, NW, NH, col,
-			x + 12, y + 15, col,
-			x + 24, y + 22, "currentColor", title,
-			x + 24, y + 39, "currentColor", sub)
-		if note then
-			s2 = s2 .. string.format(
-				'<text x="%d" y="%d" font-size="10" fill="%s" opacity="0.55">%s</text>',
-				x + 24, y + 50, "currentColor", note)
-		end
-		return s2 .. '</g>'
-	end
-
-	local function label(x, y, txt, anchor)
-		return string.format(
-			'<text x="%d" y="%d" font-size="10" fill="%s" opacity="0.7"%s>%s</text>',
-			x, y, "currentColor", anchor and (' text-anchor="' .. anchor .. '"') or "", txt)
-	end
-
-	-- ── 连线（先画，节点压在上层）──────────────────────────────────
-	--
-	-- 每条线都从「上一节点的右边缘」到「下一节点的左边缘」，
-	-- 不留缝隙 —— 这是「不能断链」的关键。
-	local cn_col = c(sn.dnsproxy_cn)
-	local fg_col = c(sn.dnsproxy_fg)
-	local proxy_col = c(sn.proxy_1234)
-	local main_col = c(sn.dnsmasq)
-
-	-- 主干：LAN → dnsmasq
-	p[#p + 1] = hline(X1 + NW, X2, YC, main_col)
-
-	-- 分叉：dnsmasq → 两个 dnsproxy
-	--
-	-- 两条曲线都从 dnsmasq 右缘**同一点**（YC）出发 —— 这是思维导图的
-	-- 关键：从主干上一点放射出多条支线，而不是从两个错开的点各发一条
-	-- （错开会在节点边缘形成一个小尖角，看起来像没接上）。
-	p[#p + 1] = curve(X2 + NW, YC, X3, YTC, cn_col)
-	p[#p + 1] = curve(X2 + NW, YC, X3, YBC, fg_col)
-
-	-- 上支：dnsproxy国内 → 国内上游
-	p[#p + 1] = hline(X3 + NW, X4, YTC, cn_col)
-
-	-- 下支：dnsproxy国外 → SSR-Plus → 国外上游
-	p[#p + 1] = hline(X3 + NW, X4, YBC, fg_col)
-	p[#p + 1] = hline(X4 + NW, X5, YBC, proxy_col)
-
-	-- ── 节点 ──────────────────────────────────────────────────────
-	p[#p + 1] = node(X1, YC - NH / 2, translate("LAN 客户机"),
-		translate("DHCP 下发"), true, nil)
-	p[#p + 1] = node(X2, YC - NH / 2, "dnsmasq", ":53",
-		sn.dnsmasq, sn.dnsmasq and translate("缓存 + 分流") or translate("未监听"))
-	p[#p + 1] = node(X3, YT, translate("dnsproxy 国内"), ":" .. sn.entry_port,
-		sn.dnsproxy_cn, translate("阿里 DoT/DoH"))
-	p[#p + 1] = node(X3, YB, translate("dnsproxy 国外"), ":" .. sn.foreign_port,
-		sn.dnsproxy_fg, translate("Google DoH"))
-	p[#p + 1] = node(X4, YT, translate("国内上游"), translate("直连"),
-		sn.dnsproxy_cn, translate("223.5.5.5"))
-	p[#p + 1] = node(X4, YB, "SSR-Plus", ":1234",
-		sn.proxy_1234, sn.proxy_1234 and translate("透明代理") or translate("未运行"))
-	p[#p + 1] = node(X5, YB, translate("国外上游"), translate("经代理"),
-		sn.proxy_1234 and sn.dnsproxy_fg, translate("dns.google"))
-
-	-- 分叉标注
-	--
-	-- 分叉处水平只有 60px（X2+NW=364 到 X3=424）、垂直落差 84px，
-	-- 空间很窄 —— 标签放进去必然压线（实测「默认」直接盖在曲线上）。
-	--
-	-- 改放在两个 dnsproxy 节点的**上方/下方空白区**，用短引线指到曲线，
-	-- 既清晰又不遮挡连线。
-	local function forkLabel(x, y, txt, anchor)
-		return string.format(
-			'<text x="%d" y="%d" font-size="10" fill="%s" opacity="0.7"%s>%s</text>',
-			x, y, "currentColor", anchor and (' text-anchor="' .. anchor .. '"') or "", txt)
-	end
-	-- 「默认」在 dnsproxy 国内 上方
-	p[#p + 1] = forkLabel(X3, YT - 10, translate("默认 → 国内上游"), "start")
-	-- 「gfw 域名」在 dnsproxy 国外 下方
-	p[#p + 1] = forkLabel(X3, YB + NH + 18, translate("gfw 域名 → 经代理出站"), "start")
-
-	-- 底部说明（v0.16.0 改写）
-	--
-	-- 原文只写了「nftset 写入 blacklist → 流量进 :1234」，那是**旧机制**
-	-- 的单一通路。现在实际有两条落库路径，且判定依据是实测而非静态归属：
-	--
-	--   ① 静态分流：域名在 gfw 名单里 → nftset 写 blacklist → 走 :1234
-	--   ② 动态分诊：不在任何库的目标 → 试直连/试代理 → 按实测结果落库
-	--
-	-- 只写①会让看图的人以为「不在 gfw 名单就一定直连」，而实际
-	-- 不在任何库的目标要先经过分诊，否则会落到兜底规则被误送代理
-	-- （这正是 cdn.staticsfile.org 白屏的成因）。
-	p[#p + 1] = label(X1 + 2, H - 30,
-		translate("静态分流：gfw 名单命中 → nftset 写 blacklist → 流量进 :1234"))
-	p[#p + 1] = label(X1 + 2, H - 16,
-		translate("动态分诊：不在任何库 → 试直连，通→写 china；不通→试代理，通→写 blacklist；都不通→标 dead"))
-
-	p[#p + 1] = '</svg></div>'
-	return table.concat(p)
-end
-
--- ── 实时诊断链路图（v0.15.0 新增，替代原「分流决策」在概览的重复渲染）──
+-- ── 解析链路图已删除（v0.18.0，ADR-0007 §2.3）─────────────────────
 --
--- 用户要求「加上实时诊断的链路思维导图」。
+-- 它原先是这里的一块手写内联 SVG（1120x372），画 dnsmasq→dnsproxy
+-- :5353/:5336→:1234 的拓扑与端口存活色。
 --
--- 与已有的三张图的区别（这是它存在的理由，不是又一张重复图）：
+-- 删除理由：它与下面的「链路拓扑」（_live_diag_map）回答同一个问题 ——
+-- 「此刻哪一段不通」。两张图并列，用户得在脑中做两次映射，
+-- 与「一眼看出哪里有问题」的目标相反。
 --
---   解析链路（_chain_graph）   静态拓扑 + 端口存活色。回答「组件在不在」。
---   判定链路（dg.route_map）   域名归属规则。回答「某个域名会怎么走」。
---   改道状态（dg.status_map）  观测域名的当前改道状态。回答「谁被改道了」。
---   ★ 实时诊断（本项）          **逐段实测判定**。回答「哪一段真的通、
---                             哪一段是死的、证据是什么」。
+-- 它独有的信息（精确端口号 / PID / 组件名）已并入「组件状态」表，
+-- 而那张表降级为链路拓扑的下钻（见下方 _topology）。
 --
--- 数据来源是 ds.selftest() 的 20 项结果 —— 按**链路阶段**重新分组，
--- 每组取该项的 PASS/FAIL/SKIP 与证据串。这样一眼能看出断点在哪一段，
--- 而不用在 20 行表格里逐行找红色。
+-- ⚠️ 不要因为「图看起来少了」就把它加回来：链路拓扑图的节点文案里
+--    已写明每个阶段对应的组件与端口。
+
+-- ── 链路拓扑图（v0.18.0 合并「解析链路」+「实时诊断链路」）────────────
+--
+-- ── 为什么合并（ADR-0007 §2.3）──────────────────────────────────
+--
+-- 概览原本有两块内容都在回答「链路通不通」：
+--   · 解析链路（_chain_graph）   拓扑图 + 端口存活色
+--   · 实时诊断链路（本项）        20 项自检按 8 个阶段重分组
+--
+-- 两张图并列，用户得在脑中做两次映射（「图 A 的那段」↔「图 B 的那个阶段」）。
+-- 用户明确要求「用图更直观看到链路问题，直接展开看板，快速观测哪里有问题」，
+-- 一张「拓扑 + 每节点状态徽标」正好是这个效果。
+--
+-- ── 与其余三张图的分工（这是它存在的理由，不是又一张重复图）──────
+--
+--   链路拓扑图（本项）        **逐段实测**。回答「哪一段真的通、哪一段是死的」。
+--   分诊规则图（route_map）   域名归属规则。回答「某个域名会怎么走」。
+--   分流去向（status_map）    你录入的域名各自走哪条链。回答「我配的走哪」。
+--
+-- v0.21.0：「改道状态」与「落点分布」两张图已随健康改道与分诊一起删除。
+--
+-- ── 归组与诊断交给 diagnosis.lua ────────────────────────────────
+--
+-- 本项只负责「取数据 + 交给绘图」，归组规则与「证据→症状」推导都在
+-- diagnosis.lua（纯函数、可单测）。这样：
+--   · general.lua 保持为「组装页面」
+--   · 新增自检项未归组时，diagnosis.lua 会自动生成兜底阶段，不会静默丢失
 --
 -- ⚠️ 不新增后端调用：selftest 已被 _conclusion 调用过，请求级缓存命中。
-o = s:option(DummyValue, "_live_diag_map", translate("实时诊断链路"))
+o = s:option(DummyValue, "_live_diag_map", translate("链路拓扑"))
 o.rawhtml = true
 function o.cfgvalue()
 	local result = ds.selftest()
 	local items = result.items or {}
 
-	-- 自检项 → 链路阶段分组
-	--
-	-- 键是阶段名，值是该阶段包含的自检项编号（与 dnschain-selftest 的
-	-- `emit <序号>` 一一对应）。改 selftest 的项号时**必须同步这里**，
-	-- tools/verify-dnschain-domains.sh 有断言检查编号覆盖完整。
-	local STAGES = {
-		{ id = "client",  label = translate("客户机入口"), items = { 1 } },
-		{ id = "dnsmasq", label = "dnsmasq",           items = { 3, 15, 16 } },
-		{ id = "domestic", label = translate("国内链路"), items = { 4, 5, 8, 9 } },
-		{ id = "foreign",  label = translate("国外链路"), items = { 10, 11, 12 } },
-		{ id = "proxy",    label = translate("代理与分流"), items = { 13 } },
-		{ id = "split",    label = translate("分流规则"), items = { 2, 17, 18 } },
-		{ id = "fw4",      label = "fw4",              items = { 14, 20 } },
-		{ id = "policy",   label = translate("双栈与端口"), items = { 6, 7, 19 } },
-	}
+	-- 归组（含兜底阶段）—— 规则在 diagnosis.lua
+	local stages, fallback = dg2.group(items)
 
-	local by_no = {}
-	for _, it in ipairs(items) do
-		by_no[tonumber(it.no) or 0] = it
-	end
+	-- 兜底阶段追加到末尾：它不属于任何链路阶段，放在最后不打断主链
+	local all = {}
+	for _, st in ipairs(stages) do all[#all + 1] = st end
+	if fallback then all[#all + 1] = fallback end
 
-	-- 每个阶段汇总：最差状态 + 证据
-	local function worst(st)
-		local n_pass, n_fail, n_skip = 0, 0, 0
-		local first_bad = nil
-		for _, no in ipairs(st.items) do
-			local it = by_no[no]
-			if it then
-				if it.status == "PASS" then n_pass = n_pass + 1
-				elseif it.status == "SKIP" then n_skip = n_skip + 1
-				else
-					n_fail = n_fail + 1
-					if not first_bad then first_bad = it end
-				end
-			end
-		end
-		local tone = "ok"
-		if n_fail > 0 then tone = "bad"
-		elseif n_skip > 0 then tone = "warn" end
-		return tone, n_pass, n_fail, n_skip, first_bad
-	end
-
-	-- ── 组装阶段数据，交给 diagrams.lua 画思维导图 ──────────
-	--
-	-- v0.16.3：原来在这里内联拼 SVG（纵向列表），用户要求改成
-	-- 思维导图。绘图逻辑移进 diagrams.lua 的 live_diag_map()，
-	-- 与页面其余三张图同一套视觉语言（圆角节点、状态色、贝塞尔连线）。
-	--
-	-- 这里只负责「把 selftest 的 20 项归组成 8 个阶段」这件事 ——
-	-- 归组规则是本页的业务知识，不该散到绘图层。
-	local stage_data = {}
-	for _, st in ipairs(STAGES) do
-		local tone, n_pass, n_fail, n_skip, first_bad = worst(st)
-
-		-- 证据：优先显示失败项的证据，否则显示本阶段第一项的证据
-		local ev = ""
-		if first_bad then
-			ev = tostring(first_bad.detail or "")
-		else
-			for _, no in ipairs(st.items) do
-				local it = by_no[no]
-				if it and it.detail and it.detail ~= "" then
-					ev = tostring(it.detail)
-					break
-				end
-			end
-		end
-
-		stage_data[#stage_data + 1] = {
-			id       = st.id,
-			label    = st.label,
-			tone     = tone,
-			n_pass   = n_pass,
-			n_fail   = n_fail,
-			n_skip   = n_skip,
-			evidence = ev,
-		}
-	end
-
-	return dg.live_diag_map(stage_data)
+	return dg.live_diag_map(all)
 end
 
--- ── 链路指标 ──────────────────────────────────────────────────────
-o = s:option(DummyValue, "_charts", translate("链路指标"))
+-- ── 断点诊断明细（图下折叠区，v0.18.0）────────────────────────────
+--
+-- 用户要求「联动给出出问题的地方是什么原因呈现数据」。
+--
+-- 图负责**定位**（哪一段红了），本项负责**解释**（为什么红、会怎样、怎么修）。
+-- 放在图正下方而不是塞进图内：图的价值是扫视，塞长文本会失去这个作用。
+--
+-- 三种情况都覆盖（ADR-0007 §2.5）：
+--   · 规则命中     → 症状 / 影响 / 排查命令
+--   · 规则未命中   → 诚实说「未识别的失败模式」+ 证据原文 + 复现命令
+--   · 证据为空     → 显示「证据缺失」+ 该阶段的检查项编号
+--
+-- 默认展开：用户明确要「直接展开看板」，不做二次点击。
+o = s:option(DummyValue, "_diag_detail", translate("断点诊断"))
 o.rawhtml = true
 function o.cfgvalue()
-	local sn = ds.chain_snapshot()
+	local result = ds.selftest()
+	local items = result.items or {}
+	local stages, fallback = dg2.group(items)
+	local fails = dg2.failures(stages, fallback)
 
-	-- 三条相对长度条形，绝对值标右侧
-	local metrics = {
-		{ label = translate("缓存插入"), value = sn.inserted,  cls = "info" },
-		{ label = translate("转发上游"), value = sn.forwarded, cls = "ok" },
-		{ label = translate("本地应答"), value = sn.local_ans, cls = "warn" },
-	}
+	-- 时间戳 / 耗时 / 轮次（v0.18.0）：让用户判断这份结论有多旧
+	local stamp = ""
+	do
+		local parts = {}
+		if result.at and result.at ~= "" then
+			parts[#parts + 1] = translate("运行于") .. " " .. dg.esc(result.at)
+		end
+		if result.dur and result.dur ~= "" then
+			parts[#parts + 1] = translate("耗时") .. " " .. dg.esc(result.dur)
+		end
+		if result.run then
+			parts[#parts + 1] = string.format(translate("第 %d 轮"), result.run)
+		end
+		if #parts > 0 then
+			stamp = '<div class="dc-hint">' .. table.concat(parts, " · ") .. '</div>'
+		end
+	end
 
-	local maxv = 1
-	for _, mt in ipairs(metrics) do
-		if (mt.value or 0) > maxv then maxv = mt.value end
+	if #fails == 0 then
+		return '<div class="dc-alert dc-alert--ok">' ..
+			'<span class="dc-alert__icon">✓</span><div>' ..
+			translate("20 项自检全部通过，没有断点需要诊断。") ..
+			'</div></div>' .. stamp
 	end
 
 	local rows = {}
-	for _, mt in ipairs(metrics) do
-		local v = mt.value
-		local pct = (v and v > 0) and math.floor(v * 100 / maxv) or 0
+	for i, f in ipairs(fails) do
+		-- 状态徽标：FAIL 红、SKIP 灰
+		local cls = (f.status == "SKIP") and "dc-badge--mute" or "dc-badge--bad"
+
+		-- 「未识别」时明确标注，不假装知道
+		local known = ""
+		if not f.known then
+			known = ' <span class="dc-badge dc-badge--mute">' ..
+				translate("未识别") .. '</span>'
+		end
+
+		local ev = tostring(f.detail or "")
+		if ev == "" then
+			ev = translate("证据缺失")
+		end
+
 		rows[#rows + 1] = string.format(
-			'<div class="dc-metric">' ..
-			'<span class="dc-metric__label">%s</span>' ..
-			'<span class="dc-metric__track">' ..
-			'<span class="dc-metric__fill dc-metric__fill--%s" style="width:%d%%"></span>' ..
-			'</span>' ..
-			'<span class="dc-metric__value">%s</span></div>',
-			mt.label, mt.cls, pct, v and tostring(v) or "—")
+			'<tr><td class="dc-table__num">%d</td>' ..
+			'<td><span class="dc-badge %s">%s</span>%s</td>' ..
+			'<td>%s</td>' ..
+			'<td><b>%s</b><br/><span class="dc-hint">%s</span></td>' ..
+			'<td>%s</td>' ..
+			'<td><code>%s</code></td></tr>',
+			i, cls, dg.esc(f.status), known,
+			dg.esc(f.stage_label or "") .. " / " .. dg.esc(f.name or ""),
+			dg.esc(f.symptom or ""), dg.esc(f.impact or ""),
+			dg.esc(ev),
+			dg.esc(f.fix or ""))
 	end
 
-	local function stat(label, value, hint)
-		return string.format(
-			'<div class="dc-stat">' ..
-			'<div class="dc-stat__label">%s</div>' ..
-			'<div class="dc-stat__value">%s</div>' ..
-			'<div class="dc-stat__hint">%s</div></div>',
-			label, value, hint)
-	end
-
-	local stats = table.concat({
-		stat(translate("分流规则"), tostring(sn.split_count), translate("条 server=/域名/")),
-		stat(translate("代理 IP 集"), tostring(sn.blacklist), translate("个国外 IP")),
-		stat(translate("国内 IP 段"), tostring(sn.china), translate("个 CIDR")),
-		stat(translate("未应答"), sn.unanswered and tostring(sn.unanswered) or "—",
-			translate("次查询")),
-	})
-
-	return '<div class="dc-metrics">' .. table.concat(rows) .. '</div>' ..
-		'<div class="dc-stats">' .. stats .. '</div>'
+	return '<div class="dc-table-wrap"><table class="dc-table">' ..
+		'<thead><tr>' ..
+		'<th class="dc-table__num">' .. translate("序号") .. '</th>' ..
+		'<th>' .. translate("状态") .. '</th>' ..
+		'<th>' .. translate("位置") .. '</th>' ..
+		'<th>' .. translate("症状与影响") .. '</th>' ..
+		'<th>' .. translate("证据") .. '</th>' ..
+		'<th>' .. translate("排查") .. '</th>' ..
+		'</tr></thead><tbody>' ..
+		table.concat(rows) ..
+		'</tbody></table></div>' .. stamp
 end
 
--- ── 组件状态表 ────────────────────────────────────────────────────
-o = s:option(DummyValue, "_topology", translate("组件状态"))
+-- ── 组件状态与指标（折叠下钻，v0.18.0）────────────────────────────
+--
+-- ── 为什么折叠（ADR-0007 §2.3）──────────────────────────────────
+--
+-- 它原先与「解析链路」并列显示，而两者数据源几乎相同
+-- （都查 port_listening / port_owner / is_dnsproxy）。
+-- 一张图 + 一张表回答同一个问题，是首屏最实在的一处重复。
+--
+-- 现在图负责**定位**（哪一段红了），本表负责**确认**
+-- （具体是哪个 PID 占了端口、缓存命中多少）。两者是定位链路上的
+-- 上下游关系，不是重复。
+--
+-- 默认折叠：用户要「图直接展开」，但表里的精确值只有排障时才需要，
+-- 全展开会把图挤下去。
+o = s:option(DummyValue, "_topology", translate("组件状态与指标"))
 o.rawhtml = true
 function o.cfgvalue()
 	local entry = ds.entry_port()
 	local fport = ds.foreign_port()
-
 	local rows = {}
-
-	local function row(name, port, ok, detail)
-		local badge = ok and '<span class="dc-badge dc-badge--ok">正常</span>'
-			or '<span class="dc-badge dc-badge--bad">异常</span>'
+	local function row(name, port, alive, note)
 		rows[#rows + 1] = string.format(
-			'<tr><td>%s</td><td>%s</td><td>%s</td><td>%s</td></tr>',
-			name, port or "—", badge, detail or "")
+			'<tr><td>%s</td><td><code>%s</code></td>' ..
+			'<td><span class="dc-badge dc-badge--%s">%s</span></td>' ..
+			'<td>%s</td></tr>',
+			dg.esc(name), dg.esc(port),
+			alive and "ok" or "bad",
+			alive and translate("存活") or translate("未运行"),
+			dg.esc(note))
 	end
 
-	local dnsmasq_ok = ds.port_listening("53", "udp")
-	row("dnsmasq", "53", dnsmasq_ok,
-		dnsmasq_ok and translate("唯一缓存层 + 唯一分流层 + DHCP") or translate("未监听"))
+	local e_ok = ds.port_listening(entry, "udp")
+	row(translate("国内 dnsproxy"), ":" .. entry, e_ok,
+		e_ok and translate("监听中") or translate("未监听，客户机无法解析"))
 
-	local dp_ok = ds.port_listening(entry, "udp")
-	row(translate("dnsproxy（国内）"), entry, dp_ok,
-		dp_ok and translate("阿里 DoT/DoH，直连") or translate("未监听"))
+	local f_owner = ds.port_owner(fport, "udp")
+	local f_ok = (f_owner ~= "" and ds.is_dnsproxy(f_owner))
+	row(translate("国外 dnsproxy"), ":" .. fport, f_ok,
+		f_ok and (translate("监听中，PID ") .. f_owner)
+		     or (f_owner == "" and translate("未监听，gfw 域名将 SERVFAIL")
+		         or (translate("被非 dnsproxy 进程占用：") .. f_owner)))
 
-	local f_pid = ds.port_owner(fport, "udp")
-	local f_ok = ds.is_dnsproxy(f_pid)
-	row(translate("dnsproxy（国外）"), fport, f_ok,
-		f_ok and translate("Google DoH，经代理出站") or
-		(f_pid ~= "" and (translate("被其他进程占用 (PID ") .. f_pid .. ")") or translate("未监听")))
-
-	local proxy_ok = ds.port_listening("1234", "tcp")
-	row(translate("SSR-Plus 代理"), "1234", proxy_ok,
-		proxy_ok and translate("透明代理（IPv4 + IPv6）") or translate("未运行"))
+	local p_ok = ds.port_listening("1234", "tcp")
+	row(translate("代理入口"), ":1234", p_ok,
+		p_ok and translate("监听中") or translate("未运行，国外域名将失败"))
 
 	local v6_ok = (ds.ssr_ipv6() == "1")
 	row(translate("IPv6 流量代理"), "ipv6_support", v6_ok,
@@ -718,12 +550,15 @@ function o.cfgvalue()
 			cstat.dns_local_answered or 0,
 			cstat.dns_queries_forwarded or 0))
 
-	return '<div class="dc-table-wrap"><table class="dc-table"><thead><tr>' ..
+	return '<details class="dc-details"><summary>' ..
+		translate("展开组件状态与指标") .. '</summary>' ..
+		'<div class="dc-table-wrap"><table class="dc-table"><thead><tr>' ..
 		'<th>' .. translate("组件") .. '</th>' ..
 		'<th>' .. translate("端口") .. '</th>' ..
 		'<th>' .. translate("状态") .. '</th>' ..
 		'<th>' .. translate("说明") .. '</th>' ..
-		'</tr></thead><tbody>' .. table.concat(rows) .. '</tbody></table></div>'
+		'</tr></thead><tbody>' .. table.concat(rows) ..
+		'</tbody></table></div></details>'
 end
 
 ------------------------------------------------------------------------
@@ -851,34 +686,190 @@ end
 --   UCI 里它们是两个独立的 config 段（dom_domestic / dom_foreign），
 --   放进同一个 NamedSection 写回时会互相覆盖。
 --   但**标题必须能区分**，否则页面上会出现两个一模一样的「自定义域名」。
+-- ── 多行域名输入框（v0.20.0）────────────────────────────────────
+--
+-- ── 为什么从 DynamicList 改成多行文本 ────────────────────────────
+--
+-- 用户要求：「改为一个大输入框，每一行一个域名即可」。
+--
+-- DynamicList 每加一个域名要点一次「+」、再填一行 —— 批量补 20 个域名
+-- 就是 20 次点击。而用户手头通常已经有一份域名清单（记事本、网页、
+-- 别人的配置），直接整段粘进一个大框才是自然操作。
+--
+-- ── 实现要点 ────────────────────────────────────────────────────
+--
+-- 用 TextValue（LuCI 的多行文本），但 **UCI 里仍然存成 list**。
+-- 这样下游 dc_gen_custom_lists（dnschain.sh）读到的格式完全不变，
+-- 后端零改动。
+--
+-- 关键在 write()：
+--   ① 按行拆分
+--   ② 逐行 trim、转小写、去掉行尾的点
+--   ③ 跳过空行与 # 注释行
+--   ④ 逐条用 validate_domain 校验（**逐行报错**，告诉用户是第几行）
+--   ⑤ 去重后整体写回 UCI list
+--
+-- ── 为什么逐行校验而不是整体校验 ────────────────────────────────
+--
+-- 一大段文本里有一行写错时，整体校验只能说「格式不对」，
+-- 用户得自己找是哪一行。逐行校验能直接说「第 7 行：点的位置不对」。
+local function make_domain_textarea(s, name, label, desc, placeholder)
+	local o = s:option(TextValue, name, label, desc)
+	o.rows = 12
+	o.wrap = "off"
+	o.rmempty = true
+	o.placeholder = placeholder
+
+	-- 读：把 UCI list 拼成每行一个
+	function o.cfgvalue(self, section)
+		local v = self.map:get(section, self.option)
+		if type(v) == "table" then
+			return table.concat(v, "\n")
+		end
+		return v or ""
+	end
+
+	-- 写：按行拆分 → 校验 → 去重 → 写回 list
+	--
+	-- ── 校验策略：跳过 + 汇总提示，而不是让整页保存失败 ──────────
+	--
+	-- v0.20.0 第一版对每行 error()，结果实测**整页 500**：
+	-- 用户既有配置里本来就含非法域名（实测 4 个 `_4483._https.*`
+	-- 形式的 SRV 风格域名），于是任何一次保存都会被它们挡住，
+	-- 用户无法保存任何其它改动 —— 这是比不校验更糟的回归。
+	--
+	-- 而且这些域名**在后端也非法**（dc_domain_valid_norm 同样拒绝
+	-- 下划线），从未进入 split.conf（实测 grep 为 0），是死数据。
+	--
+	-- 改为：
+	--   · 合法行 → 写入
+	--   · 非法行 → 跳过，但记下来
+	--   · 保存后把「跳过了哪几行」汇总成一条提示
+	-- 这样既能清理死数据，又不阻断用户保存其它改动。
+	function o.write(self, section, value)
+		local raw = tostring(value or "")
+		local seen, out = {}, {}
+		local bad = {}
+
+		local lineno = 0
+		for line in (raw .. "\n"):gmatch("([^\n]*)\n") do
+			lineno = lineno + 1
+			local t = line:gsub("^%s+", ""):gsub("%s+$", "")
+			-- 跳过空行与注释行（允许用户把带注释的清单整段粘进来）
+			if t ~= "" and t:sub(1, 1) ~= "#" then
+				local ok, err = validate_domain(t)
+				if not ok then
+					bad[#bad + 1] = string.format("%d: %s", lineno, t)
+				elseif ok ~= "" and not seen[ok] then
+					seen[ok] = true
+					out[#out + 1] = ok
+				end
+			end
+		end
+
+		-- ── 写回 UCI：map:set 传数组即可 ─────────────────────────────
+		--
+		-- 实测确认（路由器 2026-10-25）：ubus 的 uci set **支持数组**，
+		-- `{"values":{"domain":["a.com","b.com"]}}` 能正确写成 list。
+		-- 命令行 `uci set x.y.z="a" "b"` 报 usage 是命令行工具的局限，
+		-- 不是 ubus 接口的局限 —— 这一点很容易搞混。
+		--
+		-- 所以这里就用 LuCI 的标准写法：map:set 传数组。
+		-- 不自己调 uci:save（Map.parse 会在 Node.parse 之后统一 save），
+		-- 也不自己 delete（map:set 的数组语义就是整体替换该 option）。
+		self.map:set(section, self.option, out)
+
+		-- ── 立即 commit（v0.20.0 实测必需）──────────────────────────
+		--
+		-- 只调 map:set 时值停在 uci 的 staging 区（/tmp/.uci/dnschain），
+		-- 依赖 Map.parse 在 Node.parse 之后统一 `uci:save` 才落盘。
+		-- 但实测这条链在本页面**没有生效**：
+		--   · 页面回显正确（新值确实进了内存）
+		--   · `uci changes dnschain` 为空
+		--   · /tmp/.uci/dnschain 里也没有
+		--   · /etc/config/dnschain 内容不变
+		-- 也就是说值在本次请求的 Lua 进程内存里，请求结束就丢了。
+		--
+		-- 原因与 `apply_on_parse` 有关：本 Map 覆写了 apply_on_parse
+		-- （见文件末尾），它会在 save 之后调用 ds.apply_domains()，
+		-- 而那一步会重启 dnsmasq —— 整条链路的时序与默认流程不同。
+		--
+		-- 与其去猜 LuCI 的内部时序，不如在这里显式落盘：
+		-- save（写 staging）→ commit（staging → /etc/config）。
+		-- 两步都是幂等的，重复调用无副作用。
+		self.map.uci:save(self.map.config)
+		self.map.uci:commit(self.map.config)
+
+		-- 有跳过项时给一条提示（用 setmsg，state_handler 会把它落到页面）
+		if #bad > 0 then
+			local shown = table.concat(bad, "；", 1, math.min(#bad, 3))
+			if #bad > 3 then
+				shown = shown .. string.format(translate("…（共 %d 条）"), #bad)
+			end
+			setmsg(string.format(
+				translate("已跳过 %d 个格式非法的域名（后端同样不接受，不会生效）：%s"),
+				#bad, shown))
+		end
+
+		-- ⚠️ 必须返回 true（v0.20.0 实测踩过）。
+		--
+		-- LuCI 的 AbstractValue.parse 这样调用 write：
+		--     if self:write(section, fvalue) then
+		--         self.section.changed = true
+		--     end
+		-- 不返回真值时 section.changed 不置位 → 整次保存被判定为
+		-- 「没有任何改动」→ **一个字节都不会写进 UCI**，
+		-- 而页面上看不出任何异常（提示消息照常显示）。
+		--
+		-- 这正是本版第一次部署时的现象：提示「已跳过 1 个非法域名」
+		-- 正常弹出，但 `uci get dnschain.dom_foreign.domain` 毫无变化。
+		return true
+	end
+
+	return o
+end
+
 s = m:section(NamedSection, "dom_domestic", "domains",
 	translate("自定义域名 · 国内（补全归属）"),
 	translate("手工补全数据库没覆盖的域名归属。<b>这里只决定「归属」，不是改道开关</b>：" ..
 		"归属定了之后由 dnsmasq 与 dnsproxy 分流，且<b>仍然参与健康检测</b> —— " ..
 		"首选链不通、另一条链通时照样自动改道。<br/>" ..
-		"格式：只接受域名（含 <code>xn--</code> 形式），不接受通配符、IP、URL。"))
+		"格式：<b>每行一个域名</b>（含 <code>xn--</code> 形式），" ..
+		"空行与 <code>#</code> 开头的行会被忽略；不接受通配符、IP、URL。"))
 s.addremove = false
 
-o = s:option(DynamicList, "domain", translate("国内域名（归属直连）"),
+o = make_domain_textarea(s, "domain", translate("国内域名（归属直连）"),
 	translate("这些域名的归属记为国内 → 首选走国内 dnsproxy 实例（直连出口），" ..
-		"解析结果同时写入 <code>china</code> IP 集。"))
-o.datatype = "string"
-o.rmempty = true
-o.placeholder = "www.baidu.com"
-o.validate = validate_domain
+		"解析结果同时写入 <code>china</code> IP 集。"),
+	"www.baidu.com\nwww.qq.com\nwww.taobao.com")
 
 s = m:section(NamedSection, "dom_foreign", "domains",
 	translate("自定义域名 · 国外（补全归属）"),
 	translate("同上，但归属记为国外 → 首选走国外 dnsproxy 实例" ..
-		"（经 <code>:1234</code> 代理出口），解析结果写入 <code>blacklist</code> IP 集。"))
+		"（经 <code>:1234</code> 代理出口），解析结果写入 <code>blacklist</code> IP 集。" ..
+		"<br/><b>每行一个域名</b>，空行与 <code>#</code> 开头的行会被忽略。"))
 s.addremove = false
 
-o = s:option(DynamicList, "domain", translate("国外域名（归属代理）"),
-	translate("这些域名的归属记为国外。同样<b>参与健康检测与自动改道</b>。"))
-o.datatype = "string"
-o.rmempty = true
-o.placeholder = "www.google.com"
-o.validate = validate_domain
+o = make_domain_textarea(s, "domain", translate("国外域名（归属代理）"),
+	translate("这些域名的归属记为国外。同样<b>参与健康检测与自动改道</b>。"),
+	"www.google.com\nwww.youtube.com\nwww.wikipedia.org")
+
+-- ── 已录入清单（独立 section，v0.18.0 修）──────────────────────────
+--
+-- ⚠️ 这块原先是 `o = s:option(...)`，即沿用上面 dom_foreign 那个 `s`
+--    （general.lua:870）。后果：
+--
+--    ① DOM 上它被渲染在「自定义域名 · 国外」section 内，
+--       而它展示的是**国内 + 国外两个清单的合并只读视图** ——
+--       挂在「国外」下面语义是错的。
+--    ② SECTION_TAB（:134-162）里因此没有它的键，tab 归组靠的是
+--       遍历 section 标题，它被当成 dom_foreign 的一部分，看不出独立性。
+--
+--    这是 v0.18.0 全链路审查发现的真实缺陷（ADR-0007 §1.3 ④）。
+--    现在拆成独立 section：编辑国内 → 编辑国外 → 看合并清单，顺序也自然了。
+s = m:section(TypedSection, "dnschain", translate("已录入清单"))
+s.anonymous = true
+s.addremove = false
 
 -- 已录入清单 + 生效状态
 --
@@ -886,7 +877,7 @@ o.validate = validate_domain
 --   点保存只写 UCI，真正改分流要等 apply（它会重启 dnsmasq，
 --   约 3 秒中断，所以不能自动触发）。只显示一份时，
 --   用户保存完看不到变化会以为没生效，反复点保存。
-o = s:option(DummyValue, "_domains_list", translate("已录入清单"))
+o = s:option(DummyValue, "_domains_list", translate("清单与生效状态"))
 o.rawhtml = true
 function o.cfgvalue()
 	local dom_uci = ds.uci_list("dom_domestic", "domain")
@@ -965,20 +956,15 @@ function o.cfgvalue()
 end
 
 -- ── 判定链路（思维链路图）──────────────────────────────────────────
-s = m:section(TypedSection, "dnschain", translate("判定链路"))
-s.anonymous = true
-s.addremove = false
-
-o = s:option(DummyValue, "_route_map", translate("走法"))
-o.rawhtml = true
-function o.cfgvalue()
-	return dg.route_map({
-		entry_port   = ds.entry_port(),
-		foreign_port = ds.foreign_port(),
-		-- 与概览那张图区分（理由见概览里的注释）
-		id_prefix    = "dcrt-dm",
-	})
-end
+-- ── 单域名解释（并入「域名」tab，v0.19.0）────────────────────────
+--
+-- ⚠️ 原来这里还有一个「判定链路」section，包含 dg.route_map() 规则图。
+--    规则图已删除（理由见下方注释），section 头随之取消 ——
+--    「单域名解释」直接挂在「已录入清单」那个 section 里。
+--
+--    原规则图画的「入口 → ①试直连 → ②试代理 → ③dead」与
+--    「DNS 分流状态」的分流去向图语义重叠：前者讲规则、后者讲事实，
+--    而用户只需要后者。规则本身在 docs/runtime/dns-chain.md 有完整记录。
 
 -- 单域名解释：用户输入一个域名，页面把「归属 → 首选 → 探测 → 结论」摊开
 --
@@ -1001,6 +987,24 @@ do
 	end
 end
 
+-- ── 单域名解释（v0.19.0：原「判定链路」section 已删除）──────────────
+--
+-- ── 为什么删掉「判定链路」这个 section ──────────────────────────
+--
+-- 它原本有两块：
+--   ① 「走法」规则图（dg.route_map）—— 画「入口 → ①试直连 → ②试代理
+--      → ③dead」的判定规则
+--   ② 「单域名解释」—— 输入域名，摊开归属/首选/两条链实测/判定
+--
+-- ① 被删除，理由：它与「DNS 分流状态」里的**分流去向图**语义重叠 ——
+--    一张讲「规则长什么样」，一张讲「此刻实际走到哪」，而后者才是
+--    用户真正需要看的。规则图是给维护者看的设计说明，不该占用户页面。
+--    规则本身写在 docs/runtime/dns-chain.md 与 ADR-0006。
+--
+-- ② 保留（用户确认），并入「域名」tab：它是唯一能回答
+--    「我输入一个域名，它会走哪条链」的工具，且不写 UCI（纯查询）。
+--
+-- 它挂在 dom_foreign 之后的独立 section 里，见下方「已录入清单」之后。
 o = s:option(DummyValue, "_explain", translate("单域名解释"))
 o.rawhtml = true
 function o.cfgvalue()
@@ -1031,7 +1035,7 @@ function o.cfgvalue()
 	if not next(e) then
 		return input .. '<div class="dc-alert dc-alert--bad">' ..
 			'<span class="dc-alert__icon">✗</span><div>' ..
-			translate("取不到解释结果 —— 检查 /usr/bin/dnschain-health 是否存在且可执行。") ..
+			translate("取不到解释结果 —— 检查 /usr/bin/dnschain-selftest 是否存在且可执行。") ..
 			'</div></div>'
 	end
 
@@ -1120,421 +1124,74 @@ function o.cfgvalue()
 		'<tbody>' .. table.concat(rows) .. '</tbody></table></div>'
 end
 
--- ── 改道状态（状态思维导图）────────────────────────────────────────
-s = m:section(TypedSection, "dnschain", translate("改道状态"))
+-- ══════════════════════════════════════════════════════════════
+-- v0.21.0：删除「DNS 分流状态」「分诊结果」「观测与阈值」三个 section
+--
+-- ── 为什么删 ────────────────────────────────────────────────────
+--
+-- 用户要求「客户机所有流量走直连，直连不通自动改走代理」。
+-- 这由 dnsproxy 的 --fallback（:5353 → :5336）在上游层完成，
+-- 不需要应用层探测、判定、落库，因此三个 section 一起失去意义：
+--
+--   ① DNS 分流状态 —— 显示「哪些域名被改道到哪条链」。没有改道就没有它。
+--   ② 分诊结果     —— 显示未知目标「直连/代理/dead」的判定与落库。
+--                     未覆盖域名已由 fallback 自动兜底，无需分诊。
+--   ③ 观测与阈值   —— 健康探测的开关、间隔、阈值。探测本身已删除。
+--
+-- ── 这三个 section 原来解决什么，现在由谁解决 ──────────────────
+--
+--   「未覆盖域名直连不通」      → dnsproxy --fallback 自动切代理链
+--   「哪个域名该走哪条链」      → 归属判定（自定义列表 + gfw 名单）
+--   「链路挂了要自动切」        → --fallback 的 upstream unavailable 触发
+--
+-- 净效果：页面少三个 section、少一个「清空改道状态」按钮；
+-- 后端少每轮探测、少 watch.servers 双写、少分诊落库。
+--
+-- ⚠️ 域名 TAB 现在只剩「国内直连」与「国外代理」两个输入框 ——
+--    那是用户唯一需要表达的东西：这个域名（及其所有子域名）走哪条链。
+-- ══════════════════════════════════════════════════════════════
+
+-- ── DNS 分流去向（v0.21.0 重写）────────────────────────────────────
+--
+-- 用户明确要求保留这张图，但语义从「健康状态」改为「静态分流去向」。
+--
+-- ── 数据来源 ────────────────────────────────────────────────────
+--
+-- 不再来自 dnschain-health 的探测状态文件（已删除），而是来自
+-- **归属判定的两个产物**：
+--
+--   custom-domestic.txt  用户录入的国内域名（走 :5353 直连）
+--   custom-foreign.txt   用户录入的国外域名（走 :5336 代理）
+--
+-- 这两个文件由 dc_gen_custom_lists 生成，是分流规则的直接输入。
+--
+-- ── 为什么不画 gfw 名单里的域名 ──────────────────────────────────
+--
+-- 那份名单有 **2.3 万条**，画进 SVG 既不可能也无意义。
+-- 图要回答的是「**我配的**域名走哪条链」，所以只画用户自己录的。
+-- 名单里那 2.3 万条的去向由「概览」tab 的链路拓扑图说明。
+s = m:section(TypedSection, "dnschain", translate("DNS 分流去向"),
+	translate("这里显示<b>你录入的域名</b>各自走哪条链。每个域名同时覆盖它的" ..
+		"所有子域名（dnsmasq 的 <code>server=/域名/</code> 按标签后缀匹配）。" ..
+		"<br/>未录入的域名默认走直连；直连不通时由 dnsproxy 自动改走代理，无需人工干预。"))
 s.anonymous = true
 s.addremove = false
 
-o = s:option(DummyValue, "_status_map", translate("状态导图"))
+o = s:option(DummyValue, "_status_map", translate("分流去向"))
 o.rawhtml = true
 function o.cfgvalue()
-	local rows = ds.health_rows()
-	local sum = ds.health_summary()
-	return dg.status_map(rows, sum)
-end
+	local rows = {}
 
--- 通道就绪性：改道写进 servers-file 后必须真的被 dnsmasq 读到
---
--- 只配 UCI 不生效的情况是存在的（dnsmasq 未重启、ujail 白名单不含
--- 该目录、进程被别处启动）。这一行是「改道看起来成功、实际没生效」
--- 的唯一可靠判据。
-o = s:option(DummyValue, "_reroute_channel", translate("改道通道"))
-o.rawhtml = true
-function o.cfgvalue()
-	local st = ds.serversfile_ready()
-
-	local REASON = {
-		["uci-missing"]  = translate("dhcp.@dnsmasq[0].serversfile 未设置 —— 改道无法生效"),
-		["file-missing"] = translate("serversfile 指向的文件不存在 —— 框架可能未启动"),
-		["no-dnsmasq"]   = translate("dnsmasq 未运行"),
-		["conf-missing"] = translate("生效的 dnsmasq 配置里没有 servers-file —— 需重启 dnsmasq"),
-		["jail-blocked"] = translate("servers-file 所在目录不在 ujail 白名单内 —— dnsmasq 读不到，改道会静默失效"),
-	}
-
-	if st.ready then
-		return string.format(
-			'<span class="dc-badge dc-badge--ok">%s</span> <code>%s</code>',
-			translate("已就绪"), dg.esc(st.path))
+	-- 自定义国内 → 直连
+	for _, d in ipairs(ds.custom_domestic()) do
+		rows[#rows + 1] = { domain = d, chain = "domestic" }
+	end
+	-- 自定义国外 → 代理
+	for _, d in ipairs(ds.custom_foreign()) do
+		rows[#rows + 1] = { domain = d, chain = "foreign" }
 	end
 
-	local reason = REASON[st.reason] or st.reason
-	return string.format(
-		'<span class="dc-badge dc-badge--bad">%s</span> %s',
-		translate("未就绪"), dg.esc(reason))
-end
-
--- 自动改道的守护进程状态
---
--- 为什么必须有这一行（v0.13.0 补齐）：
---   守护进程由 procd 托管（init.d/dnschain 的 `procd_open_instance "health"`），
---   页面原来完全没有它的痕迹。于是出现一个无法自查的状态：
---   开关显示「已启用」、阈值也都配好了，但守护进程没起来 ——
---   **自动改道完全不发生，且没有任何提示**。
---   用户只能靠「等很久发现域名没被改道」来推断，无从定位。
-o = s:option(DummyValue, "_health_daemon", translate("自动改道进程"))
-o.rawhtml = true
-function o.cfgvalue()
-	local hd = ds.health_daemon()
-
-	-- 三种状态分开表达，不要合并成「正常/异常」两档：
-	--   · 开关关闭        → 灰（不探测是用户的选择，不是故障）
-	--   · 开关开 + 在跑   → 绿
-	--   · 开关开 + 没跑   → 红（这才是故障：用户以为在自动改道）
-	if not hd.enabled then
-		return string.format(
-			'<span class="dc-badge">%s</span> %s',
-			translate("已关闭"),
-			translate("健康检测关闭，不探测也不改道；静态分流照常工作"))
-	end
-
-	if not hd.running then
-		return string.format(
-			'<span class="dc-badge dc-badge--bad">%s</span> %s',
-			translate("未运行"),
-			translate("开关已启用但守护进程没起来 —— 自动改道不会发生。" ..
-				"请执行 <code>/etc/init.d/dnschain restart</code>，并确认日志无报错"))
-	end
-
-	local parts = {}
-	parts[#parts + 1] = string.format(
-		'<span class="dc-badge dc-badge--ok">%s</span>', translate("运行中"))
-	parts[#parts + 1] = string.format(
-		'<span class="dc-small">pid %s · %s</span>',
-		dg.esc(hd.pid),
-		(hd.interval > 0)
-			and string.format(translate("每 %d 秒一轮"), hd.interval)
-			or translate("不自动轮询（仅手动触发）"))
-
-	if hd.age >= 0 then
-		parts[#parts + 1] = string.format(
-			'<span class="dc-small">%s %s</span>',
-			translate("上次探测"),
-			string.format(translate("%d 秒前"), hd.age))
-	else
-		parts[#parts + 1] = string.format(
-			'<span class="dc-small">%s</span>', translate("尚未探测过"))
-	end
-
-	return table.concat(parts, " ")
-end
-
--- ── 改道明细表 ────────────────────────────────────────────────────
-s = m:section(TypedSection, "dnschain", translate("改道明细"))
-s.anonymous = true
-s.addremove = false
-
-o = s:option(DummyValue, "_status_table", translate("明细"))
-o.rawhtml = true
-function o.cfgvalue()
-	local rows = ds.health_rows()
-
-	if #rows == 0 then
-		return '<div class="dc-alert dc-alert--info">' ..
-			'<span class="dc-alert__icon">i</span><div>' ..
-			translate("还没有探测数据。点下方「立即探测一轮」，或等待一个轮询间隔。") ..
-			'</div></div>'
-	end
-
-	local CHAIN = { domestic = translate("直连"), foreign = translate("代理") }
-	local STATE_TONE = {
-		["ok"] = "ok", ["degraded"] = "warn", ["rerouted"] = "warn",
-		["both-bad"] = "bad", ["unknown"] = "mute",
-	}
-	local STATE_LABEL = {
-		["ok"] = translate("正常"), ["degraded"] = translate("降级中"),
-		["rerouted"] = translate("已改道"), ["both-bad"] = translate("双链故障"),
-		["unknown"] = translate("未探测"),
-	}
-
-	local trs = {}
-	for _, r in ipairs(rows) do
-		local moved = (r.active ~= r.pref)
-		local chain_cell
-		if moved then
-			chain_cell = string.format(
-				'%s <span class="dc-arrow">→</span> <b>%s</b>',
-				CHAIN[r.pref] or r.pref, CHAIN[r.active] or r.active)
-		else
-			chain_cell = CHAIN[r.active] or r.active or "—"
-		end
-
-		trs[#trs + 1] = string.format(
-			'<tr><td><code>%s</code></td>' ..
-			'<td>%s</td><td>%s</td>' ..
-			'<td class="dc-table__num">%d</td>' ..
-			'<td>%s</td>' ..
-			'<td><span class="dc-badge dc-badge--%s">%s</span></td>' ..
-			'<td><code class="dc-small">%s</code></td></tr>',
-			dg.esc(r.domain),
-			ds_class_label(r["class"]),
-			chain_cell,
-			r.fail or 0,
-			-- last=0 表示「从未探测」，不能渲染成 08:00:00（v0.14.4 修 L3）
-			((r.last or 0) > 0 and os.date("%H:%M:%S", r.last) or "—"),
-			STATE_TONE[r.state] or "mute",
-			dg.esc(STATE_LABEL[r.state] or r.state or "—"),
-			dg.esc(r.result or "—"))
-	end
-
-	return '<div class="dc-table-wrap"><table class="dc-table"><thead><tr>' ..
-		'<th>' .. translate("域名") .. '</th>' ..
-		'<th>' .. translate("归属") .. '</th>' ..
-		'<th>' .. translate("链路") .. '</th>' ..
-		'<th class="dc-table__num">' .. translate("连败") .. '</th>' ..
-		'<th>' .. translate("最近探测") .. '</th>' ..
-		'<th>' .. translate("状态") .. '</th>' ..
-		'<th>' .. translate("原因") .. '</th>' ..
-		'</tr></thead><tbody>' .. table.concat(trs) .. '</tbody></table></div>'
-end
-
--- ── 观测与阈值 ────────────────────────────────────────────────────
--- ── 分诊结果（v0.16.0 新增）────────────────────────────────────────
---
--- 用户要求「所有功能都要能对得上视觉上看到的 web ui」。
--- 分诊是本次新增的核心能力，但在此之前**页面上完全看不到它的结果** ——
--- 用户只能通过命令行 `dnschain-triage list` 查，这与「视觉为准」冲突。
---
--- 这里把分诊结论摆出来，三档语义与落库动作一一对应：
---
---   direct  试直连通   → IP 已写入 china 集合、域名已写入 dom_domestic
---   proxy   直连不通，代理通 → IP 已写入 blacklist、域名已写入 dom_foreign
---   dead    都不通     → 两个集合都不写，等下一轮重试
---
--- ⚠️ 与「改道明细」的区别（不是重复功能）：
---   改道明细  看的是**观测列表**里 8 个种子域名的链路健康与自动改道
---   分诊结果  看的是**客户机实际访问过、但不在任何库里**的未知目标
---   两者输入集合不同、落库目标不同、判定方法不同（DNS 探测 vs HTTP 实测）
-s = m:section(TypedSection, "dnschain", translate("分诊结果"),
-	translate("不在 GFW 名单、不在代理 IP 集、不在国内 IP 段、也不在任何数据库的" ..
-		"目标，会按「先试直连 → 直连不通试代理 → 都不通标 dead」判定。" ..
-		"跑通的落库：IP 进对应集合（nft 自动合并成 IP 段），域名进对应列表。"))
-s.anonymous = true
-s.addremove = false
-
-o = s:option(DummyValue, "_triage_table", translate("结论"))
-o.rawhtml = true
-function o.cfgvalue()
-	local t = ds.triage_rows()
-	local rows = t.rows or {}
-	local sum = t.summary or {}
-
-	if #rows == 0 then
-		return '<div class="dc-alert dc-alert--info">' ..
-			'<span class="dc-alert__icon">i</span><div>' ..
-			translate("还没有分诊记录。点「概览与诊断 → 操作 → 立即分诊未知目标」，" ..
-				"或等待守护进程自动跑一轮。") ..
-			'</div></div>'
-	end
-
-	local TONE = { direct = "ok", proxy = "warn", dead = "bad" }
-	local TEXT = {
-		direct = translate("直连通"),
-		proxy  = translate("代理通"),
-		dead   = translate("两种链路都不通"),
-	}
-	local KIND = { ip = translate("IP"), domain = translate("域名") }
-
-	local p = {}
-	-- data-dc-triage：标记这是分诊结果表。
-	--
-	-- dnschain.js 的 countBadges() 会跳过它内部的 .dc-badge--bad ——
-	-- 因为「两种链路都不通」是客观观测结果，不是本页配置异常。
-	-- 不跳过的话 tab 徽标会把 dead 条数当故障数（实测显示「10」，
-	-- 让人以为有 10 处配置错误）。
-	p[#p + 1] = '<div class="dc-table-wrap" data-dc-triage="1"><table class="dc-table"><thead><tr>' ..
-		'<th>' .. translate("目标") .. '</th>' ..
-		'<th>' .. translate("类型") .. '</th>' ..
-		'<th>' .. translate("结论") .. '</th>' ..
-		'<th>' .. translate("落库动作") .. '</th>' ..
-		'</tr></thead><tbody>'
-
-	for _, r in ipairs(rows) do
-		local tone = TONE[r.verdict] or "mute"
-		local action
-		if r.verdict == "direct" then
-			action = (r.kind == "ip")
-				and translate("已加入 china 集合（直连）")
-				or translate("已写入 dom_domestic（国内）")
-		elseif r.verdict == "proxy" then
-			action = (r.kind == "ip")
-				and translate("已加入 blacklist 集合（代理）")
-				or translate("已写入 dom_foreign（国外）")
-		else
-			action = translate("不写入任何集合，下一轮重试")
-		end
-
-		p[#p + 1] = string.format(
-			'<tr><td><code>%s</code></td><td>%s</td>' ..
-			'<td><span class="dc-badge dc-badge--%s">%s</span></td>' ..
-			'<td>%s</td></tr>',
-			r.target, KIND[r.kind] or r.kind, tone,
-			TEXT[r.verdict] or r.verdict, action)
-	end
-
-	p[#p + 1] = '</tbody></table></div>'
-	p[#p + 1] = string.format(
-		'<div class="dc-hint">%s %d / %s %d / %s %d / %s %d</div>',
-		translate("直连通"), sum.direct or 0,
-		translate("代理通"), sum.proxy or 0,
-		translate("都不通"), sum.dead or 0,
-		translate("合计"), sum.total or 0)
-
-	return table.concat(p)
-end
-
-s = m:section(TypedSection, "health", translate("观测与阈值"),
-	translate("只探测<b>观测列表</b>里的域名，不做全量探测 —— " ..
-		"3.5 万个域名一轮要几小时，也会把 dnsmasq 与 dnsproxy 打满。"))
-s.anonymous = true
-s.addremove = false
-o = s:option(Flag, "enabled", translate("启用健康检测与自动改道"),
-	translate("关闭后不探测、不改道，静态分流照常工作。"))
-o.rmempty = false
-o.default = "1"
-
-o = s:option(DynamicList, "watch", translate("观测域名"),
-	translate("清空后会自动回落到内置基准集（国内外各 4 个）。"))
-o.datatype = "string"
-o.rmempty = true
-o:depends("enabled", "1")
-
-o = s:option(Value, "timeout", translate("单次探测超时（秒）"),
-	translate("BusyBox 的 <code>nslookup</code> 没有 <code>-timeout</code> 参数，" ..
-		"框架自己实现硬超时，所以这个值就是真实上界。"))
-o.datatype = "range(1, 10)"
-o.default = "2"
-o:depends("enabled", "1")
-
-o = s:option(Value, "retries", translate("重试次数"),
-	translate("每次探测失败后的重试次数（不含首次）。" ..
-		"单次 UDP 丢包很常见，不重试会让改道变成随机行为。"))
-o.datatype = "range(0, 5)"
-o.default = "2"
-o:depends("enabled", "1")
-
-o = s:option(Value, "fail_threshold", translate("改道阈值（连败轮数）"),
-	translate("连续失败多少轮才判定「不通」。取 1 会让单轮抖动直接触发改道。"))
-o.datatype = "range(1, 10)"
-o.default = "2"
-o:depends("enabled", "1")
-
-o = s:option(Value, "recover_threshold", translate("回切阈值（连续成功轮数）"),
-	translate("首选链连续成功多少轮才回切。配合「最小驻留」避免临界状态反复横跳。"))
-o.datatype = "range(1, 20)"
-o.default = "3"
-o:depends("enabled", "1")
-
-o = s:option(Value, "min_dwell", translate("最小驻留（秒）"),
-	translate("改道后至少停留多久才允许回切。"))
-o.datatype = "range(0, 3600)"
-o.default = "120"
-o:depends("enabled", "1")
-
-o = s:option(Value, "interval", translate("轮询间隔（秒）"),
-	translate("0 = 不自动轮询，只能从下方按钮手动触发。小于 15 秒会被抬到 15 秒" ..
-		"（一轮探测本身就要 3~10 秒，更短只会让两轮重叠）。"))
-o.datatype = "range(0, 3600)"
-o.default = "60"
-o:depends("enabled", "1")
-
--- ── 域名操作 ──────────────────────────────────────────────────────
---
--- ⚠️ 按钮命名必须与页面底部 CBI 自动生成的「保存 / 保存并应用」区分开。
---
---   CBI 会在页面底部自动生成两个按钮（来自 Map 模板，无法移除）：
---     · 保存        → 只写 UCI
---     · 保存并应用  → 写 UCI + 调本 Map 的 apply_on_parse
---   而本 section 的这个按钮做的是**另一件事**：重建分流片段 + 重启 dnsmasq。
---
---   v0.14.0 之前它也叫「保存并应用」，于是页面上出现两个同名按钮
---   （实测 duplicates: [["保存并应用", 2]]），用户无法判断该点哪个。
---   现在改名为「重建分流规则并生效」，语义唯一。
-s = m:section(TypedSection, "dnschain", translate("域名操作"))
-s.anonymous = true
-s.addremove = false
-
-o = s:option(Button, "_apply_domains", translate("重建分流规则并生效"),
-	translate("把当前配置重建为分流片段与动态上游文件，并重启 dnsmasq 让静态规则生效。" ..
-		"<br/><b>会有约 3 秒解析中断</b> —— 静态片段通过 conf-dir 加载，" ..
-		"实测 reload（SIGHUP）不会重读它，只能 restart。" ..
-		"<br/>与底部「保存」的区别：保存只写配置，本按钮才让改动真正生效。"))
-o.inputstyle = "apply"
-function o.write(self, section)
-	-- 不再无条件拼 ✓（v0.14.4 修 S6）：按实际出口决定符号与文案
-	local ok, out = pcall(ds.apply_domains)
-	ds.invalidate()
-	setmsg(apply_message(ok, out) .. "\n" .. tostring(out or ""))
-end
-
-o = s:option(Button, "_cycle_now", translate("立即探测一轮"),
-	translate("跑一轮健康检测并按阈值判定是否改道。" ..
-		"<b>不会重启 dnsmasq</b>：改道只改 servers-file 并 SIGHUP。"))
-o.inputstyle = "apply"
-function o.write(self, section)
-	local out = ds.health_cycle()
-	ds.invalidate()
-	setmsg("✓ " .. translate("探测完成") .. "\n" .. (out or ""))
-end
-
-o = s:option(Button, "_reset_health", translate("清空改道状态"),
-	translate("把所有「已改道」撤回，回到「按归属走」。用于排障时确认某条链是否真的坏了。"))
-o.inputstyle = "reset"
-function o.write(self, section)
-	local out = ds.reset_health()
-	ds.invalidate()
-	setmsg("✓ " .. translate("已清空") .. "\n" .. (out or ""))
-end
-
--- ⚠️ 「校验自定义列表」按钮已移除（v0.14.0 去重）。
---
---   理由：格式校验已经在**保存时**做了两道 ——
---     · 页面 validate_domain()（输入框失焦即报错，手误立刻可见）
---     · dc_domain_valid()（兜住 uci set / 备份恢复等绕过页面的路径）
---   再放一个「事后校验」按钮，用户点它得到的结论与保存时的校验
---   完全一致，属于重复入口。
---
---   真正需要「事后体检」的场景（配置被外部改坏、域名同时出现在两边）
---   已由「诊断」tab 的「立即重新自检」覆盖 —— 那里是完整的 20 项检查，
---   比单看域名列表更全面。保留两个入口只会让人不知道该点哪个。
---
---   注意：ds.check_domains() 仍保留在模型层，自检会调用它。
-
-------------------------------------------------------------------------
--- Tab「解析」：上游 + 双栈 + 端口 + 缓存
-------------------------------------------------------------------------
-
--- 上游校验（国内/国外共用）
---
--- ⚠️ 收集值时必须防 table：uci 的 list 在 Lua 里是 table，
--- DynamicList 提交的 value 也可能是 table。旧实现直接拼进 urls
--- 会导致 dnschain.lua 的 url:match 崩溃 → 保存整体 500。
-local function collect_strings(v, out)
-	if type(v) == "string" then
-		if v ~= "" then out[#out + 1] = v end
-	elseif type(v) == "table" then
-		for _, x in ipairs(v) do collect_strings(x, out) end
-	end
-end
-
-local function validate_upstream(self, value, section)
-	local urls = {}
-	local uci = require "luci.model.uci".cursor()
-	-- ⚠️ 只校验**本次输入**，不再合并该 section 的历史值（v0.14.4 修 M3）。
-	--
-	--   原实现把「该 section 已有的全部 server」和「当前这一行的新值」
-	--   合并后整体判定，任一条不合规就整体返回 nil。于是某个上游被判
-	--   端口越界后，该 section 里**每一行**的编辑都会被拒 —— 包括用户
-	--   正想用来替换坏行的那一行，形成死锁，只能绕过页面改 UCI。
-	--
-	--   历史值由「一键归一」与自检负责提示。
-	collect_strings(value, urls)
-
-	local ok, bad = ds.validate_upstreams(urls)
-	if not ok then
-		return nil, translate("以下上游端口不在代理端口集内，路由器自身出向不会被代理：") ..
-			" " .. table.concat(bad, "；")
-	end
-	return value
+	return dg.status_map(rows, {})
 end
 
 -- ── 国内上游 ──
@@ -1562,22 +1219,23 @@ o.rmempty = false
 o.validate = validate_upstream
 o.placeholder = "https://dns.google/dns-query"
 
-o = s:option(Flag, "cert_verify", translate("校验上游证书"),
-	translate("dnsproxy 的 DoH 上游走标准 TLS（带 SNI），可以正常校验证书。" ..
-		"关闭后跳过校验，仅用于上游证书异常时的排障。" ..
-		"<br/><b>注意：此项目前仅作记录，未接入 dnsproxy 的启动参数</b>" ..
-		"（框架始终使用 dnsproxy 的默认校验行为）。"))
-o.rmempty = true
-o.default = "1"
-
-o = s:option(Flag, "via_proxy", translate("经代理出站"),
-	translate("国外上游的连接走 SSR-Plus 的 OUTPUT 链。" ..
-		"要求 router_proxy=1 且 dports 含 443。" ..
-		"<br/><b>不要关</b>：国外 DoH 直连会被墙，国外域名将全部无结果。" ..
-		"<br/><b>注意：此项目前仅作记录，实际出站由 SSR-Plus 的" ..
-		" <code>router_proxy</code> 与 dports 决定</b>（框架不改这两项）。"))
-o.rmempty = true
-o.default = "1"
+-- ⚠️ 「校验上游证书」与「经代理出站」两个开关已删除（v0.19.0）。
+--
+--   它们都是**假开关**：可以改，但后端完全不读，改了没有任何效果。
+--
+--   cert_verify —— `dc_gen_foreign_args`（dnschain.sh:400-436）只写
+--     --upstream / --bootstrap / --timeout / --upstream-mode / --hosts-file，
+--     **没有证书相关参数**。框架始终用 dnsproxy 的默认校验行为。
+--     全仓库非注释引用：配置文件 1 处 + 页面 1 处，零后端读取。
+--
+--   via_proxy  —— 实际出站由 SSR-Plus 的 `router_proxy` 与 `dports` 决定，
+--     框架不改这两项。开关本身只是"记录一下用户的期望"。
+--
+--   留着一个改不动的开关，比没有更糟：用户会以为改了生效，
+--   出问题时反复调它，而真正的开关在 SSR-Plus 页面。
+--
+--   如果将来要真正实现「证书校验开关」，需要在 dc_gen_foreign_args 里
+--   接 `--insecure`（dnsproxy 的对应参数），届时再把这个开关加回来。
 
 -- ── 双栈策略 ──
 --
@@ -1669,13 +1327,16 @@ function o.cfgvalue()
 		pref ~= "" and pref or "?", eff ~= "" and eff or "?", v6 ~= "" and v6 or "?")
 end
 
-o = s:option(Flag, "filter_https_rr", translate("抑制 HTTPS/SVCB 记录"),
-	translate("qtype 64（SVCB）与 65（HTTPS）可携带 <code>ipv6hint</code>，" ..
-		"客户端能绕过 AAAA 抑制拿到 IPv6 地址。" ..
-		"<br/>v0.10.0 起<b>默认关闭</b>：IPv6 流量代理已把国外 IPv6 送进代理，" ..
-		"不再需要防止 ipv6hint 泄漏。" .. "<br/><b>注意：此项目前仅作记录，没有运行时消费者</b>（改了不会生效）。"))
-o.rmempty = false
-o.default = "0"
+-- ⚠️ 「抑制 HTTPS/SVCB 记录」开关已删除（v0.19.0）。
+--
+--   它是**假开关**：`aaaa.policy.filter_https_rr` 全仓库非注释引用
+--   只有配置文件 1 处 + 页面 1 处，**零后端读取**。
+--
+--   而且 v0.10.0 起这个功能本身就不需要了：IPv6 流量代理已把
+--   国外 IPv6 送进代理，不再需要防 ipv6hint 泄漏。页面原文自己
+--   也写着「默认关闭」+「没有运行时消费者」。
+--
+--   一个既不生效、又已无必要的开关，留着只会增加阅读负担。
 
 -- ── 端口与实例 ──
 s = m:section(TypedSection, "dnschain", translate("端口与实例"))
@@ -1718,11 +1379,14 @@ s = m:section(TypedSection, "cache", translate("缓存"),
 s.anonymous = true
 s.addremove = false
 
-o = s:option(Flag, "enabled", translate("启用缓存"),
-	translate("缓存由 dnsmasq 承担，实际始终启用 —— 框架不读这个开关。" ..
-		"<br/><b>注意：此项目前仅作记录，没有运行时消费者</b>（改了不会生效）。"))
-o.rmempty = false
-o.default = "1"
+-- ⚠️ 「启用缓存」开关已删除（v0.19.0）。
+--
+--   它是个**假开关**：页面自己写着「实际始终启用 —— 框架不读这个开关」，
+--   后端全仓库零读取（`cache.enabled` 只有配置文件 1 处 + 页面 1 处）。
+--   留着它只会让用户以为「关掉缓存能解决问题」，而实际什么都不会变。
+--
+--   缓存确实始终启用，这是框架的硬约束（约束 #1「缓存只在 dnsmasq 一层」），
+--   不是可选项 —— 可选项不该做成开关。
 
 o = s:option(Value, "size", translate("条目数"),
 	translate("dnsmasq 的 cache-size。当前实测 8192 条足够家用；" ..
@@ -1730,7 +1394,6 @@ o = s:option(Value, "size", translate("条目数"),
 o.datatype = "range(128, 65536)"
 o.placeholder = "8192"
 o.default = "8192"
-o:depends("enabled", "1")
 
 o = s:option(DummyValue, "_cache_stat", translate("当前统计"))
 o.rawhtml = true
@@ -1742,6 +1405,20 @@ function o.cfgvalue()
 		'<span class="dc-badge dc-badge--ok">' .. translate("本地应答 %s") .. '</span> ' ..
 		'<span class="dc-badge dc-badge--mute">' .. translate("转发 %s") .. '</span>',
 		n("dns_cache_inserted"), n("dns_local_answered"), n("dns_queries_forwarded"))
+end
+
+-- 清空缓存（v0.19.0 从「操作」搬来）
+--
+-- 属缓存配置，不属"操作"；且低频 —— 放在缓存 section 里语义正确。
+-- 它是单条 SIGHUP：进程不重启、客户机无感知。
+o = s:option(Button, "_flush_cache", translate("清空全部缓存"),
+	translate("发送 SIGHUP 清空 dnsmasq 缓存：进程不重启、客户机无感知。" ..
+		"「清空指定域名」做不到 —— dnsmasq 与 dnsproxy 都没有按域名淘汰单条缓存的接口。"))
+o.inputstyle = "reload"
+function o.write(self, section)
+	local ok, msg = ds.flush_cache()
+	ds.invalidate()
+	setmsg((ok and "✓ " or "✗ ") .. msg)
 end
 
 ------------------------------------------------------------------------
@@ -1813,14 +1490,32 @@ function o.cfgvalue()
 		'</tr></thead><tbody>' .. table.concat(rows) .. '</tbody></table></div>'
 end
 
+-- ── 名单自动导入（v0.19.0：从「假开关」变成真开关）────────────────
+--
+-- ⚠️ 历史：在此之前 `lists.auto_import` 与 `import_interval` 都**没有消费者** ——
+--    `dnschain-reconcile` 全仓库无任何调度器（无 cron、无 procd 实例），
+--    只能由页面的「一键归一」按钮手动触发。所以「自动导入」这个开关
+--    名不副实，页面自己也写着「没有定时调度」。
+--
+--    v0.19.0 起 reconcile 由后台守护循环调用；v0.21.0 删掉 dnschain-health
+--    后，改由 init.d 的定时循环承担，这两个键仍然生效：
+--      · 守护每轮探测后调一次 reconcile
+--      · reconcile 内部先比名单指纹，未变则零动作（不会反复重启）
+--
+--    `import_interval` 仍是**描述性**的：实际节拍由
+--    `health.interval`（观测与阈值）决定，因为 reconcile 搭在同一个循环里。
+--    保留此键是为了兼容既有配置，且它表达的是「期望的导入频率」。
 o = s:option(Flag, "auto_import", translate("自动导入"),
-	translate("SSR-Plus 更新名单后，收敛器按间隔轮询源文件指纹并自动重新导入。"))
+	translate("名单源文件变化时自动重新导入并重建分流规则。" ..
+		"<br/>由守护进程每轮顺带检查（指纹未变则不做任何事，不会重启 dnsmasq）。" ..
+		"<br/>关闭后需手动改配置才能让新名单生效。"))
 o.rmempty = false
 o.default = "1"
 
-o = s:option(Value, "import_interval", translate("轮询间隔（秒）"),
-	translate("导入只在点「立即归一」时发生，没有定时调度。" ..
-		"<br/><b>注意：此项目前仅作记录，没有运行时消费者</b>（改了不会生效）。"))
+o = s:option(Value, "import_interval", translate("期望导入间隔（秒）"),
+	translate("期望的名单检查频率。<b>实际节拍由「观测与阈值」里的" ..
+		"「轮询间隔」决定</b> —— 名单检查搭在同一个守护循环里，" ..
+		"不会单独起定时器。此值仅作记录。"))
 o.datatype = "range(10, 3600)"
 o.default = "60"
 o:depends("auto_import", "1")
@@ -1919,7 +1614,7 @@ s = m:section(TypedSection, "dnschain", translate("拦截与框架开关"))
 s.anonymous = true
 s.addremove = false
 
-o = s:option(Flag, "enabled", translate("启用 DNS 链路框架"),
+o = s:option(Flag, "enabled", translate("启用 DNS 分流框架"),
 	translate("关闭后框架不生成分流规则、不启动自己的 dnsproxy 实例。"))
 o.rmempty = false
 o.default = "1"
@@ -1937,11 +1632,15 @@ o = s:option(Flag, "intercept_dot", translate("拒绝 LAN 出向 853（DoT/DoQ�
 o.rmempty = false
 o.default = "1"
 
-o = s:option(Flag, "intercept_doh", translate("尽力阻断公共 DoH"),
-	translate("443 无法可靠区分 DoH 与普通 HTTPS，故此项只做<b>标注</b>，不实际拦截。" ..
-		"默认关闭。"))
-o.rmempty = false
-o.default = "0"
+-- ⚠️ 「尽力阻断公共 DoH」开关已删除（v0.19.0）。
+--
+--   页面原文自己写着「443 无法可靠区分 DoH 与普通 HTTPS，
+--   故此项只做**标注**，不实际拦截」—— 也就是承认它没有任何作用。
+--   后端同样零读取（`dnschain.main.intercept_doh` 只有配置 1 处 + 页面 1 处）。
+--
+--   保留一个明确写着"不实际拦截"的开关，只会让用户以为点开就能防住
+--   DoH 绕过，实际不能。真正的防护是 `intercept_dot`（拒绝 853）——
+--   那个是真的生效的，已保留。
 
 ------------------------------------------------------------------------
 -- Tab「DHCP」：DHCP 下发 DNS
@@ -1989,7 +1688,8 @@ end
 
 s = m:section(TypedSection, "selftest", translate("自检"),
 	translate("20 项检查覆盖链路可达性、分流正确性、上游加密、双栈策略、" ..
-		"fw4 可加载性与明文旁路。失败自动回滚见下方开关。"))
+		"fw4 可加载性与明文旁路。<br/>" ..
+		"页面加载时自动跑一次（复用 10 秒内结果）；需要强制重跑点「操作」里的按钮。"))
 s.anonymous = true
 s.addremove = false
 
@@ -2038,21 +1738,62 @@ function o.cfgvalue()
 		'</tr></thead><tbody>' .. table.concat(rows) .. '</tbody></table></div>'
 end
 
-o = s:option(Flag, "auto_rollback", translate("失败自动回滚"),
-	translate("自检失败时自动回滚到上一次通过的配置快照。" ..
-		"<br/><b>注意：此项目前仅作记录，回滚逻辑尚未实现</b>" ..
-		"（失败时只记日志，不会自动回滚配置）。"))
-o.rmempty = false
-o.default = "1"
-
-o = s:option(Value, "interval", translate("定时自检间隔（秒）"),
-	translate("0 表示关闭定时自检。") ..
-	translate("<br/><b>注意：仓库里没有定时调度</b>（无 cron、无 procd 实例），" ..
-		"自检只在打开本页或点「一键自检」时运行。"))
-o.datatype = "range(0, 86400)"
-o.default = "300"
+-- ⚠️ 「失败自动回滚」与「定时自检间隔」两个开关已删除（v0.19.0）。
+--
+--   两者都是**假开关**：
+--
+--   auto_rollback  —— 页面原文写着「回滚逻辑尚未实现（失败时只记日志，
+--     不会自动回滚配置）」。全仓库零消费者。用户点开它会以为配置
+--     坏了能自动恢复，实际不会 —— 这是最危险的一类假开关。
+--
+--   selftest.interval —— 页面原文写着「仓库里没有定时调度（无 cron、
+--     无 procd 实例）」。全仓库零消费者。
+--
+--   两者都涉及**未实现的功能**。删除开关不等于放弃功能：
+--   将来真要做自动回滚/定时自检时，应该先实现后端再补开关，
+--   而不是先放一个不生效的开关让用户误以为已经有了。
+--
+--   ⚠️ 注意与 `lists.auto_import` 的区别：那个开关在本版**真的接上了**
+--   消费者（后台守护每轮调 reconcile），所以保留。
+--   判据是「后端有没有真的读它」，不是「名字听起来像自动」。
 
 -- ── 操作 ──
+--
+-- 全部写操作后必须 ds.invalidate()：v0.11.1 加了请求级缓存，
+-- selftest / chain_snapshot / list_stats 在同一请求内只跑一次。
+-- 按钮执行完若不清缓存，页面显示的还是旧结果 —— 用户会以为「点了没反应」。
+-- ── 操作（v0.19.0：8 个按钮 → 1 个）────────────────────────────────
+--
+-- ── 为什么只剩「立即重新自检」一个按钮 ──────────────────────────
+--
+-- 其余 7 个按钮要么与别处重复，要么已被自动化取代：
+--
+--   ① 重建分流规则并生效 → 删。与页底「保存并应用」调同一个
+--      `ds.apply_domains()`（见上方「域名操作」的删除说明）。
+--
+--   ② 一键归一 → 删。v0.19.0 起 `dnschain-reconcile` 由 health 守护
+--      每轮自动调用（后台守护循环），用户不需要再点。
+--      它做的两件事（归一不变量 + 导入名单）都变成后台自动。
+--
+--   ③ 立即分诊未知目标 → 删（分诊功能本身已在 v0.21.0 移除）
+--      `dc_triage_cycle`（dnschain.sh:2186），随健康守护按
+--      `health.interval` 自动跑。按钮只是提前触发同一件事。
+--
+--   ④ 更新 GFW 名单 → 删。由 SSR-Plus 自己的定时任务更新，
+--      框架侧的 `lists.auto_import` 会在下一轮收敛时自动导入。
+--      保留按钮等于让用户手动做一件本来就会自动发生的事。
+--
+--   ⑤ 立即探测一轮 → 删。health 守护已按 `health.interval` 自动跑；
+--      需要提前触发时改一次 `观测与阈值` 的间隔即可。
+--
+--   ⑥ 清空全部缓存 → 移到「上游」tab 的缓存 section。它属缓存配置，
+--      不属"操作"；且低频。
+--
+--   ⑦ 清空改道状态 → 移到「DNS 分流状态」的折叠区。它是排障动作，
+--      排障时就地可用才有意义。
+--
+-- 保留的唯一理由：「立即重新自检」是**唯一需要用户主动触发的**动作 ——
+-- 页面默认复用 10 秒内的缓存结果，只有它能让用户强制真跑一次。
 --
 -- 全部写操作后必须 ds.invalidate()：v0.11.1 加了请求级缓存，
 -- selftest / chain_snapshot / list_stats 在同一请求内只跑一次。
@@ -2062,67 +1803,31 @@ s.anonymous = true
 s.addremove = false
 
 o = s:option(Button, "_selftest_now", translate("立即重新自检"),
-	translate("重新执行全部自检项。页面默认复用首次结果以加快加载，" ..
-		"点此可强制刷新。"))
+	translate("重新执行全部 20 项自检。页面默认复用 10 秒内的结果以加快加载，" ..
+		"点此可强制真跑一次（绕过缓存）。"))
 o.inputstyle = "apply"
 function o.write(self, section)
 	ds.invalidate("selftest")
-	local r = ds.selftest()
+	-- ⚠️ 必须传 true（v0.16.5）：selftest 有 10 秒跨请求 TTL 缓存，
+	--    不传 force 的话用户点完按钮可能读到缓存里的旧结果，
+	--    看起来像「按钮没生效」。这是引入缓存后必须同步的一处。
+	local r = ds.selftest(true)
 	setmsg(translate("已重新自检") .. "：" ..
 		string.format("PASS=%d", r.pass or 0) ..
 		(r.conclusion ~= "" and (" — " .. r.conclusion) or ""))
 end
 
-o = s:option(Button, "_reconcile", translate("一键归一"),
-	translate("立即重放不变量集：把 SSR-Plus / dnsmasq / dnsproxy 的相关键" ..
-		"归一到框架期望值。"))
-o.inputstyle = "apply"
-function o.write(self, section)
-	local ok, out = ds.reconcile_now()
-	ds.invalidate()
-	setmsg("✓ " .. translate("已归一") .. "\n" .. (out or ""))
-end
 
-o = s:option(Button, "_triage", translate("立即分诊未知目标"),
-	translate("对「不在 GFW 名单、不在代理 IP 集、不在国内 IP 段、" ..
-		"也不在任何数据库」的目标执行：先试直连，直连不通再试代理，" ..
-		"都不通则标记为死。跑通的会落库（IP 进集合、域名进对应列表），" ..
-		"下次开机与每轮收敛自动重放。"))
-o.inputstyle = "apply"
-function o.write(self, section)
-	local ok, out = ds.triage_now()
-	ds.invalidate()
-	setmsg((ok and "✓ " or "✗ ") .. translate("已分诊") .. "\n" .. (out or ""))
-end
-
-o = s:option(Button, "_import", translate("手动导入名单"),
-	translate("立即从 SSR-Plus 的名单文件重新生成框架的分流规则。"))
-o.inputstyle = "apply"
-function o.write(self, section)
-	local ok, out = ds.import_lists()
-	ds.invalidate()
-	setmsg("✓ " .. translate("已导入") .. "\n" .. (out or ""))
-end
-
-o = s:option(Button, "_update_gfw", translate("更新 GFW 名单"),
-	translate("调用 SSR-Plus 的 update.lua 下载最新名单，完成后由收敛器自动导入。"))
-o.inputstyle = "apply"
-function o.write(self, section)
-	local ok, msg = ds.update_gfw_list()
-	ds.invalidate()
-	setmsg((ok and "✓ " or "✗ ") .. msg)
-end
-
-o = s:option(Button, "_flush_cache", translate("清空全部缓存"),
-	translate("发送 SIGHUP 清空 dnsmasq 缓存：进程不重启、客户机无感知。" ..
-		"「清空指定域名」做不到 —— dnsmasq 与 dnsproxy 都没有按域名淘汰单条缓存的接口。"))
-o.inputstyle = "reload"
-function o.write(self, section)
-	local ok, msg = ds.flush_cache()
-	ds.invalidate()
-	setmsg((ok and "✓ " or "✗ ") .. msg)
-end
-
+-- ⚠️ 以下按钮已全部删除，去向见本 section 顶部注释：
+--    _apply_domains  → 与「保存并应用」重复（整节删除）
+--    _reconcile      → 改由收敛器每轮自动调用
+--    _update_gfw     → 由 SSR-Plus 自身定时任务 + auto_import 接管
+--    _flush_cache    → 移到「上游」tab 的缓存 section
+--
+-- v0.21.0 又删掉两个（健康改道与分诊整体移除）：
+--    _triage         → 分诊功能删除，未覆盖域名由 --fallback 自动兜底
+--    _cycle_now      → 健康探测删除
+--    _reset_health   → 改道状态删除，无需清空
 
 ------------------------------------------------------------------------
 -- Tab 元数据（必须在最后建，渲染时输出给前端归组用）
@@ -2160,58 +1865,36 @@ function m.apply_on_parse(...)
 	return rv
 end
 
--- 把 dnschain-health apply 的输出翻成一句给用户看的话。
+-- 把 apply 的输出翻成一句给用户看的话。
 --
--- ⚠️ 必须覆盖全部出口（v0.14.4 修 S6）。
+-- v0.21.0：输出契约变更。原来解析 `dnschain-health apply` 的
+-- `DNSMASQ=restarted|sighup|unchanged|skipped` 五种状态；
+-- 该脚本删除后，apply 移到 `dnschain-selftest apply`，输出改为：
 --
---   `dnschain-health apply` 有 5 条正常出口 + 2 条失败出口：
---     正常：DNSMASQ=restarted / skipped（框架未启用）/
---           skipped（无 init.d/dnsmasq）/ sighup（仅观测域名变化）/
---           unchanged（无变化）
---     失败：ERROR=生成分流片段失败 / ERROR=生成自定义列表失败
+--   成功：OK=国内 N 条、国外 M 条，分流 K 条已生效
+--   失败：ERROR=<原因>
 --
---   原实现只处理 `restarted` 一条，其余 4 条**不设置任何 message** ——
---   最常见的场景（只改了阈值、片段未变 → unchanged）用户点「保存并应用」
---   后看不到任何提示，会反复点。反过来按钮路径无条件拼 `✓`，
---   ERROR 时显示「✓ 已应用」+ 错误正文，符号与结论矛盾。
-local APPLY_TEXT = {
-	["restarted"] = translate("已应用（dnsmasq 已重启，静态片段生效）"),
-	["sighup"]    = translate("已应用（仅观测域名变化，SIGHUP 已生效，无中断）"),
-	["unchanged"] = translate("配置已保存（分流片段无变化，未重启 dnsmasq）"),
-	["skipped"]   = translate("已保存，但未应用（详见下方说明）"),
-}
-
+-- 所以这里只需判 OK= / ERROR= 两种。比原来简单，但**必须仍然覆盖
+-- 失败出口** —— v0.14.4 修过的 S6 缺陷是「ERROR 时显示 ✓ 已应用」，
+-- 符号与结论矛盾，用户会以为成功。
 function apply_message(ok, out)
 	if not ok then
 		return "✗ " .. translate("应用失败：") .. tostring(out)
 	end
 	out = out or ""
 
-	-- 失败出口优先：输出里出现 ERROR= 就是失败，不管 DNSMASQ= 是什么
+	-- 失败出口优先：出现 ERROR= 就是失败，不管有没有 OK=
 	local err = out:match("ERROR=([^\n]+)")
 	if err then
 		return "✗ " .. translate("应用失败：") .. err
 	end
 
-	-- ⚠️ 不能写 `DNSMASQ=(%S+)`：全角括号不是空白字符，`%S+` 会把
-	--    「skipped（框架未启用）」整段吃掉，导致 state 永远匹配不上
-	--    APPLY_TEXT 的键（实测 skipped 分支返回「✓ 已应用」而不是「!」）。
-	--    这里只取 ASCII 状态词。
-	local state = out:match("DNSMASQ=([%a%-]+)")
-	if not state then
-		-- 没有 DNSMASQ= 也没 ERROR=：脚本输出异常，如实回报
+	local okmsg = out:match("OK=([^\n]+)")
+	if not okmsg then
 		return "✗ " .. translate("应用结果不明（脚本无输出）")
 	end
 
-	local base = APPLY_TEXT[state] or translate("已应用")
-	-- skipped 的括号原因要带上，用户才知道为什么没应用
-	if state == "skipped" then
-		local why = out:match("DNSMASQ=skipped（([^）]+)）")
-		if why then
-			return "! " .. base .. "：" .. why
-		end
-	end
-	return "✓ " .. base
+	return "✓ " .. translate("已应用") .. "：" .. okmsg
 end
 
 return m

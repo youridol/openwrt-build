@@ -1,5 +1,5 @@
 -- Copyright (C) 2026 openwrt-build
--- DNS 链路框架控制页面
+-- DNS 分流框架控制页面
 -- 设计依据: docs/adr/0003-dns-chain-framework.md
 --
 -- 定位：只做配置读写、校验、下发、自检与回滚，**不实现解析逻辑**。
@@ -410,8 +410,8 @@ end
 --- 清空缓存：SIGHUP，零中断
 -- 清空 dnsmasq 缓存
 --
--- ⚠️ 必须委托给 `dnschain-health flush`，不要在 Lua 侧自己找 PID
---    （v0.14.2 实测修正）。
+-- ⚠️ 必须委托给 `dnschain-selftest flush`，不要在 Lua 侧自己找 PID
+--    （v0.14.2 实测修正；v0.21.0 起入口从 dnschain-health 挪到 selftest）。
 --
 --    原实现是 `pidof dnsmasq | awk '{print $1}'` —— 而 `pidof dnsmasq`
 --    返回 **3 个** PID，第一个是 **ujail 辅助子进程**：
@@ -422,10 +422,11 @@ end
 --    但页面照样报「已清空 dnsmasq 缓存（零中断）」—— 静默失效。
 --
 --    库里的 dc_flush_cache 用 dc_dnsmasq_pid 按 :53 socket inode 反查，
---    是正确实现；此前它没有 CLI 入口，成了死代码。现在补了
---    `dnschain-health flush` 子命令，Lua 只调它，两边不再各写一份。
+--    是正确实现；此前它没有 CLI 入口，成了死代码。
+--    v0.21.0 删掉 dnschain-health 后，flush 子命令移到 dnschain-selftest
+--    （它本来就在 rpcd ACL 白名单里，不必为它新建脚本）。
 function M.flush_cache()
-	local out = sys.exec("/usr/bin/dnschain-health flush 2>&1") or ""
+	local out = sys.exec("/usr/bin/dnschain-selftest flush 2>&1") or ""
 	if out:find("OK=") then
 		return true, out:gsub("^%s*OK=", ""):gsub("%s+$", "")
 	end
@@ -448,10 +449,15 @@ local function exec_ok(out)
 	return true
 end
 
-function M.import_lists()
-	local out = sys.exec("/usr/bin/dnschain-reconcile 2>&1") or ""
-	return exec_ok(out), out
-end
+-- ⚠️ `M.import_lists()` 已删除（v0.18.0，ADR-0007 §2.2）。
+--
+--   它曾是「手动导入名单」按钮的后端，函数体与 `M.reconcile_now()`
+--   **逐字相同**（都是 `dnschain-reconcile`），只差函数名。
+--   而 `dnschain-reconcile` 本来就同时做「归一不变量」与「导入名单」
+--   两件事（脚本头 :9-10），所以两个函数是同一件事的两个名字。
+--
+--   页面侧的两个按钮已合并为一个，这里同步删掉死函数 ——
+--   留着它只会让后来者以为「导入名单」是独立能力，再接一个重复入口回来。
 
 --- 触发 SSR-Plus 更新 GFW 名单
 function M.update_gfw_list()
@@ -468,61 +474,8 @@ function M.reconcile_now()
 	return exec_ok(out), out
 end
 
---- 立即分诊未知目标（v0.16.0）
---
--- 逻辑（用户需求原文）：
---   不在 GFW 名单、不在代理 IP 集（blacklist）、不在国内 IP 段（china）、
---   不在任何数据库的域名 / IP / IP 段，全部先走直连；
---   直连不通再走 SSR-Plus；都不通则标记为死。
---   跑通的落库：IP 转 IP 段追加到集合，域名追加到对应列表。
---
--- 判定依据是**实测**（真的发 HTTP 请求），不是查库或猜延迟。
-function M.triage_now()
-	local out = sys.exec("/usr/bin/dnschain-triage run 2>&1") or ""
-	return exec_ok(out), out
-end
 
---- 读取分诊结果（v0.16.0）
---
--- 返回：{ { target, kind, verdict }, ... } 与汇总
---   kind    = "ip" | "domain"
---   verdict = "direct" | "proxy" | "dead"
---
--- 数据源是 /usr/bin/dnschain-triage list 的输出：
---   ITEM <目标>|<类型>|<结果>
---   SUMMARY total=<n> direct=<n> proxy=<n> dead=<n>
---
--- 为什么要读脚本而不是直接读记录文件：记录文件有两份
--- （triage-ip.list / triage-domain.list），格式与语义在脚本里统一，
--- 页面重复实现一遍解析就会漂移。
-function M.triage_rows()
-	return cached("triage_rows", function()
-		local rows, sum = {}, {}
-		local out = sys.exec("/usr/bin/dnschain-triage list 2>/dev/null") or ""
 
-		for line in out:gmatch("[^\n]+") do
-			local it = line:match("^ITEM%s+(.+)$")
-			if it then
-				local target, kind, verdict = it:match("^([^|]+)|([^|]+)|([^|]+)$")
-				if target and verdict then
-					rows[#rows + 1] = {
-						target = target,
-						kind = kind or "",
-						verdict = verdict,
-					}
-				end
-			end
-			local sm = line:match("^SUMMARY%s+(.+)$")
-			if sm then
-				for k, v in sm:gmatch("(%w+)=(%d+)") do
-					sum[k] = tonumber(v) or 0
-				end
-			end
-		end
-
-		return { rows = rows, summary = sum }
-	end)
-end
 
 --- 运行自检
 --
@@ -559,37 +512,124 @@ local function split_selftest_name(rest)
 	return rest:sub(1, p - 1), rest:sub(p + #SELFTEST_SEP)
 end
 
-function M.selftest()
-	return cached("selftest", function()
-		local out = sys.exec("/usr/bin/dnschain-selftest 2>&1") or ""
-		local items = {}
-		for line in out:gmatch("[^\n]+") do
-			local no, status, rest = line:match("^(%d+)%s+(%u+)%s+(.+)$")
-			if no then
-				local name, detail = split_selftest_name(rest)
-				items[#items + 1] = {
-					no = tonumber(no),
-					status = status,
-					name = (name or rest):gsub("%s+$", ""),
-					detail = detail or ""
-				}
+--- 跑一次自检
+--
+-- 参数 force：true 时**绕过**跨请求 TTL 缓存，强制真跑一次。
+--   页面上的「立即重新自检」按钮必须传 true —— 否则用户点完
+--   可能读到 10 秒内的旧结果，看起来像「按钮没生效」。
+function M.selftest(force)
+	if force then
+		rawset(_G, "__dc_selftest_force", true)
+	end
+	local r = cached("selftest", function()
+		return M._selftest_uncached()
+	end)
+	rawset(_G, "__dc_selftest_force", nil)
+	return r
+end
+
+--- 自检的实际采集（含跨请求 TTL 缓存）
+function M._selftest_uncached()
+	-- ── 跨请求短 TTL 缓存（v0.16.5 性能修复）──────────────────
+	--
+	-- 为什么需要它（实测数据）：
+	--   `dnschain-selftest` 单次 **1.20 秒**（20 项探测，含 6+ 次
+	--   DNS 查询、nft/netstat 探测、配置比对）。
+	--   `cached()` 只保证「同一请求内算一次」，但**每个 HTTP 请求
+	--   都是独立进程** —— 用户每切一次 tab / 每刷一次页面都重跑。
+	--   实测整页渲染 3.0 秒里，selftest 占 1.2 秒（40%）。
+	--
+	-- 缓存策略：
+	--   · TTL 取 10 秒 —— 短到不会让用户看到过时结论，
+	--     长到能覆盖「连续切 tab」这个高频场景
+	--   · 落在 /var/run（tmpfs，不写 flash，重启即清）
+	--   · 「立即重新自检」按钮走 `M.selftest(true)` 强制绕过
+	--
+	-- ⚠️ 为什么不用纯内存表：LuCI 每个请求独立进程，模块级变量
+	--    活不过一个请求。必须落到文件才能跨请求复用。
+	--
+	-- ⚠️ 为什么 TTL 不取更长（比如 60 秒）：自检结论是诊断用的，
+	--    用户点「立即重新自检」后若还看到 60 秒前的旧结果，
+	--    会以为按钮失效。10 秒是「够快」与「够新」的交点。
+	local SELFTEST_TTL = 10
+	local cache_f = "/var/run/dnschain/.selftest.cache"
+
+	if not rawget(_G, "__dc_selftest_force") then
+		local mt = fs.stat(cache_f, "mtime")
+		if mt then
+			local age = os.time() - mt
+			if age >= 0 and age < SELFTEST_TTL then
+				local cf = io.open(cache_f, "r")
+				if cf then
+					local body = cf:read("*a")
+					cf:close()
+					if body and #body > 0 then
+						return M._parse_selftest(body)
+					end
+				end
 			end
 		end
-		local summary = out:match("SUMMARY PASS=(%d+) FAIL=(%d+) SKIP=(%d+)")
-		local conclusion = out:match("CONCLUSION:%s*([^\n]+)")
-		return {
-			items = items,
-			pass = summary and tonumber((summary)) or 0,
-			-- 视图层要显示 SKIP 与总数，这里一并给出（原来只有 pass）
-			skip = (function()
-				local _, _, sk = out:match("SUMMARY PASS=(%d+) FAIL=(%d+) SKIP=(%d+)")
-				return sk and tonumber(sk) or 0
-			end)(),
-			total = #items,
-			conclusion = conclusion or "",
-			raw = out,
-		}
-	end)
+	end
+
+	local out = sys.exec("/usr/bin/dnschain-selftest 2>&1") or ""
+
+	-- 写缓存（失败不影响功能 —— 只是下次还得重跑）
+	local wf = io.open(cache_f, "w")
+	if wf then
+		wf:write(out)
+		wf:close()
+	end
+
+	return M._parse_selftest(out)
+end
+
+--- 解析 selftest 的文本输出（抽出来供「跑一次」与「读缓存」共用）
+function M._parse_selftest(out)
+	local items = {}
+	for line in out:gmatch("[^\n]+") do
+		local no, status, rest = line:match("^(%d+)%s+(%u+)%s+(.+)$")
+		if no then
+			local name, detail = split_selftest_name(rest)
+			items[#items + 1] = {
+				no = tonumber(no),
+				status = status,
+				name = (name or rest):gsub("%s+$", ""),
+				detail = detail or ""
+			}
+		end
+	end
+	local summary = out:match("SUMMARY PASS=(%d+) FAIL=(%d+) SKIP=(%d+)")
+	local conclusion = out:match("CONCLUSION:%s*([^\n]+)")
+
+	-- ── AT / DUR / RUN（v0.18.0，ADR-0007 §2.6）──────────────────
+	--
+	-- 三个字段都是**可选**的：v0.18.0 之前的 selftest 不输出它们，
+	-- 而用户刷固件后 /var/run 里的旧缓存可能还是老格式。
+	-- 取不到时留空串，视图层显示「—」，不报错。
+	--
+	-- ⚠️ 用 `[^%s]+` 而不是 `(%S+)`：Lua 的模式里 %s 才是空白类。
+	--    AT 是 ISO8601（含 `-` 与 `:`），DUR 带 `s` 后缀，RUN 是纯数字，
+	--    三者都不含空白，所以统一用 [^%s]+ 最稳。
+	local at  = out:match("AT=([^%s]+)")
+	local dur = out:match("DUR=([^%s]+)")
+	local run = out:match("RUN=(%d+)")
+
+	return {
+		items = items,
+		pass = summary and tonumber((summary)) or 0,
+		-- 视图层要显示 SKIP 与总数，这里一并给出（原来只有 pass）
+		skip = (function()
+			local _, _, sk = out:match("SUMMARY PASS=(%d+) FAIL=(%d+) SKIP=(%d+)")
+			return sk and tonumber(sk) or 0
+		end)(),
+		total = #items,
+		conclusion = conclusion or "",
+		-- v0.18.0：运行时刻 / 耗时 / 轮次号（取不到时为空串/nil）
+		at  = at or "",
+		dur = dur or "",
+		run = run and tonumber(run) or nil,
+		raw = out,
+	}
 end
 
 --- IP 集与各数据库的一致性核对
@@ -749,8 +789,8 @@ end
 -- 域名归属 / 自定义列表 / 链路健康（v0.13.0）
 --
 -- 这一层只做「读运行时产物 + 调脚本」，**不自己重新实现判定逻辑**。
--- 归属与改道的真相在 /usr/share/dnschain/dnschain.sh 与
--- /usr/bin/dnschain-health 里，页面重复实现一份必然漂移 ——
+-- 归属的真相在 /usr/share/dnschain/dnschain.sh 里，
+-- 页面重复实现一份必然漂移 ——
 -- 而「页面显示 A、实际干 B」是这类配置页最难排查的故障。
 -----------------------------------------------------------------------
 
@@ -816,73 +856,8 @@ function M.watch_list()
 	return M.uci_list("health", "watch")
 end
 
---- 健康状态行
---
--- 返回 { {domain, class, pref, active, fail, ok, last, result, state}, ... }
--- 字段顺序与 dnschain-health status 的 ROW 行一一对应。
---
--- ⚠️ 与 health_summary 共用**同一次** status 调用（v0.14.1 性能修正）。
---
---   原来 health_rows 与 health_summary 各自 `sys.exec("dnschain-health status")`
---   一次，而该命令实测耗时 1.67 秒（它要遍历 /proc 找守护进程、
---   读 health.state、逐域名算归属）。页面两处都用 → **白跑两遍**。
---
---   现在两者都从 health_status_raw() 取，那个函数自带缓存，
---   整个请求只执行一次。实测页面总耗时从 5.6s 降到约 3.9s。
-local function health_status_raw()
-	return cached("health_status_raw", function()
-		return sys.exec("/usr/bin/dnschain-health status 2>/dev/null") or ""
-	end) or ""
-end
 
-function M.health_rows()
-	return cached("health_rows", function()
-		local out = health_status_raw()
-		local rows = {}
-		for raw in out:gmatch("[^\n]+") do
-			local payload = raw:match("^ROW%s+(.+)$")
-			if payload then
-				-- 用 gmatch 按 | 切分；Lua 的 split 没有标准实现，
-				-- 这里手工展开，避免引入 luci.util.split 的版本差异
-				local f = {}
-				for part in (payload .. "|"):gmatch("([^|]*)|") do
-					f[#f + 1] = part
-				end
-				if #f >= 9 then
-					rows[#rows + 1] = {
-						domain = f[1],
-						class  = f[2],
-						pref   = f[3],
-						active = f[4],
-						fail   = tonumber(f[5]) or 0,
-						ok     = tonumber(f[6]) or 0,
-						last   = tonumber(f[7]) or 0,
-						result = f[8],
-						state  = f[9],
-					}
-				end
-			end
-		end
-		return rows
-	end) or {}
-end
 
---- 健康汇总
-function M.health_summary()
-	return cached("health_summary", function()
-		local out = health_status_raw()
-		local line = out:match("SUM%s+([^\n]+)") or ""
-		local s = {}
-		-- ⚠️ `%w` 不含下划线（v0.14.4 修 M5）：`both_bad=1` 会被解析成
-		-- `bad = 1`，丢掉 `both_` 前缀（实测确认）。汇总键目前没人读，
-		-- 但这是一个「看起来有、实际没有」的通道，谁哪天用
-		-- summary.both_bad 就会拿到 nil。
-		for k, v in line:gmatch("([%w_]+)=(%d+)") do
-			s[k] = tonumber(v)
-		end
-		return s
-	end) or {}
-end
 
 --- 单域名解释（页面「思维链路图」用它把判定摊开）
 --
@@ -899,7 +874,7 @@ function M.explain(domain)
 	if type(domain) ~= "string" or domain == "" then
 		return {}
 	end
-	local out = sys.exec("/usr/bin/dnschain-health explain " .. M.shell_quote(domain) ..
+	local out = sys.exec("/usr/bin/dnschain-selftest explain " .. M.shell_quote(domain) ..
 		" 2>/dev/null") or ""
 	local t = {}
 	for raw in out:gmatch("[^\n]+") do
@@ -909,200 +884,16 @@ function M.explain(domain)
 	return t
 end
 
---- 运行一轮健康检测（页面按钮）
-function M.health_cycle()
-	local out = sys.exec("/usr/bin/dnschain-health cycle 2>&1") or ""
-	M.invalidate()
-	return out
-end
 
 --- 应用自定义列表（重建派生文件 + 重启 dnsmasq）
 function M.apply_domains()
-	local out = sys.exec("/usr/bin/dnschain-health apply 2>&1") or ""
-	M.invalidate()
-	return out
-end
-
---- 清空改道状态
-function M.reset_health()
-	local out = sys.exec("/usr/bin/dnschain-health reset 2>&1") or ""
+	local out = sys.exec("/usr/bin/dnschain-selftest apply 2>&1") or ""
 	M.invalidate()
 	return out
 end
 
 
---- dnsmasq 是否已带 --servers-file（改道通道是否就绪）
---
--- 只设了 UCI 不生效：必须验运行进程的实际参数。
--- 这是「改道看起来成功、实际没生效」的唯一可靠判据。
---- 改道通道是否就绪
---
--- 判据必须查**生效的 dnsmasq 配置文件**，不能只看进程 argv
--- （v0.13.0 路由器实测修正）。
---
--- OpenWrt 的 init.d/dnsmasq 是
---   `append_parm "$cfg" "serversfile" "--servers-file"`
--- 它把这个选项写进 /var/etc/dnsmasq.conf.*，**不放在命令行上**。
--- 实测 dnsmasq 的 cmdline 只有：
---   /usr/sbin/dnsmasq -C /var/etc/dnsmasq.conf.cfg01411c -k -x ...
--- 而 `servers-file=` 出现在该配置文件第 21 行。
--- 按 argv 判定会永远报「未就绪」，而通道其实是好的 ——
--- 页面于是显示「改道通道未就绪」，用户会去排查一个不存在的故障。
---
--- 三条判据：
---   a) UCI 配了路径
---   b) 文件存在（且 dnsmasq 读得到 —— ujail 白名单见下）
---   c) 生效的 dnsmasq 配置文件里真有 servers-file 指向它
-function M.serversfile_ready()
-	return cached("serversfile_ready", function()
-		local uci_sf = uci_get("dhcp.@dnsmasq[0].serversfile")
-		if uci_sf == "" then
-			return { ready = false, reason = "uci-missing", path = "" }
-		end
 
-		if not fs.access(uci_sf) then
-			return { ready = false, reason = "file-missing", path = uci_sf }
-		end
-
-		-- c) 生效的 dnsmasq 配置里有没有指向它的 servers-file
-		local conf_found = false
-		local conf_glob = io.popen("ls /var/etc/dnsmasq.conf.* 2>/dev/null")
-		if conf_glob then
-			for path in conf_glob:lines() do
-				local f = io.open(path, "r")
-				if f then
-					local body = f:read("*a") or ""
-					f:close()
-					-- 精确匹配整行，避免 servers-file=/a 命中 /ab
-					if body:find("servers%-file=" .. uci_sf:gsub("[%^%$%(%)%%%.%[%]%*%+%-%?]", "%%%0") .. "\n") then
-						conf_found = true
-						break
-					end
-				end
-			end
-			conf_glob:close()
-		end
-
-		if not conf_found then
-			return { ready = false, reason = "conf-missing", path = uci_sf }
-		end
-
-		-- b2) ujail 是否允许 dnsmasq 读这个目录
-		--
-		-- dnsmasq 由 ujail 降权到 uid 453 运行，只能看到 init 脚本里
-		-- `procd_add_jail_mount` 声明过的路径。servers-file 指向白名单
-		-- 之外的目录时**既不报错也不生效** —— 最隐蔽的一种失效。
-		local pid = M.port_owner("53", "udp")
-		if pid == "" then
-			return { ready = false, reason = "no-dnsmasq", path = uci_sf }
-		end
-
-		local ppid = ""
-		local st = io.open("/proc/" .. pid .. "/status", "r")
-		if st then
-			for line in st:lines() do
-				local p = line:match("^PPid:%s*(%d+)")
-				if p then ppid = p; break end
-			end
-			st:close()
-		end
-
-		if ppid ~= "" then
-			local cf = io.open("/proc/" .. ppid .. "/cmdline", "r")
-			if cf then
-				local cmd = (cf:read("*a") or ""):gsub("%z", "\n")
-				cf:close()
-				local jail_dir = uci_sf:match("^(.*)/[^/]+$") or ""
-				if jail_dir ~= "" then
-					local found = false
-					for line in cmd:gmatch("[^\n]+") do
-						-- ujail 的挂载参数带尾斜杠（procd_add_jail_mount_rw /var/run/dnsmasq/）
-						local norm = line:gsub("/+$", "")
-						if norm == jail_dir then found = true; break end
-					end
-					if not found then
-						return { ready = false, reason = "jail-blocked", path = uci_sf }
-					end
-				end
-			end
-		end
-
-		return { ready = true, reason = "", path = uci_sf }
-	end)
-end
-
---- 健康守护进程状态（页面要显示「自动改道是否在跑」）
---
--- 为什么需要：守护进程由 procd 托管（`procd_open_instance "health"`），
--- 页面原来完全没有它的任何痕迹 —— 用户改了阈值、开了开关，
--- 却无法确认「它到底有没有在跑」。开关显示「已启用」而守护进程
--- 没起来时，自动改道**完全不发生**，且没有任何提示。
-function M.health_daemon()
-	return cached("health_daemon", function()
-		local enabled = uci_get("dnschain.health.enabled")
-		if enabled == nil or enabled == "" then enabled = "1" end
-
-		local interval = uci_get("dnschain.health.interval") or "60"
-
-		-- 找 procd 实例：遍历 /proc 找 `dnschain-health daemon`
-		local pid = ""
-		local d = io.popen("ls -d /proc/[0-9]* 2>/dev/null")
-		if d then
-			for p in d:lines() do
-				local n = p:match("^/proc/(%d+)$")
-				if n then
-					local f = io.open(p .. "/cmdline", "r")
-					if f then
-						local cmd = (f:read("*a") or ""):gsub("%z", " ")
-						f:close()
-						if cmd:find("dnschain%-health") and cmd:find("daemon") then
-							pid = n
-							-- ⚠️ 不再解析 /proc/<pid>/stat 取启动时间（v0.14.4 删 L5）。
-							--
-							--   原 pattern 有 21 个占位符，捕获的是第 21 个字段，
-							--   而 starttime 是 /proc/<pid>/stat 的第 22 个
-							--   （第 1 是 pid、第 2 是 comm、第 3 是 state…），
-							--   实际取到的是 itrealvalue。而且 uptime 在返回表里
-							--   **没有出现**，是纯死变量。
-							--
-							--   这是一处「看起来在算进程运行时长」的假实现：
-							--   谁把 uptime 加进返回表就会显示错误时长。
-							--   真要运行时长应从 /proc/uptime 减去 starttime/HZ。
-							break
-						end
-					end
-				end
-			end
-			d:close()
-		end
-
-		-- 上次探测时间（从状态文件里取最大的 last）
-		local last = 0
-		local f = io.open("/var/run/dnschain/health.state", "r")
-		if f then
-			for line in f:lines() do
-				local t = line:match("|(%d+)|[^|]*$")
-				if t then
-					t = tonumber(t)
-					if t and t > last then last = t end
-				end
-			end
-			f:close()
-		end
-
-		local now = os.time()
-		local age = (last > 0) and (now - last) or -1
-
-		return {
-			enabled  = (enabled == "1"),
-			running  = (pid ~= ""),
-			pid      = pid,
-			interval = tonumber(interval) or 60,
-			last_run = last,
-			age      = age,
-		}
-	end)
-end
 
 --- watch.servers 的实际内容（用于「当前改道生效情况」核对）
 

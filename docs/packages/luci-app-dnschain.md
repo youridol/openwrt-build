@@ -1,8 +1,24 @@
-# luci-app-dnschain —— DNS 链路控制页面
+# luci-app-dnschain —— DNS 分流控制页面
 
-`luci-app-dnschain` 是「服务 → DNS 链路」这一张 CBI 页面：把 dnsmasq / dnsproxy / SSR-Plus 三层的可控参数集中在一页，并把链路的实时状态、域名归属判定、自动改道结果渲染成可读的表格与 SVG 图。它**不实现任何解析逻辑**，只做配置读写、校验、下发、自检与可视化（证据：`package/luci-app-dnschain/luasrc/model/cbi/dnschain/general.lua:8-9`）。
+`luci-app-dnschain` 是「服务 → DNS 分流」这一张 CBI 页面：把 dnsmasq / dnsproxy / SSR-Plus 三层的可控参数集中在一页，并把分流状态、域名归属判定与链路拓扑渲染成可读的表格与 SVG 图。它**不实现任何解析逻辑**，只做配置读写、校验、下发、自检与可视化（证据：`package/luci-app-dnschain/luasrc/model/cbi/dnschain/general.lua:8-9`）。
 
-页面在固件里的角色是「DNS 链路的唯一控制台」，但**链路本体不在这个包里**：`init.d/dnschain`、`dnschain.sh`、`dnschain-health`、`dnschain-reconcile`、`dnschain-selftest`、`/etc/config/dnschain` 全部由 `files/` overlay 提供，不是 opkg 包（证据：`package/luci-app-dnschain/Makefile:17-20` 明确写了「不依赖 dnschain 包 —— 本框架的 init/config/脚本全部由 files/ overlay 提供」，`LUCI_DEPENDS:=+luci-base` 在 `Makefile:21`）。
+> 🚨 **本文档描述的「自动改道」与「分诊」在 v0.22.0 已整体删除。**
+>
+> 阅读本文时请以这条为准：
+>
+> | 本文提到的 | v0.22.0 现状 |
+> |---|---|
+> | `dnschain-health`（448 行） | **已删除**；`flush` / `explain` / `apply` 三个子命令移到 `dnschain-selftest` |
+> | `dnschain-triage`（1710 行） | **已删除** |
+> | 自动改道（`watch.servers` / `--servers-file` / 五档健康状态） | **已删除**；改由 `dnsproxy --fallback 127.0.0.1:5336` 承担 |
+> | 分诊结果、观测与阈值、DNS 分流状态 三个 section | **已删除**；section 18 → 15，按钮 3 → 2 |
+> | 「DNS 分流去向」图 | **保留但语义变更**：五档 → 两档（走直连 / 走代理），数据来自归属判定 |
+>
+> **权威依据**：`CHANGELOG.md` v0.22.0、`docs/adr/0008-direct-first-with-fallback.md`。
+> 下文凡涉及上述已删功能的段落，保留用于理解历史与「为什么这么设计」，
+> **不要再按它实现或排查**。
+
+页面在固件里的角色是「DNS 分流的唯一控制台」，但**分流本体不在这个包里**：`init.d/dnschain`、`dnschain.sh`、`dnschain-health`、`dnschain-reconcile`、`dnschain-selftest`、`dnschain-triage`、`/etc/config/dnschain` 全部由 `files/` overlay 提供，不是 opkg 包（证据：`package/luci-app-dnschain/Makefile:17-20` 明确写了「不依赖 dnschain 包 —— 本框架的 init/config/脚本全部由 files/ overlay 提供」，`LUCI_DEPENDS:=+luci-base` 在 `Makefile:21`）。
 
 理解本页面的前提是记住一条分工：**页面是壳，脚本是里**。页面上每个按钮都只是 `luci.sys.exec` 一条 `/usr/bin/dnschain-*` 命令；页面上每个数字都是从运行时文件或脚本 stdout 里读出来的。页面从不自己算分流、不自己找进程、不自己发信号。
 
@@ -19,7 +35,7 @@
 | 许可证 | Apache-2.0 | `Makefile:13` |
 | 路由条数 | 1 条（同路径双通道声明） | 见 §2 |
 | 后端 ubus 对象 | **无**（不注册 rpcd 插件） | 见 §3.1 |
-| CBI 模型 | `general.lua`（1980 行）+ `dnschain.lua`（1054 行，数据层）+ `diagrams.lua`（905 行，SVG 生成） | 文件行数实测 |
+| CBI 模型 | `general.lua`（2242 行）+ `dnschain.lua`（1315 行，数据层）+ `diagrams.lua`（1380 行，SVG 生成）+ `diagnosis.lua`（445 行，归组与证据推导） | 文件行数实测 |
 | 前端资源 | `dnschain.js`（349 行，tab 控制器）+ `dnschain.css`（716 行，语义色令牌与版式） | 同上 |
 | 中文翻译 | `po/zh-cn/luci-app-dnschain.po`（1431 行，475 组 msgid/msgstr） | 同上 |
 
@@ -31,9 +47,10 @@ package/luci-app-dnschain/
 ├── luasrc/
 │   ├── controller/dnschain.lua            ← 路由 + 前置守卫
 │   └── model/cbi/dnschain/
-│       ├── general.lua                    ← 页面本体（20 个可见 section + 1 个元数据 section）
+│       ├── general.lua                    ← 页面本体（18 个可见 section + 1 个元数据 section）
 │       ├── dnschain.lua                   ← 数据层：读运行时状态、调脚本
-│       └── diagrams.lua                   ← 两张 SVG 导图
+│       ├── diagrams.lua                   ← SVG 导图（4 张）
+│       └── diagnosis.lua                  ← 归组规则 + 证据→症状推导（v0.18.0）
 ├── htdocs/luci-static/resources/dnschain/
 │   ├── dnschain.js                        ← 把 section 收拢成 6 个 tab
 │   └── dnschain.css                       ← shadcn 视觉语言的语义色令牌
@@ -52,14 +69,14 @@ package/luci-app-dnschain/
 
 | 路由路径 | 菜单标题 | order | action 类型 | 目标 | ACL | 声明位置 |
 |---|---|---|---|---|---|---|
-| `admin/services/dns_chain` | DNS 链路 | 20 | `cbi` | `dnschain/general` | `luci-app-dnschain` | `package/luci-app-dnschain/root/usr/share/luci/menu.d/luci-app-dnschain.json:2-11`；同路径另在 `package/luci-app-dnschain/luasrc/controller/dnschain.lua:37-40` 用 `entry()` 声明 |
+| `admin/services/dns_chain` | DNS 分流 | 20 | `cbi` | `dnschain/general` | `luci-app-dnschain` | `package/luci-app-dnschain/root/usr/share/luci/menu.d/luci-app-dnschain.json:2-11`；同路径另在 `package/luci-app-dnschain/luasrc/controller/dnschain.lua:37-40` 用 `entry()` 声明 |
 
 逐字段对照：
 
 | 字段 | JSON 通道的值 | Lua 通道的值 | 证据 |
 |---|---|---|---|
 | path | `admin/services/dns_chain` | `{"admin","services","dns_chain"}` | `menu.d:2` / `controller:37` |
-| title | `DNS 链路` | `_("DNS 链路")` | `menu.d:3` / `controller:39` |
+| title | `DNS 分流` | `_("DNS 分流")` | `menu.d:3` / `controller:39` |
 | order | `20` | `20` | `menu.d:4` / `controller:39` |
 | action.type | `cbi` | 由 `cbi()` 展开为 `call` | `menu.d:6` / `controller:38` |
 | action.path / 参数 | `dnschain/general` | `cbi("dnschain/general")` | `menu.d:7` / `controller:38` |
@@ -82,7 +99,7 @@ package/luci-app-dnschain/
   },
   "depends": { "acl": [ "luci-app-dnschain" ] },
   "order": 20,
-  "title": "DNS 链路"
+  "title": "DNS 分流"
 }
 ```
 
@@ -101,7 +118,7 @@ package/luci-app-dnschain/
 | 相邻菜单 | order | 来源 |
 |---|---|---|
 | ShadowSocksR Plus+ | 10 | `/usr/lib/lua/luci/controller/shadowsocksr.lua`（注释 `controller:17`） |
-| **DNS 链路（本页）** | **20** | `controller:39` |
+| **DNS 分流（本页）** | **20** | `controller:39` |
 | 动态 DNS | 59 | 注释 `controller:19` |
 | DNS Proxy | 60 | 注释 `controller:20` |
 | 带宽监控 | 80 | 注释 `controller:21` |
@@ -136,11 +153,11 @@ flowchart LR
 2. dispatcher 同时加载 `menu.d` 与 controller，按路径建树并合并同名字段（证据：`docs/routes.md:22-30` 记录的 `/usr/share/ucode/luci/dispatcher.uc:362` 与 `:389-424`）。
 3. 判定 `depends.acl`（`menu.d:9-11`）：不满足则节点 `satisfied=false`，侧边栏不显示、直连 URL 也被拒。
 4. 执行 controller 的 `index()`。**第一件事是前置守卫**：`/etc/config/dnschain` 不存在就直接 `return`，不注册任何路由（证据：`package/luci-app-dnschain/luasrc/controller/dnschain.lua:10-12`）。
-5. 注册路由 `entry({"admin","services","dns_chain"}, cbi("dnschain/general"), _("DNS 链路"), 20)`（`controller:37-39`）。
+5. 注册路由 `entry({"admin","services","dns_chain"}, cbi("dnschain/general"), _("DNS 分流"), 20)`（`controller:37-39`）。
 6. dispatcher 按 `parameters=[dnschain/general]` 载入 CBI 模型 `package/luci-app-dnschain/luasrc/model/cbi/dnschain/general.lua`。
-7. 模型顶部建 `Map("dnschain", translate("DNS 链路"), ...)`（`general.lua:41`），并 `require` 数据层与图示层（`general.lua:36-37`）。
+7. 模型顶部建 `Map("dnschain", translate("DNS 分流"), ...)`（`general.lua:41`），并 `require` 数据层与图示层（`general.lua:36-37`）。
 8. 覆写 `m.state_handler`，把按钮 `write()` 里登记的消息在 parse 结束后写到 `self.message`（`general.lua:65-79`）。这一步是按钮结果能显示到页面上的唯一原因 —— 注释 `general.lua:48-62` 记录了原来的三层失效原因（Button 需要非空 formvalue、`res:parse()` 返回值被丢弃、Map 模板读的是 `map.message` 而不是 `m.message`）。
-9. 依次渲染 20 个可见 section（行号见 §4.1）与 1 个空标题元数据 section。
+9. 依次渲染 18 个可见 section（行号见 §4.1）与 1 个空标题元数据 section。
 10. 元数据 section 由 `emit_tab_meta(m)` 在**最后**创建（`general.lua:173-190`，调用点 `general.lua:2023`）。它的 `cfgvalue()` 输出一段 `rawhtml`：`<link>` 引 CSS、`<script defer>` 引 JS、`<span data-dc-meta="1">` 带两个 JSON 属性 `data-dc-section-tab` 与 `data-dc-labels`（`general.lua:182-188`）。属性值必须用**单引号**包裹，否则 JSON 里的双引号会截断属性（注释 `general.lua:172-179`）。
 11. 浏览器加载 `dnschain.js`（`general.lua:184`），它在 `DOMContentLoaded` 或立即执行 `init()`（`dnschain.js:348-352`）。
 12. `init()` 依次：读元数据（`dnschain.js:50-61`）→ 移除空的 CBI tabmenu（`:302`，函数 `:203-216`）→ 给整块内容行加竖排类（`:303`，函数 `:239-258`）→ 绑定「单域名解释」输入行（`:304`，函数 `:272-296`）→ 收起元数据容器（`:310-315`）→ 按 `<h3>` 文本找到所有 section（`:317`，函数 `:70-85`）→ 统计每个 tab 的红徽标数（`:323-327`，`countBadges` 在 `:87-89`）→ 建 tab 栏（`:331`，`buildBar` 在 `:105-135`）→ 按 `localStorage['dnschain.activeTab']` 恢复上次 tab，否则取第一个（`:342-345`）。
@@ -286,44 +303,194 @@ BusyBox 每次 fork 约 5–8ms，**命令次数本身就是主要成本**。
 
 ## 4. 页面元素 → 后端调用对照
 
-### 4.1 6 个 tab 与 20 个 section
+### 4.1 4 个 tab 与 15 个 section
 
-tab 定义在 `general.lua:98-107`（`TAB_LABELS`），前端顺序常量在 `dnschain.js:46`（`TAB_ORDER = ['overview','domains','resolve','split','proxy','dhcp']`）。section → tab 的映射表是 `general.lua:134-162`（`SECTION_TAB`），键是 **translate 之后的标题文本**，所以改标题必须同步改这张表（注释 `general.lua:109-112`）。
+> 🚨 **v0.22.0：section 18 → 15，按钮 3 → 2。以下是**当前**权威清单，
+> 下面所有 v0.15/v0.18/v0.19 的历史说明块仅作沿革参考。**
+>
+> **删除的 3 个 section 与 1 个按钮**（详见 `CHANGELOG.md` v0.22.0 与
+> `docs/adr/0008-direct-first-with-fallback.md`）：
+>
+> | 删除 | 原 tab | 理由 |
+> |---|---|---|
+> | DNS 分流状态 | 状态 | 健康探测与改道整体删除，五档状态无数据源 |
+> | 分诊结果 | 域名 | 分诊功能整体删除，未覆盖域名由 `dnsproxy --fallback` 兜底 |
+> | 观测与阈值 | 名单 | 探测本身已删除，间隔/阈值/观测列表全部失效 |
+> | 「清空改道状态」按钮 | 状态 | 没有改道状态可清 |
+>
+> **语义变更的 1 个 section**：「DNS 分流去向」保留（用户明确要求），
+> 但数据源从「健康探测状态」改为**静态归属判定**，档位从五档减到
+> **两档（走直连 / 走代理）**。它现在显示的是「**我录入的**域名各自走哪条链」，
+> 不依赖任何探测。
+>
+> **当前 16 个 section 的 tab 归属**：
+>
+> | tab | section |
+> |---|---|
+> | 状态 | 当前状态、**DNS 分流去向**、自检、操作 |
+> | 域名 | 自定义域名 · 国内、自定义域名 · 国外、已录入清单、单域名解释 |
+> | 上游 | 国内上游、国外上游、双栈策略、端口与实例、缓存、SSR-Plus 兼容、拦截与框架开关、DHCP 下发 DNS |
+> | 名单 | 名单规模 |
+>
+> **当前 2 个按钮**：「立即重新自检」（状态/自检）、「清空全部缓存」（上游/缓存）。
+>
+> ⚠️ **「DNS 分流去向」必须登记进 `SECTION_TAB`，否则会在所有 tab 都显示。**
+> `dnschain.js` 的 `activate()` 对未归组 section 走
+> `if (!sec.tab) { sec.el.hidden = false; return; }` —— 兜底本意是
+> 「新增 section 忘了登记时不要消失」，代价是它**永远可见**。
+> 实测漏登记时，这张图在状态/域名/上游/名单 4 个 tab 全都渲染。
+> `tools/verify-dnschain-domains.sh` §13 有断言守着。
+
+tab 定义在 `general.lua` 的 `TAB_LABELS`，前端顺序常量在 `dnschain.js:46`（`TAB_ORDER = ['status','domains','upstream','lists']`）。section → tab 的映射表是 `general.lua` 的 `SECTION_TAB`，键是 **translate 之后的标题文本**，所以改标题必须同步改这张表。
+
+> ⚠️ 三处必须同步改，漏一处就会出现「tab 顺序错乱」或「section 显示成 id 原文」。
+> `tools/verify-dnschain-domains.sh` §13 有断言守着。
 
 > **v0.15.0：概览与诊断已合并**（用户要求「概览 tab 和诊断合并在一页显示，严格查重重复功能移除」）。
->
 > 合并前 7 个 tab，`diag`（诊断）独立。合并后 6 个，「自检」「操作」两个 section 归入 `overview`。
+
+> **v0.18.0：tab 内内容按「概览放结果、域名放资产与参数」重排**（ADR-0007）。
 >
-> 合并时消除的**重复**：概览原有的「分流决策」图是「域名」tab 判定链路图的第二次渲染（同一函数 `dg.route_map`），已删除；概览改用本页独有的「实时诊断链路」图。
+> 判据（后续加功能必须遵守）：
+> **概览放「结果」——现在通不通、哪里坏、怎么修。
+> 域名放「资产与参数」——哪些域名归哪边、怎么判、阈值多少。**
 >
-> 保留的两项**不是**重复：「结论」徽标与「自检 20 项」表格都来自 `ds.selftest()`，但是同一次采集的两种视图（一句话结论 vs 逐项证据），请求级缓存保证只跑一次。
+> 具体变动：
+>
+> | 变动 | 原位置 | 新位置 | 理由 |
+> |---|---|---|---|
+> | 改道状态 | domains | **overview** | 它是**结果**（谁被改道了），而改道触发按钮在概览 |
+> | 改道明细 | domains | **overview** | 同上 |
+> | 立即探测一轮 / 清空改道状态 | 域名操作 | **概览操作** | 按钮与它影响的状态同 tab，点完就地看到变化 |
+> | 已录入清单 | 挂在 dom_foreign 的 `s` 下 | **独立 section** | 它是国内+国外合并只读视图，语义不属国外 |
+> | 解析链路图 | 当前状态 | **删除** | 与链路拓扑图回答同一问题，合并为一张 |
+> | 链路指标 + 组件状态 | 当前状态 | **合并进折叠区** | 图负责定位，表负责确认，是上下游关系不是重复 |
+> | 分诊明细 | domains | domains（**不变**） | 概览只加一行摘要，明细留域名 |
+> | 观测与阈值 | domains | domains（**不变**） | 它是**参数**不是结果 |
+>
+> 同时消除的重复：
+> - 「手动导入名单」按钮删除 —— 它与「一键归一」执行**同一条命令**
+>   （`dnschain-reconcile`），模型层 `M.import_lists()` 与 `M.reconcile_now()`
+>   函数体逐字相同。`M.import_lists()` 已一并删除，防止再被接回。
+> - 「解析链路」与「实时诊断链路」两张图合并为一张**链路拓扑图**
+>   （`_live_diag_map`，aria-label「链路拓扑图」）。
 
-| tab id | 显示名 | section 标题（= `m:section` 的标题参数） | section 行号 | 归组依据 |
-|---|---|---|---|---|
-| `overview` | 概览与诊断 | 当前状态 | 222 | `general.lua:136` |
-| `overview` | 概览与诊断 | 自检 | 1994 | `general.lua:137` |
-| `overview` | 概览与诊断 | 操作 | 2064 | `general.lua:138` |
-| `domains` | 域名 | 自定义域名 · 国内（补全归属） | 864 | `general.lua:141` |
-| `domains` | 域名 | 自定义域名 · 国外（补全归属） | 880 | `general.lua:142` |
-| `domains` | 域名 | 判定链路 | 978 | `general.lua:143` |
-| `domains` | 域名 | 改道状态 | 1134 | `general.lua:144` |
-| `domains` | 域名 | 改道明细 | 1232 | `general.lua:145` |
-| `domains` | 域名 | 分诊结果 | 1317 | `general.lua:146` |
-| `domains` | 域名 | 观测与阈值 | 1389 | `general.lua:147` |
-| `domains` | 域名 | 域名操作 | 1456 | `general.lua:148` |
-| `resolve` | 解析 | 国内上游 | 1545 | `general.lua:150` |
-| `resolve` | 解析 | 国外上游 | 1557 | `general.lua:151` |
-| `resolve` | 解析 | 双栈策略 | 1591 | `general.lua:152` |
-| `resolve` | 解析 | 端口与实例 | 1685 | `general.lua:153` |
-| `resolve` | 解析 | 缓存 | 1719 | `general.lua:154` |
-| `split` | 分流 | 名单规模 | 1755 | `general.lua:156` |
-| `proxy` | 代理 | SSR-Plus 兼容 | 1859 | `general.lua:158` |
-| `proxy` | 代理 | 拦截与框架开关 | 1922 | `general.lua:159` |
-| `dhcp` | DHCP | DHCP 下发 DNS（明文） | 1954 | `general.lua:161` |
+> **v0.19.0：tab 由 6 个重划为 4 个；section 20 → 18；按钮 8 → 3**
+>
+> ── 重划依据：DNS 分流只有三个动作，且都已自动化 ──────────────
+>
+> | 动作 | 谁在做 | 用户要管吗 |
+> |---|---|---|
+> | **判定**：域名该走哪条链 | 分诊实测 + 归属库 + 健康改道 | 不用管 |
+> | **落地**：写成 dnsmasq 规则 | `dc_gen_dnsmasq_split` + `watch.servers` | 不用管 |
+> | **生效**：让 dnsmasq 读到 | `apply_on_parse`（保存即生效） | 不用管 |
+>
+> 所以页面只需提供两件事：**① 现在什么状态 ② 我认为该走哪条链的域名**。
+> 其余全是参数与诊断。
+>
+> ── 4 个 tab ──────────────────────────────────────────────────
+>
+> | tab | 职责 | 由哪些旧 tab 合并 |
+> |---|---|---|
+> | 状态 | 现在通不通、分流到哪了 | overview |
+> | 域名 | 哪些域名我指定了走哪条 | domains |
+> | 上游 | 往哪儿问、怎么问 | resolve + proxy + dhcp |
+> | 名单 | 规则库从哪来、多大、怎么体检 | split + 观测阈值 + 自检 |
+>
+> ── 删除的 2 个 section ───────────────────────────────────────
+>
+> | section | 删除理由 |
+> |---|---|
+> | 判定链路 | 规则图与「分流去向图」语义重叠（一张讲规则、一张讲事实，用户只需后者）。规则内容保留在 `docs/runtime/dns-chain.md`。其中「单域名解释」保留，并入「域名」tab |
+> | 域名操作 | 唯一按钮「重建分流规则并生效」与页底「保存并应用」调同一个 `ds.apply_domains()`，完全重复 |
+>
+> ── 按钮 8 → 3 ────────────────────────────────────────────────
+>
+> | 保留 | 位置 | 理由 |
+> |---|---|---|
+> | 立即重新自检 | 状态/操作 | **唯一需要用户主动触发的**（绕过 10 秒缓存强制真跑） |
+> | 清空改道状态 | 状态/DNS 分流状态 | 排障动作，就地可用 |
+> | 清空全部缓存 | 上游/缓存 | 属缓存配置，低频 |
+>
+> 删除的 5 个及其去向：
+> 「重建分流规则并生效」→ 与「保存并应用」重复；
+> 「一键归一」→ health 守护每轮自动调 reconcile；
+> 「立即分诊未知目标」→ 随 `dc_health_cycle` 自动跑；
+> 「更新 GFW 名单」→ SSR-Plus 自身定时 + `auto_import`；
+> 「立即探测一轮」→ health 守护按 `health.interval` 自动跑。
+>
+> ── 删除的 7 个「假开关」────────────────────────────────────────
+>
+> 它们的共同问题：**可以改，但后端完全不读，改了没有任何效果**。
+> 留着它们会让用户以为配置生效了，出问题时反复调一个不起作用的东西。
+>
+> | 开关 | 页面自述（删除前） |
+> |---|---|
+> | 尽力阻断公共 DoH | 「只做标注，不实际拦截」 |
+> | 校验上游证书 | 「未接入 dnsproxy 的启动参数」 |
+> | 经代理出站 | 「实际出站由 SSR-Plus 决定」 |
+> | 抑制 HTTPS/SVCB | 「没有运行时消费者」 |
+> | 启用缓存 | 「实际始终启用，框架不读这个开关」 |
+> | 失败自动回滚 | 「回滚逻辑尚未实现」 |
+> | 定时自检间隔 | 「仓库里没有定时调度」 |
+>
+> **例外**：`lists.auto_import` 保留 —— 它在 v0.19.0 **真的接上了消费者**
+> （health 守护每轮调 reconcile），所以从假开关变成真开关。
+> 判据是「后端有没有真的读它」，不是「名字听起来像自动」。
 
-合计 **20 个有标题的可见 section**，加 1 个空标题元数据 section（`general.lua:173`，标题参数是空串，`anonymous = true`），共 21 个 `.cbi-section`。
+> **v0.19.0：再合并「改道状态」+「改道明细」→ 一个「DNS 分流状态」**
+>
+> 用户指出：「其实改道就是 DNS 分流」。
+>
+> 这个判断在代码里成立：`dc_health_cycle` 每轮做的事就是**决定某个域名
+> 走哪条链**，而 `watch.servers` 里 `active` 字段最终写成的就是
+> `server=/域名/127.0.0.1#<port>` —— 那正是 DNS 分流本身。
+> 「改道」只是「分流结果发生变化」这一事件的旧叫法，不是独立能力。
+>
+> 合并后一块讲完整件事：
+>
+> | 位置 | 内容 | 回答什么 |
+> |---|---|---|
+> | 分流去向 | 导图（原 `dg.status_map`） | 哪些域名走直连、哪些走代理、哪些偏了 |
+> | 自动改道 | 一行（原「改道通道」+「自动改道进程」两行） | 通道就绪吗、守护在跑吗 |
+> | 分流明细 | 折叠表（原「改道明细」） | 连败次数、最近探测、原因 |
+>
+> 两处细节：
+>
+> - **导图五档改名**（内部 id 不变，它们是与 `dnschain-health` 状态文件的契约）：
+>   `正常`→`走首选链`、`降级中`→`首选链不稳`、`已改道`→`已切另一链`，
+>   `双链故障`/`未探测` 保留。改的是视角（说去向，不说评价）。
+> - **明细表全绿时默认折叠**：8 个观测域名绝大多数时候全正常，全绿表信息
+>   密度极低却占满首屏。有 `degraded`/`rerouted`/`both-bad` 时自动展开。
+>   「未探测」不计入异常 —— 它只是还没跑过，不是故障。
+>
+> ⚠️ 「通道就绪」与「守护运行」**不能删**：它们是故障前置条件。
+> 通道未就绪 → 改道写了文件但 dnsmasq 读不到；守护未运行 → 开关显示
+> 已启用但完全不改道。两者都是**静默失效**，是「看起来正常、实际没生效」
+> 的唯一可靠判据。
 
-> **v0.16.0：新增「分诊结果」section**（`general.lua:1317`，归 `domains` tab）。
+| tab id | 显示名 | section 标题（= `m:section` 的标题参数） | section 行号 |
+|---|---|---|---|
+| `status` | 状态 | 当前状态 | 281 |
+| `status` | 状态 | DNS 分流状态 | 1006 |
+| `status` | 状态 | 自检 | 2038 |
+| `status` | 状态 | 操作 | 2150 |
+| `domains` | 域名 | 自定义域名 · 国内（补全归属） | 683 |
+| `domains` | 域名 | 自定义域名 · 国外（补全归属） | 699 |
+| `domains` | 域名 | 已录入清单 | 725 |
+| `domains` | 域名 | 分诊结果 | 1227 |
+| `upstream` | 上游 | 国内上游 | 1547 |
+| `upstream` | 上游 | 国外上游 | 1559 |
+| `upstream` | 上游 | 双栈策略 | 1594 |
+| `upstream` | 上游 | 端口与实例 | 1691 |
+| `upstream` | 上游 | 缓存 | 1725 |
+| `upstream` | 上游 | SSR-Plus 兼容 | 1899 |
+| `upstream` | 上游 | 拦截与框架开关 | 1962 |
+| `upstream` | 上游 | DHCP 下发 DNS（明文） | 1998 |
+| `lists` | 名单 | 名单规模 | 1777 |
+| `lists` | 名单 | 观测与阈值 | 1415 |
+
+> **v0.16.0：新增「分诊结果」section**（归 `domains` tab）。
 >
 > 背景：分诊是 v0.16.0 新增的核心能力，但在此之前**页面上完全看不到它的结果** ——
 > 只能通过命令行 `dnschain-triage list` 查。用户明确要求「所有功能都要能对得上
@@ -337,10 +504,24 @@ tab 定义在 `general.lua:98-107`（`TAB_LABELS`），前端顺序常量在 `dn
 > | 判定方法 | DNS 探测（两条链各一次） | HTTP 实测（试直连 / 试代理） |
 > | 落库目标 | `watch.servers`（DNS 走哪个实例） | `china`/`blacklist` 集合 + `dom_domestic`/`dom_foreign` |
 > | 回答的问题 | 「这个域名的首选链通不通、要不要改道」 | 「这个未知目标该直连还是走代理」 |
+>
+> **v0.16.4 该 section 扩为三块**：分诊开关（`triage_enabled` / `triage_max` /
+> `triage_conc`）、落点分布思维导图（`dg.triage_map`）、结果表格。
+>
+> 表格从 4 列扩到 7 列：**序号 / 目标 / 类型 / IP 段 / 结论 / 落库动作 / 时间**。
+> 数据源是 `dnschain-triage list` 的 7 字段 `ITEM` 行（见该脚本文件头
+> 「输出格式」）。**已入库的行默认收进 `<details class="dc-details">`**，
+> 待处理的行正常显示 —— 折叠而不是删除，因为「加时间戳和序号便于追踪审计」
+> 要求这些行仍然查得到。
+>
+> **v0.18.0：概览的「操作」区新增「分诊摘要」**（`_triage_brief`），只显示
+> 「共 N 条 / 已入库 M」+ 分档计数，并提示明细在域名 tab。这样点完
+> 「立即分诊未知目标」就地能看到数字变化，而 200+ 行的明细表不会把链路图挤下去。
 
-合计 **19 个有标题的可见 section**，加 1 个空标题元数据 section（`general.lua:173`，标题参数是空串，`anonymous = true`），共 20 次 `m:section()` 调用。
+合计 **18 个有标题的可见 section**，加 1 个空标题元数据 section（标题参数是空串，`anonymous = true`），共 19 次 `m:section()` 调用。
 
-未归组的 section 始终显示（`dnschain.js:162-164`）—— 这是「新增 section 后不会莫名消失」的保护。当前 20 个全部已归组，所以这条兜底没有实际生效对象。
+未归组的 section 始终显示（`dnschain.js:162-164`）—— 这是「新增 section 后不会莫名消失」的保护。当前 18 个全部已归组，所以这条兜底没有实际生效对象。
+（`tools/verify-dnschain-domains.sh` §13 有断言核对「SECTION_TAB 里每个标题都有 m:section 声明」。）
 
 ```mermaid
 flowchart TB
@@ -444,11 +625,11 @@ flowchart TB
 | 组件状态 | 672 | `port_listening` / `port_owner` / `is_dnsproxy` / `ssr_ipv6` / `cache_stats` | `netstat -lntup`、`/proc/<pid>/cmdline`、`ubus call dnsmasq metrics` |
 | 已录入清单 | 886 | `ds.uci_list` + `ds.custom_domestic/foreign` | `uci -q get` + 读 `/var/etc/dnschain/custom-*.txt` |
 | 走法 | 969 | `dg.route_map{id_prefix="dcrt-dm"}` | 纯计算 |
-| 单域名解释 | 1001 | GET 参数 `dc_explain`（`general.lua:990-999`）+ `ds.explain()` | `dnschain-health explain <域名>` |
-| 状态导图 | 1125 | `ds.health_rows()` + `ds.health_summary()` | `dnschain-health status` |
-| 改道通道 | 1138 | `ds.serversfile_ready()`（`dnschain.lua:900-976`） | `uci -q get dhcp.@dnsmasq[0].serversfile`、读 `/var/etc/dnsmasq.conf.*`、`/proc/<pid>/status`、`/proc/<ppid>/cmdline` |
-| 自动改道进程 | 1051 | `ds.health_daemon()`（`dnschain.lua:984-1049`） | 遍历 `/proc/*/cmdline` 找 `dnschain-health daemon`、读 `/var/run/dnschain/health.state` |
-| 明细 | 1103 | `ds.health_rows()` | `dnschain-health status` |
+| 单域名解释 | — | GET 参数 `dc_explain` + `ds.explain()` | **`dnschain-selftest explain <域名>`**（v0.22.0 改） |
+| 分流去向图 | — | `ds.custom_domestic()` + `ds.custom_foreign()` | 读 `custom-*.txt`（v0.22.0 改：不再依赖探测） |
+| ~~改道通道~~ | — | **已删除**（`serversfile_ready` 随改道一起移除） | — |
+| ~~自动改道进程~~ | — | **已删除**（`health_daemon` 随改道一起移除） | — |
+| ~~改道明细~~ | — | **已删除**（`health_rows` 随改道一起移除） | — |
 | 国内 AAAA | 1378 | 固定文案 | 无 |
 | 国外 AAAA | 1383 | `ds.ssr_filter_aaaa()` / `ds.dnsmasq_filter_aaaa()` / `ds.ssr_ipv6()` | `uci -q get`（三个键） |
 | 实际生效值 | 1444 | 同上三个值 | 同上 |
@@ -466,22 +647,28 @@ flowchart TB
 
 ## 5. 后端接口清单
 
-### 5.1 `/usr/bin/dnschain-health`（8 个子命令）
+### 5.1 `/usr/bin/dnschain-health`（**已删除，v0.22.0**）
 
-入口分发在 `files/usr/bin/dnschain-health:343-364`，`case` 在 `:350-358`，用法串在 `:360`。
-
-| 子命令 | 实现 | 输出格式 | 页面调用点 |
-|---|---|---|---|
-| `cycle` | `dc_health_cycle`（`dnschain.sh:1587-1770`） | 末行 `CYCLE ok=<n> switch=<n> bad=<n> wait=<n>`（`dnschain.sh:1764-1765`）；前置跳过时输出 `SKIP …`（`:1594`、`:1595`、`:1627`、`:1638`、`:1643`） | `dnschain.lua:857-861`（`_cycle_now`） |
-| `daemon` | `cmd_daemon`（`dnschain-health:318-338`） | 常驻，无结构化输出 | **页面不调**；由 procd 托管（`init.d/dnschain:375-380`） |
-| `status` | `cmd_status`（`dnschain-health:76-124`） | 每域名一行 `ROW domain\|class\|pref\|active\|fail\|ok\|last\|result\|state`（`:114-115`），末行 `SUM total=… normal=… degraded=… rerouted=… both_bad=… custom=…`（`:121-122`） | `dnschain.lua:776-780`（`health_status_raw`，`health_rows`/`health_summary` 共用） |
-| `explain <域名>` | `cmd_explain`（`dnschain-health:37-43`）→ `dc_explain_domain`（`dnschain.sh:1835-1936`） | `KEY=VALUE` 逐行：`DOMAIN`/`CLASS`/`PREFERRED`/`ACTIVE`/`WATCH`/`CUSTOM`/`PROBE_DOMESTIC`/`PROBE_FOREIGN`/`ANSWER_DOMESTIC`/`ANSWER_FOREIGN`/`DECISION`/`REASON`（`dnschain.sh:1842-1935`） | `dnschain.lua:842-854` |
-| `check` | `cmd_check`（`dnschain-health:135-181`） | 每个非法项一行 `BAD <域名> <原因>`（`:143`、`:151`、`:170`），末行 `OK`（`:179`）或 `FAIL bad=<n>`（`:175`） | **页面无调用点**；仅 `dnschain-selftest:428` 调用 |
-| `apply` | `cmd_apply`（`dnschain-health:205-264`） | `SPLIT=<server 条数> <nftset 条数>`（`:222`）+ `DNSMASQ=…`（`:232`/`:245`/`:247`/`:256`/`:261`）+ `OK`（`:233`/`:249`/`:257`/`:262`）或 `ERROR=…`（`:208`/`:221`） | `dnschain.lua:864-868` |
-| `reset` | `cmd_reset`（`dnschain-health:272-278`） | `OK 已清空健康状态`（`:276`） | `dnschain.lua:871-875` |
-| `flush` | `cmd_flush`（`dnschain-health:309-316`） | `OK=已清空 dnsmasq 缓存（零中断）`（`:314`）或 `ERROR=…`（`:311`） | `dnschain.lua:427-434` |
-
-`flush` 存在的理由是「清缓存必须找对 PID」：`pidof dnsmasq` 返回 3 个 PID，第一个是 ujail 辅助子进程，对它 SIGHUP 是空操作（`dnschain-health:298-308` 记录实测；`dnschain.sh:427-452` 记录三层结构）。Lua 侧原先自己实现了一份 `pidof dnsmasq | awk '{print $1}'`，因此静默失效（`dnschain.lua:413-426` 记录修正过程）。现在两边只有一处实现：`dc_dnsmasq_pid` 按 `:53` socket inode 反查 `/proc/<pid>/fd`（`dnschain.sh:454-491`）。
+> 🚨 该脚本已整体删除（448 行）。健康探测与自动改道不再存在。
+> 它的三个仍有用的 CLI 入口移到了 `dnschain-selftest` 的子命令（见 §5.3）：
+>
+> | 原 `dnschain-health` 子命令 | 现在在哪 | 输出契约 |
+> |---|---|---|
+> | `flush` | `dnschain-selftest flush` | `OK=<pid>` / `ERROR=<原因>` |
+> | `explain <域名>` | `dnschain-selftest explain <域名>` | `KEY=VALUE` 行 |
+> | `apply` | `dnschain-selftest apply` | `OK=国内 N 条…` / `ERROR=…` |
+>
+> **其余 5 个子命令（`cycle` / `daemon` / `status` / `check` / `reset`）无替代 ——
+> 它们的功能本身被删除了。**
+>
+> **为什么没新建脚本而是塞进 selftest**：`dnschain-selftest` 本来就在 rpcd ACL
+> 的 command 白名单里，加子命令即可；新建脚本则要同步 ACL、CI 执行位清单、
+> `.gitattributes` 三处，还多一个文件要维护。
+>
+> **`flush` 为什么仍然必须委托给库函数**：`pidof dnsmasq` 返回 3 个 PID，
+> 第一个是 ujail 辅助子进程，对它 SIGHUP 是**空操作**（页面却报成功）。
+> `dc_flush_cache` 用 `dc_dnsmasq_pid` 按 `:53` socket inode 反查 `/proc/<pid>/fd`，
+> 是唯一正确实现。Lua 侧不再自己找 PID。
 
 ### 5.2 `/usr/bin/dnschain-reconcile`（无参数）
 

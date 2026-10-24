@@ -54,7 +54,7 @@ LuCI 的路由有两个来源，二者在启动时被**一起**加载、按路�
 
 | 路由路径 | 菜单标题 | order | action 类型 | action 目标 | ACL | 声明位置 |
 |---|---|---|---|---|---|---|
-| `admin/services/dns_chain` | DNS 链路 | 20 | `cbi` | `dnschain/general` | `luci-app-dnschain` | `package/luci-app-dnschain/root/usr/share/luci/menu.d/luci-app-dnschain.json:2-11`；同路径另在 `package/luci-app-dnschain/luasrc/controller/dnschain.lua:37-40` 用 `entry()` 声明 |
+| `admin/services/dns_chain` | DNS 分流 | 20 | `cbi` | `dnschain/general` | `luci-app-dnschain` | `package/luci-app-dnschain/root/usr/share/luci/menu.d/luci-app-dnschain.json:2-11`；同路径另在 `package/luci-app-dnschain/luasrc/controller/dnschain.lua:37-40` 用 `entry()` 声明 |
 
 后端落点：CBI 模型 `package/luci-app-dnschain/luasrc/model/cbi/dnschain/general.lua`（1980 行，7 个 tab）。**该包不注册任何 ubus 对象** —— 所有动作经 `luci.sys.exec` 直接执行 `/usr/bin/dnschain-*` 脚本（详见包文档）。
 
@@ -107,7 +107,7 @@ LuCI 的路由有两个来源，二者在启动时被**一起**加载、按路�
   },
   "depends": { "acl": [ "luci-app-dnschain" ] },
   "order": 20,
-  "title": "DNS 链路"
+  "title": "DNS 分流"
 }
 ```
 
@@ -184,10 +184,10 @@ LuCI 的路由有两个来源，二者在启动时被**一起**加载、按路�
 
 | 文档 | 内容 |
 |---|---|
-| `docs/packages/luci-app-dnschain.md` | DNS 链路页：7 个 tab、20 个 section（19 个有标题）、页面元素→脚本命令全表、8 个 `dnschain-health` 子命令 |
+| `docs/packages/luci-app-dnschain.md` | DNS 分流页：7 个 tab、21 个 section（20 个有标题）、页面元素→脚本命令全表、8 个 `dnschain-health` 子命令 |
 | `docs/packages/luci-app-trafficctl.md` | 流量控制页：5 条路由、4 个视图、34 个 ubus 方法、23 个脚本、CGI 指标端点 |
 | `docs/packages/luci-app-dnsproxy.md` | DNS Proxy 页（上游 + 3 个 patch）、LAN 拦截的真实生效路径 |
-| `docs/runtime/dns-chain.md` | DNS 链路的运行时形态：两个 dnsproxy 实例、分流片段、改道通道 |
+| `docs/runtime/dns-chain.md` | DNS 分流的运行时形态：两个 dnsproxy 实例、分流片段、改道通道 |
 | `docs/runtime/overlay-inventory.md` | `files/` overlay 全部 20 个文件、执行位来源、uci-defaults 执行顺序 |
 | `docs/build/ci.md` | 构建流水线与契约断言 |
 | `docs/operations/verification.md` | 本地校验命令、路由器只读取证方法、排障顺序 |

@@ -258,7 +258,7 @@ update_lan_intercept() {
 # ============================================================
 # dnschain 让位检查
 # ------------------------------------------------------------
-# 当 DNS 链路框架（dnschain）启用时，**由 dnschain 独占托管 dnsproxy**：
+# 当 DNS 分流框架（dnschain）启用时，**由 dnschain 独占托管 dnsproxy**：
 #   - dnschain 用 /var/etc/dnschain/dnsproxy.args 生成参数
 #   - 该参数集与本节按 UCI 拼出的参数**不同**（无 --cache / 无 --fallback，
 #     多一个域名分流文件），两者不能同时存在

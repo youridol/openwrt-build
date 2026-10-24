@@ -57,7 +57,7 @@
 - `/www/luci-static/resources/view/dnsproxy/` 下有 `main.js`、`file.js`、`diagnostics.js`、`logread.js`、`help.js` 五个视图；
 - `/www/luci-static/resources/tools/dnsproxy/settings.js` 一个表单模块。
 
-`order = 60` 与 dnschain 页面的 `order = 20` 同处「服务」菜单，dnschain 的注释记录了完整顺序（证据：`package/luci-app-dnschain/luasrc/controller/dnschain.lua:16-22`：SSR-Plus 10 / DNS 链路 20 / 动态 DNS 59 / **DNS Proxy 60** / 带宽监控 80 / 网络唤醒 90）。
+`order = 60` 与 dnschain 页面的 `order = 20` 同处「服务」菜单，dnschain 的注释记录了完整顺序（证据：`package/luci-app-dnschain/luasrc/controller/dnschain.lua:16-22`：SSR-Plus 10 / DNS 分流 20 / 动态 DNS 59 / **DNS Proxy 60** / 带宽监控 80 / 网络唤醒 90）。
 
 ```mermaid
 flowchart TB

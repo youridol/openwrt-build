@@ -203,21 +203,16 @@ jobs:
             fi
           done
 
-          # 断言运行时新增组件也在（v0.13.0）
+          # 断言运行时组件也在
           #
-          # 这三个文件是「域名分流与自动改道」的全部实现：
-          #   dnschain-health        探测与改道
-          #   verify-...domains.sh   契约校验（本步骤会调它）
+          # v0.21.0：dnschain-health 与 dnschain-triage 已删除
+          # （健康改道与分诊整体移除，改由 dnsproxy --fallback 承担
+          #   「直连不通自动改走代理」），故本断言只剩库文件。
+          #
+          # 契约校验与图示自检由后续步骤负责：
+          #   verify-...domains.sh   契约校验
           #   render-...diagrams.py  图示几何自检
-          # 缺任一都说明功能不完整，且症状隐蔽（页面照常打开）。
-          #
-          # v0.16.0 起再加一个：
-          #   dnschain-triage        未知目标的「试直连 → 试代理 → 标 dead」分诊
-          # 它由 dnschain-health 的 dc_triage_cycle 与 dnschain-reconcile
-          # 的 apply 调用；缺了分诊完全不工作，而页面只是不显示分诊结果。
-          for f in files/usr/bin/dnschain-health \
-                   files/usr/bin/dnschain-triage \
-                   files/usr/share/dnschain/dnschain.sh ; do
+          for f in files/usr/share/dnschain/dnschain.sh ; do
             if [ -f "../openwrt-build/$f" ]; then
               echo "OK   $f"
             else
@@ -228,8 +223,7 @@ jobs:
 
           # 新脚本必须有执行位 —— 缺了它 rpcd 调不动，
           # 页面所有按钮都会静默失败（点「立即探测」没反应）。
-          for f in files/usr/bin/dnschain-health \
-                   files/usr/bin/dnschain-triage ; do
+          for f in files/usr/bin/dnschain-reconcile ; do
             if [ -x "../openwrt-build/$f" ]; then
               echo "OK   $f 有执行位"
             else
@@ -916,10 +910,8 @@ jobs:
           if [ -f files/usr/share/dnschain/dnschain.sh ]; then chmod +x files/usr/share/dnschain/dnschain.sh; fi
           # v0.13.0：健康探测与自动改道。缺执行位时 rpcd 调不动，
           # 页面上「立即探测一轮」等按钮会静默无反应（不报错、无日志）。
-          if [ -f files/usr/bin/dnschain-health ]; then chmod +x files/usr/bin/dnschain-health; fi
           # v0.16.0：未知目标分诊。同样缺不得执行位 ——
           # 页面「立即分诊未知目标」按钮会静默失败。
-          if [ -f files/usr/bin/dnschain-triage ]; then chmod +x files/usr/bin/dnschain-triage; fi
           echo "files overlay 执行位设置完成:"
           ls -l files/etc/init.d/ files/etc/uci-defaults/ files/etc/hotplug.d/iface/ files/etc/rc.local 2>/dev/null
 
@@ -978,8 +970,6 @@ jobs:
           for f in "$LIB" "$INIT" "$CONF" \
                    files/usr/bin/dnschain-reconcile \
                    files/usr/bin/dnschain-selftest \
-                   files/usr/bin/dnschain-health \
-                   files/usr/bin/dnschain-triage \
                    files/etc/uci-defaults/99-zz-dnschain; do
             if [ -f "$f" ]; then
               echo "OK   存在 $f"
@@ -995,8 +985,6 @@ jobs:
           # 脚本一行未执行即 exit 2（本仓库曾因此连续失败三天，AGENTS §6 第 11 条）。
           for f in "$LIB" "$INIT" files/usr/bin/dnschain-reconcile \
                    files/usr/bin/dnschain-selftest \
-                   files/usr/bin/dnschain-health \
-                   files/usr/bin/dnschain-triage \
                    files/etc/uci-defaults/99-zz-dnschain; do
             [ -f "$f" ] || continue
             if sh -n "$f" 2>/tmp/dnschain-shn.err; then
@@ -1018,8 +1006,6 @@ jobs:
           #   也判成 bash 语法，属误报，已改为「行首就是 ((」才算。
           for f in "$LIB" "$INIT" files/usr/bin/dnschain-reconcile \
                    files/usr/bin/dnschain-selftest \
-                   files/usr/bin/dnschain-health \
-                   files/usr/bin/dnschain-triage \
                    files/etc/uci-defaults/99-zz-dnschain; do
             [ -f "$f" ] || continue
             body="$(grep -v '^[[:space:]]*#' "$f")"

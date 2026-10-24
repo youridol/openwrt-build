@@ -46,10 +46,10 @@
 | 文档 | 回答什么问题 | 主要读者 |
 |---|---|---|
 | `docs/routes.md` | 仓库里有哪些 LuCI 路由？各自落到哪个视图、哪个后端、哪个 ACL？ | 要定位「点这个按钮会发生什么」的人 |
-| `docs/packages/luci-app-dnschain.md` | DNS 链路页怎么组成？7 个 tab、20 个 section（19 个有标题）、8 个后端子命令各自是什么？ | 改 dnschain 页面或脚本的人 |
+| `docs/packages/luci-app-dnschain.md` | DNS 分流页怎么组成？7 个 tab、21 个 section（20 个有标题）、8 个后端子命令各自是什么？ | 改 dnschain 页面或脚本的人 |
 | `docs/packages/luci-app-trafficctl.md` | 流量控制页怎么组成？5 条路由、34 个 ubus 方法、23 个脚本、CGI 指标端点？ | 改 trafficctl 的人 |
 | `docs/packages/luci-app-dnsproxy.md` | DNS Proxy 页是本仓库改的哪几处？LAN 拦截真的生效吗？ | 改 dnsproxy patch 或排查 DNS 劫持的人 |
-| `docs/runtime/dns-chain.md` | 运行时 DNS 链路长什么样？两个 dnsproxy 实例的参数、分流片段、改道通道、20 项自检 | 改 DNS 行为或排查解析故障的人 |
+| `docs/runtime/dns-chain.md` | 运行时 DNS 分流长什么样？两个 dnsproxy 实例的参数、分流片段、改道通道、20 项自检 | 改 DNS 行为或排查解析故障的人 |
 | `docs/runtime/overlay-inventory.md` | `files/` 里 20 个文件各自干什么？执行位从哪来？uci-defaults 谁覆盖谁？ | 改固件落地文件的人 |
 | `docs/build/ci.md` | CI 按什么顺序做什么？有哪些契约断言？发版怎么取 notes？ | 改 CI、发版、排查构建失败的人 |
 | `docs/operations/verification.md` | 本地能跑哪些校验？路由器上怎么只读取证？排障顺序是什么？常见误判有哪些？ | 验证改动、排查故障的人 |
@@ -66,7 +66,8 @@
 |---|---|---|
 | 新增一个 LuCI 页面 | `docs/routes.md` §0-1 | 对应包的「路由表」与「请求走向」 |
 | 给已有页面加一个开关 | 对应包文档的「页面元素 → 后端调用」 | `docs/runtime/overlay-inventory.md`（如果它要写 UCI 默认值） |
-| 改 DNS 分流规则 | `docs/runtime/dns-chain.md` | `docs/adr/0006-domain-routing-and-reroute.md` |
+| 改 DNS 分流规则 | `docs/runtime/dns-chain.md` | `docs/adr/0008-direct-first-with-fallback.md`（**v0.22.0 起的分流语义**）、`docs/adr/0006-domain-routing-and-reroute.md`（§3 归属判定仍有效，§4–§7 已失效） |
+| 改页面 tab 结构 / section 归属 | `docs/adr/0007-tab-structure.md`（含**文档联动清单**，改结构必读） | `docs/packages/luci-app-dnschain.md` 的 section 清单 |
 | 改 DNS 拦截行为 | `docs/packages/luci-app-dnsproxy.md` | `files/etc/init.d/dnsproxy` 的 `dnschain_takes_over` |
 | 升级 trafficctl 上游 | `patches/luci-app-trafficctl/README.md` | `docs/packages/luci-app-trafficctl.md` 的「构建与打包」 |
 | 排查「客户机解析不了」 | `docs/operations/verification.md` 的排障顺序 | `docs/runtime/dns-chain.md` |

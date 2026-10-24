@@ -3,6 +3,630 @@
 本仓库所有功能/配置改动均记录于此。版本判型遵循全局规范（PATCH / MINOR / MAJOR）。
 
 
+## [v0.22.0] - 2026-10-25
+
+### 重构 — 直连优先 + 自动回落；删除分诊与健康改道
+
+用户要求：**「客户机的所有流量走直连，直连不通自动改走代理」**。
+
+这个语义由 `dnsproxy` 的 `--fallback` 在上游层完成，**不需要**应用层的
+探测、判定、落库。因此分诊（1710 行）与健康改道（448 行）整体删除。
+
+#### ① `dnsproxy --fallback`：直连不通自动切代理
+
+`dc_gen_dnsproxy_args()` 给国内实例（`:5353`）加：
+
+```
+--fallback 127.0.0.1:5336
+```
+
+效果：所有走 `:5353` 的域名，直连上游不可用时自动落到 `:5336`（DoH 经代理）。
+零探测、零记录、零落库。
+
+**⚠️ 地址格式必须用冒号 `127.0.0.1:5336`，不能用 dnsmasq 的 `127.0.0.1#5336`。**
+实测写成 `#` 时 dnsproxy 直接拒绝启动：
+
+```
+ERROR configuring proxy: parsing fallback upstreams configuration:
+  invalid address 127.0.0.1#5353: bad top-level domain name label
+```
+
+进程退出后端口无人监听、客户机全部无法解析，而页面只显示「dnsproxy 未监听」，
+看不出是格式问题。
+
+**实测验证**（路由器 2026-10-25）：起临时实例，主上游指向黑洞 `192.0.2.1`、
+fallback 指向可用链，两个域名都解析成功 —— 证明 `--fallback` 在**超时**时
+也触发（不只在 connection refused 时）。
+
+**为什么与 v0.10.0 删掉 fallback 不矛盾**：那次删的是旧架构（`:5335` chinadns-ng）
+的 fallback，它指向 `https://1.12.12.12/dns-query`（国内明文 DoH），gfw 域名
+回落时拿到污染答案（实测 `youtube.com → 31.13.92.37`）。现在的 fallback 指向
+`:5336`，是独立 dnsproxy 实例、上游是 DoH 经代理出站，不会污染。性质完全不同。
+
+#### ② 删除分诊（`dnschain-triage`，1710 行）
+
+它原本做「未覆盖域名 → 试直连 → 不通试代理 → 落库」。
+有了 fallback，这套探测判定失去意义。
+
+连带删除：`triage-*.list` 三个记录文件、`dc_triage_cycle`、`dc_triage_verdict`、
+页面「分诊结果」section、`triage_map` 导图、三个开关（`triage_enabled` /
+`triage_max` / `triage_conc`）、`dnschain-reconcile` 与 uci-defaults 里的重放逻辑。
+
+#### ③ 删除健康探测与自动改道（`dnschain-health`，448 行）
+
+**这不是「功能重复」，而是一个真实缺陷的源头。** 实测证据：
+
+`watch.servers`（改道通道）与 `dnschain-split.conf`（静态分流）是**两套并存**
+的 `server=` 源。同一个域名在两处都有规则时，dnsmasq 把它们当**候选**
+（不是后者覆盖前者），取哪条不确定：
+
+```
+split.conf:    server=/wikipedia.org/127.0.0.1#5336      ← 正确（代理）
+watch.servers: server=/www.wikipedia.org/127.0.0.1#5353  ← 改道遗留（直连）
+```
+
+结果 `www.wikipedia.org` 经 `:53` 返回 **`31.13.106.4`（Facebook 的 IP，污染值）**，
+而两条 dnsproxy 链本身都返回正确的 `103.102.166.224`。
+**也就是说改道功能会把正确的分流规则覆盖成错误的。**
+
+删除后分流规则只有 `split.conf` 一处来源，冲突从根上消失。
+
+连带删除：`dc_health_*` 十个函数、`dc_gen_watch_servers`、`update_serversfile`、
+`--servers-file` 配置、页面「DNS 分流状态」与「观测与阈值」两个 section、
+「清空改道状态」按钮。
+
+**实测确认删除安全**：去掉 `serversfile` 后 dnsmasq 仍正常加载 `split.conf`
+（前者走 `--servers-file`，后者走 `conf-dir=/tmp/dnsmasq.d`，两套独立机制）。
+去掉后 `www.wikipedia.org` 解析为 `103.102.166.224`（正确）。
+
+#### ④ 域名 TAB 重构
+
+| 改前 | 改后 |
+|---|---|
+| 自定义域名 · 国内 | **国内直连**（多行输入，每行一个） |
+| 自定义域名 · 国外 | **国外代理**（同上） |
+| 已录入清单 | 保留（实时条数） |
+| 分诊结果 | **删除** |
+| DNS 分流状态（五档导图） | **改为两档**：走直连 / 走代理 |
+| 观测与阈值 | **删除** |
+
+「DNS 分流去向」图保留（用户明确要求），但语义从「健康状态」改为
+**静态分流去向**：根 → 走直连 / 走代理 → 域名清单。数据来自
+`custom-domestic.txt` / `custom-foreign.txt`，不依赖任何探测。
+
+只画用户录入的域名，不画 gfw 名单里那 2.3 万条（画不下也无意义）。
+
+#### ④b 「DNS 分流去向」图只保留在「状态」tab
+
+改名为「DNS 分流去向」后**忘了把它登记进 `SECTION_TAB`**，结果这张图在
+**4 个 tab 里全都渲染**。
+
+根因在 `dnschain.js` 的 `activate()`：
+
+```js
+sections.forEach(function (sec) {
+    /* 未归组的 section 始终显示 —— 避免新增 section 后莫名消失 */
+    if (!sec.tab) { sec.el.hidden = false; return; }
+    sec.el.hidden = (sec.tab !== id);
+});
+```
+
+这段兜底本意是「新增 section 忘了登记时不要让它消失」，但代价是它**永远可见**。
+
+实测（修复前，逐个 tab 点开并检查 SVG 的真实几何高度 + 祖先 `hidden`）：
+
+| tab | 可见图 |
+|---|---|
+| 状态 | 链路拓扑图、DNS 分流去向导图 |
+| 域名 | DNS 分流去向导图 ← 不该有 |
+| 上游 | DNS 分流去向导图 ← 不该有 |
+| 名单 | DNS 分流去向导图 ← 不该有 |
+
+修法：在 `SECTION_TAB` 里加 `[translate("DNS 分流去向")] = "status"`。
+同时清掉三个已删 section 的死键（`DNS 分流状态` / `分诊结果` / `观测与阈值`），
+表从 18 键减到 16 键，与页面上 16 个 section 一一对应。
+
+⚠️ **排查时的一个陷阱**：最初用
+`[...document.querySelectorAll('svg[role="img"]')].filter(s => s.offsetParent !== null)`
+判断可见性，结果**四个 tab 全都报「可见」** —— 因为 `SVGElement` 没有
+`offsetParent` 属性，表达式恒为 `undefined !== null`（即 `true`）。
+正确做法是用 `getBoundingClientRect().height > 0` 并手动回溯祖先的 `hidden`。
+
+修复后实测：只有「状态」tab 有两张图，其余三个 tab 的 SVG 数为 0。
+
+断言也补了一条：`SECTION_TAB` 里必须有这三个 section 的登记，
+漏了会让断言直接报「未登记进 SECTION_TAB（会在所有 tab 都显示）」。
+
+#### ⑤ `dnschain-selftest` 接管三个子命令
+
+`dnschain-health` 删除后，它承载的 CLI 入口移入 `dnschain-selftest`
+（该脚本本来就在 rpcd ACL 白名单里，不必新建脚本）：
+
+| 子命令 | 用途 | 输出契约 |
+|---|---|---|
+| `flush` | 清空 dnsmasq 缓存（SIGHUP） | `OK=<pid>` / `ERROR=<原因>` |
+| `explain <域名>` | 单域名解释 | `KEY=VALUE` 行 |
+| `apply` | 应用自定义列表 | `OK=国内 N 条…` / `ERROR=…` |
+
+Lua 侧 `M.flush_cache` / `M.explain` / `M.apply_domains` 相应改调这三个子命令；
+`apply_message` 的解析从旧的 `DNSMASQ=restarted|sighup|…` 改为 `OK=` / `ERROR=`。
+
+#### ⑥ 自检第 5/18/19 项判据更新
+
+- **第 5 项**：从「不得出现 `--fallback`」改为「允许，但**必须**指向
+  `127.0.0.1:<foreign_port>`」。这样既放行正确用法，又能拦住
+  「fallback 指向外部明文上游」这个真实风险（那会拿到污染答案）。
+- **第 18/19 项**：从「改道通道已就绪」改为「改道通道已清理」——
+  防止从老版本升级上来时残留 `serversfile` 或 `watch.servers` 把链路搞坏。
+
+#### ⑦ 修复删 watch.servers 引入的两个连带缺陷
+
+这两个都是**删除动作本身引入的回归**，在路由器实测中发现，不修会静默丢域名。
+
+**(a) 观测基准集导致 8 个域名没有分流规则**
+
+`dc_watch_list()` 在用户没配 `health.watch` 时回落到 8 个基准域名
+（`www.baidu.com` / `www.qq.com` / `github.com` / `www.google.com` /
+`www.youtube.com` / `www.wikipedia.org` / `www.taobao.com` / `www.163.com`）。
+
+这 8 个被 `dc_gen_dnsmasq_split` 用 `dc_exclude` 从 `split.conf` 剔掉 ——
+原本的设计是「它们只在 `watch.servers` 里出现」。删除 `watch.servers` 后，
+这个剔除动作变成**纯粹的数据丢失**：
+
+```
+$ nslookup github.com 127.0.0.1
+;; connection timed out; no servers could be reached
+
+$ nslookup api.github.com 127.0.0.1     # 不在观测列表，正常
+Address: 140.82.114.5
+```
+
+`grep '^server=/github\.com/' split.conf` 为空 —— 它没有任何规则。
+更隐蔽的是**自定义列表也救不回来**：剔除发生在「数据库 − 自定义国内 −
+观测域名」之后，对自定义国外同样生效。
+
+修法：`dc_watch_list()` 恒返回空，`DNSCHAIN_WATCH_SEED` 删除。
+剔除 0 条，所有域名都能拿到规则。
+
+**(b) 同一域名在 split.conf 里出现两次**
+
+`github.com` 同时在 gfw 名单（数据库国外）与自定义国外列表里，
+两段各写一条 → `split.conf` 出现两条相同的 `server=/github.com/#5336`。
+
+dnsmasq 把两条相同的 `server=` 当**候选**（不是去重），与 ADR-0008 §3.1
+描述的问题同源。修法：数据库国外那一段也排除自定义国外
+（`dc_exclude "$DNSCHAIN_CUSTOM_FOR"`）。
+
+实测修复后：`split.conf` 47496 行，`sort -u` 后仍 47496 行 —— **零重复**。
+
+#### 验证
+
+| 工具 | 结果 |
+|---|---|
+| `sh tools/verify-dnschain-domains.sh` | **148 OK / 0 FAIL**（断言从 166 重写为 148） |
+| `python tools/check-dnschain-lua.py` | **PASS=108 FAIL=0**（从 144 降，删掉的都是分诊/改道断言） |
+| `python tools/render-dnschain-diagrams.py --check` | **PASS=54 FAIL=0**（从 70 降，`triage_map` 用例删除） |
+| `python tools/extract-dnschain-i18n.py` | 311 条无缺失（从 430 降 119 条，删掉的都是分诊/改道文案） |
+| `sh tools/verify-dnschain-ci-sim.sh` | RC=0 |
+| `dash -n` × 5 + `luac -p` × 4 | 全通过 |
+
+**真实路由器验证（OpenWrt 24.10.5，`192.168.3.254`）**
+
+```
+$ dnschain-selftest flush
+OK=7973
+$ dnschain-selftest explain www.baidu.com
+DOMAIN=www.baidu.com / CLASS=custom-foreign / PREFERRED=foreign / ACTIVE=foreign
+$ dnschain-selftest apply
+OK=国内 204 条、国外 31 条，分流 23970 条已生效
+$ dnschain-selftest -f | grep SUMMARY
+SUMMARY PASS=19 FAIL=0 SKIP=1
+CONCLUSION: 链路正常
+```
+
+dnsproxy 进程参数确认含 `--fallback 127.0.0.1:5336`；
+`dhcp.@dnsmasq[0].serversfile` 已清空；`/var/run/dnsmasq/watch.servers` 已删除。
+
+**12 个域名端到端连通性**（路由器实测，清空自动写入列表后）：
+
+| 域名 | 结果 | 链路 |
+|---|---|---|
+| www.baidu.com | 240e:ff:e020:98c:0:ff:b061:c306 | 直连 |
+| www.qq.com | 183.60.118.213 | 直连 |
+| www.taobao.com | 124.226.75.233 | 直连 |
+| www.163.com | 171.109.97.35 | 直连 |
+| github.com | 20.205.243.166 | 代理（自定义国外） |
+| api.github.com | 140.82.114.5 | 代理（自定义国外） |
+| www.google.com | 2001:4860:4826:7700:: | 代理（自定义国外） |
+| www.youtube.com | 2001:4860:482b:400:: | 代理（自定义国外） |
+| www.wikipedia.org | 2001:df2:e500:ed1a::1 | 直连（未录入） |
+| www.reddit.com | 151.101.193.140 | 直连（未录入） |
+| www.apple.com | 240e:950:400:3:3::18 | 直连（未录入） |
+| www.bing.com | 23.215.7.17 | 直连（未录入） |
+
+**污染消除确认**：`www.wikipedia.org` 从 `31.13.106.4`（Facebook IP，污染值）
+变为 `2001:df2:e500:ed1a::1`（真实 IPv6）。
+
+**分流片段完整性**：47496 行，`sort -u` 后仍 47496 行 —— **零重复**。
+
+**浏览器视觉验证**：页面两张 SVG（链路拓扑图 + DNS 分流去向导图），
+后者正确渲染两档（走直连 204 个 / 走代理 31 个），无「分诊」「观测与阈值」
+「DNS 分流状态」残留，无运行时错误。
+
+**删除量**：`dnschain-triage` 2048 行 + `dnschain-health` 448 行 + `dnschain.sh`
+592 行 + `general.lua` 610 行 + `diagrams.lua` 164 行 + `dnschain.lua` 358 行
+≈ **4200 行**。
+
+**回滚**：`git checkout -- package/luci-app-dnschain/ files/ .github/ tools/`；
+路由器侧回滚点 `/root/dnschain-refactor-20261025-021148`。
+
+
+## [v0.21.0] - 2026-10-25
+
+### 变更 — 自定义域名改为大输入框；分诊失败 3 次后停止记录与探测
+
+#### ① 两个自定义域名列表改为多行文本框
+
+用户要求：「改为一个大输入框，每一行一个域名即可」。
+
+原先是 `DynamicList`：每加一个域名要点一次「+」再填一行。批量补 20 个域名
+就是 20 次点击，而用户手头通常已有一份域名清单（记事本、网页、别人的配置），
+整段粘进一个大框才是自然操作。
+
+改为 `TextValue` 多行文本框（12 行），UCI 里**仍存成 list** ——
+下游 `dc_gen_custom_lists` 读到的格式完全不变，后端零改动。
+
+`write()` 的处理：
+
+| 输入 | 行为 |
+|---|---|
+| 空行 | 忽略 |
+| `#` 开头的行 | 忽略（允许整段粘带注释的清单） |
+| 前后空格 | trim |
+| 大写 | 转小写 |
+| 行尾的点 | 去掉 |
+| 重复行 | 去重（只留第一次出现） |
+| 格式非法 | **跳过**并在页面上汇总提示 |
+
+**为什么非法行是「跳过」而不是「让整页保存失败」**：
+实测用户既有配置里本来就含 3 条 `_4483._https.*` 形式的 SRV 风格域名，
+任何一次保存都会被它们挡住 —— 用户无法保存任何其它改动，比不校验更糟。
+而且这些域名在后端 `dc_domain_valid_norm` 同样非法，从未进入 `split.conf`，
+是死数据。改为跳过后，用户保存一次就顺手清理了它们（实测自检第 17 项
+从 FAIL 变 PASS）。
+
+#### ② 分诊失败 3 次后不再记录、不再探测
+
+用户要求：「分诊超过三次失败的可以不再记录，从表格消失也不再探测，
+直到下次客户机发起请求，这样可以避免长期重复失败监测浪费性能」。
+
+在此之前，一个永远不通的目标（已下线的 CDN 边缘、拼错的域名、
+客户机误查询的垃圾域名）会被**每一轮 cycle 反复探测**：dead 的目标要试
+「直连超时 + 代理超时」两轮，按 `health.interval=60s` 算，一天 1440 轮
+× 2 = 2880 次探测，而它永远不会通。
+
+实现：
+
+- 新增 `/etc/dnschain/triage-giveup.list`，格式 `目标|失败次数|最后失败时间`。
+  **不扩展** `triage-ip.list` / `triage-domain.list` 的格式 —— 那两个文件被
+  8 处 awk/read 按位置解析，加字段会让所有解析点错位。
+- 只有 `dead` 算失败；`direct` / `proxy` / `known` 都把计数清零 ——
+  这样「偶尔失败但多数成功」的目标不会被误踢。
+- 达到 3 次后从主记录删除（表格里消失），后续 `run` 跳过它，
+  并输出 `GIVEUP skipped=N（已达失败阈值，等客户机重新请求）`。
+- **恢复条件**：`logread` 里该目标的 query 时间戳**晚于**最后失败时间。
+  不能只看「出现在日志里」—— 日志缓冲只有 128KB（实测 919 行），
+  一个反复被查询的失败域名会一直留在里面，那等于没有过滤。
+- `clear` 命令同时清空计数文件（否则「清空了但还是不探测」更困惑）。
+
+**踩到的 BusyBox 差异**：`date -d 'Sun Oct 25 01:28:26 2026'` 报
+`invalid date`，必须用 `date -D '%a %b %d %H:%M:%S %Y' -d ...` 显式给输入格式。
+
+**性能**：`logread` 一次约 30~60ms，若对每个目标各跑一次，12 个目标就是
+0.5 秒 —— 而这段代码在每轮 cycle 里跑。改为一次抓取缓存到临时文件，
+后续目标只 grep 本地缓存。
+
+#### 验证
+
+| 工具 | 结果 |
+|---|---|
+| `sh tools/verify-dnschain-domains.sh` | **166 OK / 0 FAIL**（新增 4 条断言） |
+| `python tools/check-dnschain-lua.py` | **PASS=144 FAIL=0** |
+| `python tools/render-dnschain-diagrams.py --check` | **PASS=70 FAIL=0** |
+| `python tools/extract-dnschain-i18n.py` | 430 条无缺失 |
+| `sh tools/verify-dnschain-ci-sim.sh` | RC=0 |
+| `dash -n` × 5 脚本 + `luac -p` × 4 文件 | 全通过 |
+
+**新增断言（4 条）**：两个多行输入框存在；write 里逐行校验；
+write 后显式 commit；write 返回真值。
+
+**真实路由器验证（OpenWrt 24.10.5，`192.168.3.254`）**
+
+分诊放弃逻辑的单元与端到端测试（用必然失败的 `192.0.2.199`）：
+
+| 轮次 | 计数 | 主记录 | 行为 |
+|---|---|---|---|
+| 1 | 1 | 1 | 记录 dead |
+| 2 | 2 | 1 | 记录 dead |
+| 3 | **3** | **0** | 从记录中删除 |
+| 4 | 3 | 0 | `GIVEUP skipped=1`，不探测 |
+
+`should_retry` 四个场景全部正确（日志请求早于/晚于最后失败、
+日志里无该目标、无失败记录）。
+
+大输入框保存链路（真实浏览器）：
+
+| 输入 | 结果 |
+|---|---|
+| `FINALPROBE.COM` | → `finalprobe.com`（小写） |
+| `FINALPROBE.COM` + `finalprobe.com` | → 只 1 条（去重） |
+| `  trimmed.example.org  ` | → `trimmed.example.org`（trim） |
+| `# comment` | 计数 0（注释过滤） |
+| `_bad._x.test` | 计数 0（非法跳过 + 页面提示） |
+
+页面提示原文：「已跳过 1 个格式非法的域名（后端同样不接受，不会生效）：7: _bad._x.test」
+
+自检 **19 PASS / 0 FAIL / 1 SKIP**，`CONCLUSION: 链路正常`。
+第 17 项「自定义域名列表合法」从 FAIL 变 **PASS**（保存时清掉了 3 条死数据）。
+
+**⚠️ 本版踩到并记录的一个 LuCI 陷阱**：
+`TextValue` 的 `write` 里只调 `map:set()` 时，值停在 uci 的 staging 区，
+依赖 `Map.parse` 之后统一 `uci:save` 落盘。但本 Map 覆写了 `apply_on_parse`，
+实测那条链**没有生效** —— 页面回显正确（值进了内存）、`uci changes` 为空、
+`/etc/config/dnschain` 内容不变，请求结束值就丢了。
+修法是在 `write` 里显式 `uci:save` + `uci:commit`，并且**必须 `return true`**
+（LuCI 的 `parse` 用 `if self:write(...) then section.changed = true end`，
+不返回真值就一个字节都不写）。
+
+**回滚**：`git checkout -- package/luci-app-dnschain/ files/usr/bin/dnschain-triage`
+
+
+## [v0.20.0] - 2026-10-25
+
+### 变更 — 全链路规整为「DNS 分流插件」：tab 6→4、section 20→18、按钮 8→3、删除 7 个假开关
+
+用户要求：「把 luci-app-dnschain 全部功能梳理一遍，规整为 DNS 分流插件，
+前后端全链路梳理，把当前凌乱的功能全部标准化简化交互，减轻用户交互压力
+减少繁琐操作，尽量自动化，减少阅读压力」。
+
+#### 规整依据：DNS 分流只有三个动作，且都已自动化
+
+| 动作 | 谁在做 | 用户要管吗 |
+|---|---|---|
+| **判定**：域名该走哪条链 | 分诊实测 + 归属库 + 健康改道 | 不用管 |
+| **落地**：写成 dnsmasq 规则 | `dc_gen_dnsmasq_split` + `watch.servers` | 不用管 |
+| **生效**：让 dnsmasq 读到 | `apply_on_parse`（保存即生效） | 不用管 |
+
+所以页面只需提供两件事：**① 现在什么状态 ② 我认为该走哪条链的域名**。
+
+#### tab 6 → 4
+
+| 新 tab | 职责 | 由哪些旧 tab 合并 |
+|---|---|---|
+| **状态** | 现在通不通、分流到哪了 | 概览与诊断 |
+| **域名** | 哪些域名我指定了走哪条 | 域名 |
+| **上游** | 往哪儿问、怎么问 | 解析 + 代理 + DHCP |
+| **名单** | 规则库从哪来、多大、怎么体检 | 分流 + 观测阈值 + 自检 |
+
+⚠️ 改 tab 必须同步三处：`SECTION_TAB`（Lua）、`TAB_LABELS`（Lua）、
+`TAB_ORDER`（JS，`dnschain.js:46`）。漏改 JS 会导致 tab 不显示或顺序错乱。
+
+#### section 20 → 18
+
+| 删除 | 理由 |
+|---|---|
+| **判定链路** | 规则图与「分流去向图」语义重叠（一张讲规则、一张讲事实）。规则内容保留在 `docs/runtime/dns-chain.md`。其中「单域名解释」保留，并入「域名」tab |
+| **域名操作** | 唯一按钮与页底「保存并应用」调同一个 `ds.apply_domains()`，完全重复 |
+
+#### 按钮 8 → 3
+
+| 保留 | 位置 | 理由 |
+|---|---|---|
+| 立即重新自检 | 状态/操作 | **唯一需要用户主动触发的**（绕过 10 秒缓存强制真跑） |
+| 清空改道状态 | 状态/DNS 分流状态 | 排障动作，就地可用 |
+| 清空全部缓存 | 上游/缓存 | 属缓存配置，低频 |
+
+删除的 5 个及去向：「重建分流规则并生效」→ 与「保存并应用」重复；
+「一键归一」→ 守护自动；「立即分诊未知目标」→ 随 `dc_health_cycle` 自动；
+「更新 GFW 名单」→ SSR-Plus 自身定时 + `auto_import`；
+「立即探测一轮」→ 守护按 `health.interval` 自动。
+
+#### 删除 7 个「假开关」
+
+共同问题：**可以改，但后端完全不读，改了没有任何效果**。
+
+| 开关 | 页面自述（删除前） |
+|---|---|
+| 尽力阻断公共 DoH | 「只做标注，不实际拦截」 |
+| 校验上游证书 | 「未接入 dnsproxy 的启动参数」 |
+| 经代理出站 | 「实际出站由 SSR-Plus 决定」 |
+| 抑制 HTTPS/SVCB | 「没有运行时消费者」 |
+| 启用缓存 | 「实际始终启用，框架不读这个开关」 |
+| 失败自动回滚 | 「回滚逻辑尚未实现」 |
+| 定时自检间隔 | 「仓库里没有定时调度」 |
+
+**判据是「后端有没有真的读它」，不是「名字听起来像自动」。**
+按此判据，`lists.auto_import` **保留** —— 见下。
+
+#### 新增 — 自动化：health 守护内跑 reconcile
+
+用户要求「尽量自动化」。在此之前 `dnschain-reconcile` **没有任何调度器**：
+全仓库无 cron、无 procd 实例、无开机钩子，唯一调用点是页面的「一键归一」按钮。
+于是 SSR-Plus 更新名单后，框架的域名文件仍是旧的，直到用户想起来去点按钮 ——
+而 `lists.auto_import`（默认 1）与 `import_interval`（默认 60 秒）
+这两个配置项的存在，说明设计意图本来就是「自动导入」，只是没有东西驱动它。
+
+`dnschain-health:cmd_daemon` 现在每轮探测后顺带调一次 reconcile。
+`reconcile_lists` 内部先比名单指纹，未变则零动作（不会反复重启 dnsmasq）。
+
+**边界处理**：原实现 `interval=0` 时守护直接 `return 0` 退出，
+会连带把名单自动收敛也关掉。现改为：`interval=0` 时不进探测循环，
+但仍按 300 秒固定间隔做名单收敛 —— 用户关的只是探测，不该让名单永不更新。
+
+#### 修复 — 自检第 2 项永久误报（真实缺陷，非本版引入）
+
+`dnschain-split.conf` 里有 26 条指向 `#5353` 的规则，都是**自定义国内域名**
+（`www.qq.com`、`api.bilibili.com`、`amdc.alipay.com` 等）。
+`dc_gen_dnsmasq_split`（`dnschain.sh:1346`）**故意**把它们写成 `#${eport}` ——
+自定义国内域名就该走国内链，这是分流功能本身。
+
+但自检 `_scan_item2` 只认 `#${fport}`（5336），把 26 条**正确规则**报成
+「出现未预期端口: 5336 5353（应为 5336）」，导致页面链路拓扑图的
+「分流规则」阶段**永久显示红色 FAIL**。
+
+**这比不检查更糟**：用户看到常驻红点会以为分流坏了，实际完全正常 ——
+一个假的警报会训练用户忽略所有警报。
+
+修法：判据允许 `fport` 与 `eport` 两种，只报其它端口；
+`bad_ports` 列表也同步滤掉两个合法端口（原实现连自己要求的 5336 都列进去了，自相矛盾）。
+
+#### 修复 — 观测域名与静态片段重复（真实缺陷，导致改道静默失效）
+
+`dnschain-split.conf` 的文件头注释写着「观测域名不在此文件：它们由
+`watch.servers` 动态决定，同一域名只能有一处 `server=` 声明，
+否则 dnsmasq 会当成候选随机选」—— 但自定义域名段**没有排除观测域名**，
+违反了这条自己的规则。
+
+实测：8 个观测域名里 6 个同时出现在两处
+（`www.qq.com`、`www.163.com`、`www.baidu.com`、`www.google.com`、
+`www.wikipedia.org`、`www.youtube.com`）。
+
+两条 `server=` 都在时 dnsmasq 把它们当**候选**（不是后者覆盖），
+改道切链后就变成「随机走一条」—— **改道功能静默失效**。
+
+修法：自定义国外/国内两段都加上 `dc_exclude "$watch_f"`。
+
+#### 验证
+
+| 工具 | 结果 |
+|---|---|
+| `sh tools/verify-dnschain-domains.sh` | **164 OK / 0 FAIL** |
+| `python tools/check-dnschain-lua.py` | **PASS=144 FAIL=0** |
+| `python tools/render-dnschain-diagrams.py --check` | **PASS=70 FAIL=0** |
+| `python tools/extract-dnschain-i18n.py` | 428 条无缺失（比上版少 = 删假开关文案的净减少） |
+| `sh tools/verify-dnschain-ci-sim.sh` | RC=0 |
+| `dash -n` × 4 脚本 + `luac -p` × 4 文件 + `node --check` | 全通过 |
+
+**新增断言（5 条）**：18 个 section 都有 `m:section` 声明；
+旧 section「判定链路」「域名操作」不得再出现；
+4 个新 tab id 在 Lua 与 JS 都存在；旧 tab id 不得残留；
+分流明细全绿时折叠。
+
+**真实路由器验证（OpenWrt 24.10.5，`192.168.3.254`）**
+
+| 项 | 结果 |
+|---|---|
+| 热渲染 | **1.38–1.39 s**（冷启动 6.40 s，重启后首次） |
+| Lua 错误 | **0** |
+| section 数 | **18** |
+| tab | **4**（状态 / 域名 / 上游 / 名单） |
+| 按钮 | **3**（+ CBI 原生 Save） |
+| 假开关残留 | 0 |
+| **自检** | **PASS=20 FAIL=0**，`CONCLUSION: 链路正常` |
+| 观测域名重复 | **0**（修前 6） |
+
+**真实浏览器视觉验证（Chrome + luci-theme-shadcn）**：
+链路拓扑图 8 个阶段**全部绿色**（修前「分流规则」是红色 FAIL）；
+断点诊断「20 项自检全部通过，没有断点需要诊断」+ 时间戳；
+4 个 tab 正常切换，18 个 section 全部归组。
+
+**回滚**：`git checkout -- package/luci-app-dnschain/ files/usr/bin/dnschain-{health,selftest} files/usr/share/dnschain/dnschain.sh`
+
+
+## [v0.19.0] - 2026-10-24
+
+### 变更 — 「改道状态」+「改道明细」合并为「DNS 分流状态」
+
+用户提出：「我想把『改道状态』+『改道明细』合并到一个 DNS 分流状态导图，
+其实改道就是 DNS 分流」。
+
+**这个判断在代码里成立。** `dc_health_cycle` 每轮做的事就是**决定某个域名
+走哪条链**，而 `watch.servers` 里 `active` 字段最终写成的就是
+`server=/域名/127.0.0.1#<port>` —— 那正是 DNS 分流本身。
+「改道」只是「分流结果发生变化」这一事件的旧叫法，**不是独立能力**。
+
+#### 合并前的冗余
+
+| section | 内容 |
+|---|---|
+| 改道状态 | 一张导图 + 「改道通道」+「自动改道进程」两行 |
+| 改道明细 | 一张 7 列表 |
+
+两块讲同一件事（这 8 个域名现在走哪条链、为什么），却要滚两次屏。
+而且导图里已按状态分组列出域名，明细表又把同一批域名再列一遍，
+只多了「连败 / 最近探测 / 原因」。
+
+#### 合并后的结构（一块讲完整件事）
+
+| 位置 | 内容 | 回答什么 |
+|---|---|---|
+| 分流去向 | 导图 | 哪些域名走直连、哪些走代理、哪些偏了 |
+| 自动改道 | 一行（原两行压缩） | 通道就绪吗、守护在跑吗 |
+| 分流明细 | 折叠表 | 连败次数、最近探测、原因 |
+
+#### 两处细节
+
+**① 导图五档改名**（内部 id 不变 —— 它们是与 `dnschain-health`
+状态文件的契约，改名会破坏运行时）：
+
+| 旧标题 | 新标题 |
+|---|---|
+| 正常 | 走首选链 |
+| 降级中 | 首选链不稳 |
+| 已改道 | 已切另一链 |
+| 双链故障 | 双链故障（保留） |
+| 未探测 | 未探测（保留） |
+
+改的是**视角**：说「去向」而不是「评价」。
+aria-label 同步改为「DNS 分流去向导图」。
+
+**② 明细表全绿时默认折叠**：8 个观测域名绝大多数时候全正常，
+全绿表信息密度极低却占满首屏。有 `degraded`/`rerouted`/`both-bad`
+时自动展开并显示完整表格。
+「未探测」**不计入异常** —— 它只是还没跑过，不是故障。
+
+#### ⚠️ 没有删「通道就绪」与「守护运行」
+
+它们是**故障前置条件**，不是冗余显示：
+
+- 通道未就绪 → 改道写了文件但 dnsmasq 读不到 → **静默失效**
+- 守护未运行 → 开关显示已启用但完全不改道 → **静默失效**
+
+两者都是「看起来正常、实际没生效」，是排查这类问题的唯一可靠判据。
+合并时把两行压成一行（它们共同回答「自动改道此刻真的在工作吗」），
+但**一条判据都没丢**。
+
+#### 验证
+
+| 工具 | 结果 |
+|---|---|
+| `sh tools/verify-dnschain-domains.sh` | **162 OK / 0 FAIL**（新增 4 条合并断言） |
+| `python tools/check-dnschain-lua.py` | **PASS=155 FAIL=0** |
+| `python tools/render-dnschain-diagrams.py --check` | **PASS=70 FAIL=0** |
+| `python tools/extract-dnschain-i18n.py` | 461 条无缺失 |
+| `sh tools/verify-dnschain-ci-sim.sh` | RC=0 |
+| `luac -p` × 4 文件 | 全通过 |
+
+**新增断言（4 条）**：
+1. `SECTION_TAB` 的 20 个 section 都有 `m:section` 声明
+2. 旧 section「改道状态」已合并（不得再作为 `m:section` 出现）
+3. 旧 section「改道明细」已合并
+4. 分流明细全绿时折叠并给摘要
+
+**真实路由器验证（OpenWrt 24.10.5，`192.168.3.254`）**：
+渲染 3.91 s / 342 KB，Lua 错误 **0**；
+`>改道状态<` 0、`>改道明细<` 0、`改道状态思维导图` 0、`自动改道进程` 0；
+section 数从 21 降到 **20**。
+
+**真实浏览器视觉验证（Chrome + luci-theme-shadcn）**：
+「DNS 分流状态」一块讲完 —— 分流去向导图（8 个域名全在「走首选链」档，
+双链故障 0 个）、自动改道一行（通道就绪 · 守护运行中 pid 21520 ·
+每 60 秒一轮 · 上次探测 21 秒前）、分流明细折叠为
+「8 个观测域名，全部分流正常」。
+
+**回滚**：`git checkout -- package/luci-app-dnschain/luasrc/model/cbi/dnschain/{general,diagrams}.lua`
+
+
 ## [v0.17.0] - 2026-10-24
 
 ### CI：定时预热 dl 镜像与交叉工具链，消除每次构建的重复下载
@@ -148,6 +772,393 @@ die "Hash of the local file $filename does not match ..."
 首次 push 后需确认三件事：`cache-deps.yml` 三个 job 全绿、
 `cache-build-v1` Release 上有 `dl.meta` 与 `toolchain-*.meta`、
 下一次构建日志里出现 `工具链缓存校验通过`。
+
+## [v0.18.0] - 2026-10-24
+
+### 变更 — tab 结构重构：概览放结果、域名放资产与参数（ADR-0007）
+
+用户提出「域名页面和概览与诊断页面的 tab 合并方案，我感觉有点重合」。
+
+**取证结论：section 层面没有重合。** 两个 tab 的 section 标题零交集，
+数据生产者也不重叠（`chain_snapshot`/`selftest` 只在概览，
+`health_rows`/`triage_rows` 只在域名）。真实的重合是五类缺陷：
+
+| 缺陷 | 证据 |
+|---|---|
+| 两个按钮执行同一命令 | 「一键归一」与「手动导入名单」都是 `dnschain-reconcile`，模型层函数体逐字相同 |
+| 「重建分流规则」3 个入口 | 域名按钮 + 概览两按钮 + 保存并应用 |
+| 同一判定两套实现 | servers-file 就绪：自检第 19 项 vs `ds.serversfile_ready`；结论可矛盾 |
+| 「已录入清单」挂错 section | 沿用上一个 `s`，实际渲染在「国外」下，语义错 |
+| 概览首屏 4 块都在答「通不通」 | 解析链路图 / 实时诊断图 / 链路指标 / 组件状态表 |
+
+**核心判据**（写进 ADR，后续加功能必须遵守）：
+**概览放「结果」——现在通不通、哪里坏、怎么修。
+域名放「资产与参数」——哪些域名归哪边、怎么判、阈值多少。**
+
+#### 修复 — 两个重复入口
+
+- 「手动导入名单」按钮删除。`dnschain-reconcile` 本就**同时做**「归一不变量」
+  与「导入名单」两件事（脚本头 :9-10），两个按钮是同一件事的两个名字。
+  另一个必须删的理由：它无条件打 ✓，不看 `exec_ok` 结论，违反 AGENTS 红线 3。
+- `M.import_lists()` 一并删除（死函数，留着会让后来者再接一个重复入口）。
+
+#### 修复 — 「已录入清单」拆为独立 section
+
+它是国内+国外**两个清单的合并只读视图**，原先挂在「国外」的 `s` 下，
+`SECTION_TAB` 里也没有它的键。现在独立成 section 并登记。
+
+#### 变更 — 两张链路图合并为一张「链路拓扑图」
+
+`解析链路`（拓扑）+ `实时诊断链路`（20 项按 8 阶段重分组）合并。
+旧版两张图并列，用户得在脑中做两次映射（「图 A 的那段」↔「图 B 的那个阶段」）。
+新版：8 个阶段串成一条链（表达「流量依次经过」），每节点带状态徽标，
+断点处线条变红。`_chain_graph`（手写内联 SVG 1120×372）已删除。
+
+`链路指标` 与 `组件状态` 合并进 `<details>` 折叠下钻 —— 图负责**定位**
+（哪一段红了），表负责**确认**（具体哪个 PID 占了端口）。
+
+#### 新增 — diagnosis.lua：动态诊断，不写死文案
+
+用户要求「动态看到链路问题，自动化解决不了时让用户可视化快速解决」。
+
+`dnschain-selftest` 有 **60 个 emit 调用点**。给每个 FAIL 分支手写
+cause/impact/fix 等于把「写死」搬到 shell，且**新增检查项时必然漏写**。
+改用「证据 → 症状」规则推导：`evidence` 本身已是动态真实探测结果，
+缺的是推导。规则十余条，覆盖绝大多数失败形态。
+
+**三种自动生成分支**（用户明确要求）：
+
+| 情况 | 处理 |
+|---|---|
+| 新增检查项未归组 | 自动进**兜底阶段「其他检查」**，标注「未归入链路阶段（共 N 项）」 |
+| 证据匹配不到规则 | 输出「**未识别的失败模式**」+ 证据原文 + 复现命令 |
+| 阶段 FAIL 但证据为空 | 显示「证据缺失」+ 该阶段检查项编号 |
+
+**边界是诚实的**：宁可说「我不认识这个失败」，也不生成看起来合理但可能错误的
+诊断 —— 错误诊断比没有诊断更糟。
+
+#### 新增 — selftest 输出 AT / DUR / RUN
+
+用户要求「加入时间戳和序列号尽量详细」。
+
+```
+SUMMARY PASS=20 FAIL=0 SKIP=0 AT=2026-10-24T18:36:47 DUR=1s RUN=4
+```
+
+- `AT` 是**自检运行时刻**，不是页面渲染时刻 —— 配合 60 秒结果缓存与
+  10 秒跨请求 TTL 缓存，用户必须能判断这份结论有多旧
+- `RUN` 是轮次号，**读缓存时不递增**（轮次号含义是「第几次真跑」）
+- 单项行不变，避免破坏现有解析
+
+#### 变更 — 改道状态/明细与相关按钮搬进概览
+
+改道状态/明细是**结果**，观测与阈值是**参数**。前者搬概览（与改道触发按钮同 tab，
+点完就地看到变化），后者留域名。概览另加「分诊摘要」一行（共 N 条 / 已入库 M），
+明细仍留域名 —— 200+ 行表格不会把链路图挤下去。
+
+#### 验证
+
+**本地静态校验（全部通过）**
+
+| 工具 | 结果 |
+|---|---|
+| `sh tools/verify-dnschain-domains.sh` | **159 OK / 0 FAIL**，RC=0（新增第 13 节 13 条 tab 结构断言） |
+| `python tools/check-dnschain-lua.py` | **PASS=156 FAIL=0** |
+| `python tools/render-dnschain-diagrams.py --check` | **PASS=70 FAIL=0** |
+| `python tools/extract-dnschain-i18n.py` | 463 条无缺失（比上版少 18 条 = 删除旧图与合并按钮的净减少） |
+| `sh tools/verify-dnschain-ci-sim.sh` | RC=0 |
+| `dash -n` × 3 脚本 + `luac -p` × 4 文件 | 全通过 |
+
+`diagnosis.lua` 逻辑单测（真实 Lua）：STAGES 覆盖 1-20 完整；加第 21 项 →
+自动生成兜底阶段并标注「未归入链路阶段（共 1 项）」；4 条规则正确命中，
+1 条诚实报「未识别」。
+
+**真实路由器验证（OpenWrt 24.10.5，`192.168.3.254`）**
+
+| 项 | 结果 |
+|---|---|
+| 整页渲染 | 3.65 s / 343 KB，Lua 错误 **0** |
+| `AT`/`DUR`/`RUN` | 实测 `AT=2026-10-24T18:36:47 DUR=1s RUN=1`；缓存命中 RUN 不变；`-f` 后 RUN=2 |
+| 20 项自检 | 完整，`CONCLUSION: 链路正常` |
+| 旧内容消失 | 解析链路 0、实时诊断链路 0、手动导入名单 0、链路指标 0 |
+| 新内容出现 | 链路拓扑图、断点诊断、分诊摘要、展开组件状态与指标 |
+
+**真实浏览器视觉验证（Chrome + luci-theme-shadcn）**
+
+- 6 个 tab 正常，21 个 section 全部归组
+- 概览首屏：结论徽标「链路正常」+ **链路拓扑图**（8 阶段成链、每节点带 PASS 计数
+  与真实证据）+ **断点诊断**（「20 项自检全部通过」+ 时间戳「运行于
+  2026-10-24T18:43:47 · 耗时 1s · 第 4 轮」）+ 组件状态折叠区
+- 4 张 SVG 全部渲染：链路拓扑图 / 未知目标分诊链路图 / 改道状态思维导图 / 分诊结果思维导图
+- 「已录入清单」独立成 section，位置在「国外」之后、「判定链路」之前
+
+**回滚**：备份在 `/root/dnschain-bak-20261024-151049`（第一步改动前）。
+
+## [v0.17.1] - 2026-10-24
+
+### 变更 — DNS 分流页与最新分流标准对齐；修复页面性能（冷启动 55s → 3.7s）
+
+用户要求四件事：① 核对每个 TAB 与最新分流逻辑一致；② 核实所有思维导图与
+分流逻辑/规则库/代码一一对应；③ 分诊结果表把 IP 转 IP 段入库并加时间戳与
+序号，已入库的默认不再显示；④ 全局改名为「DNS 分流」。
+随后追加第五件：⑤ 修复切换本页时 CPU 暴涨、页面打开很慢。
+
+对照标准（需求原文）：
+
+```
+入口条件：不在 GFW 名单、不在 blacklist、不在 china、不在任何数据库
+① 试直连（真实发请求）
+    通 → 落库：IP 写 china 集合，域名写 custom-domestic.txt
+    不通 → ②
+② 试代理（移入 blacklist 后再发请求）
+    通 → 落库：IP 写 blacklist 集合，域名写 custom-foreign.txt
+    不通 → ③
+③ 标记 dead，不加入任何集合
+```
+
+#### 修复 — `dnschain-triage apply` 有 1/3 的 IP 记录永远重放不到
+
+`apply` 的「补全 DNS 轮询漏掉的 IP」那段用 `rec_ip_put "$_ip" "$v"` 写入，
+而 `$v` 是**域名的**结论（`domestic`/`foreign`），不是 IP 的（`direct`/`proxy`）。
+于是 IP 记录里会出现 `47.76.188.58|domestic`，而重放的 `case` 只匹配
+`direct|proxy` → **静默跳过**。
+
+症状：域名落库了，但它名下的 IP 段在 SSR-Plus 重启后不再被重放 →
+集合里缺段 → 该 IP 走兜底规则被送进代理 → 页面白屏，而分诊记录看着一切正常。
+
+两处修：写入端改 `rec_ip_put "$_ip" "$_vd"`（IP 的结论）；
+读取端 `case` 同时接受 `direct|domestic` 与 `proxy|foreign`（兼容历史记录）。
+
+#### 修复 — `cmd_list` 输出的域名结论页面认不出
+
+记录文件里域名存 `domestic`/`foreign`，页面表格按 `direct`/`proxy` 查 TONE 表。
+不归一的话徽标退化成灰色、文案显示原始值，看起来像「未知结论」。
+现在 `list` 统一映射成 `direct`/`proxy`/`dead`。
+
+#### 新增 — 分诊记录带时间戳，`list` 输出序号 / IP 段 / 是否已入库
+
+记录格式从 2 字段扩到 3 字段（前 2 字段与旧版兼容，旧记录时间显示 `—`，
+不强制迁移 —— 迁移会改写用户已有的审计记录）：
+
+```
+<目标>|<结论>|<写入时间 YYYY-MM-DDTHH:MM:SS>
+```
+
+`list` 输出（v0.16.4 起 7 字段）：
+
+```
+ITEM <序号>|<目标>|<类型>|<结果>|<时间>|<IP段>|<是否已入库>
+```
+
+IP 段与「已入库」都是**每次 list 现算的派生量**，不存盘：
+段由 `cidr_for_ip` 唯一决定（规则一改重算即得），「已入库」要查当前 nft/UCI
+状态（上游 SSR-Plus 重启会清空集合，旧的「已入库=1」就是错的）。
+
+时间戳用 `date '+%Y-%m-%dT%H:%M:%S'`，**不用 `date -Iseconds`** ——
+BusyBox 的 date 没有 `-I`（实测 `date: invalid option -- 'I'`）。
+
+#### 修复 — 页面性能：冷启动 55 秒 → 3.7 秒，热加载 1.4 秒
+
+**用户报告**：切到本页 / 冷启动时 CPU 负载暴涨，页面打开很慢。
+
+**实测根因**（路由器 N2930 / OpenWrt 24.10.5，全部数据为现场测得）：
+
+| 环节 | 优化前 | 根因 |
+|---|---|---|
+| `dnschain-triage list` | **52.49 s** | 每行一次 `nft get element`（实测 **140 ms/次**，208 次） |
+| `dnschain-triage apply` | **62.65 s** | 同上，且每轮收敛都跑 |
+| 整页冷启动 | **55.18 s** | 页面两处调用 `triage_rows()`，加上 selftest/health 各重跑 |
+| 整页热加载 | **3.0 s** | 每请求独立进程，请求内缓存跨不过去 |
+
+⚠️ 旧代码注释写「实测单次 nft get element 约 8ms」—— **这是错的**，实测
+140ms，差 17 倍。注释里的错误数字会让后来者误判「这点开销可以接受」。
+
+**五级修复**（每级都单独实测）：
+
+1. **集合快照**：`nft list set`（110ms/次，共 2 次）替代逐条 `get element`。
+   nft 调用 **208 → 2**，list 52.49s → 10.05s。
+2. **`cidr_for_ip` 去 fork**：`ip_prefix2`/`ip_to_cidr` 改用 `${ip%%.*}`
+   参数展开（原来每 IP 4 次 `cut`），段表匹配改 `case`（原来 13 条 × 2 次 `cut`）。
+   10.05s → 1.17s。
+3. **awk 批量算段**：用一个 awk 进程把整份记录文件转成 ITEM 行，shell 不再逐行。
+   1.17s → 0.96s。
+4. **awk 内哈希表判成员**：把 56KB 快照按逗号 split 进哈希表。
+   原来 shell 的 `case` 要线性扫描 56KB × 246 行 ≈ 13MB。0.96s → **0.41s**。
+5. **区间覆盖判定**：集合带 `flags interval` + `auto-merge`，被父段包含的段
+   在 `nft list set` 里**查不到字面**（实测 `36.110.0.0/16` 被
+   `36.96.0.0-36.113.255.255` 覆盖，`add` 返回 0 但不新增记录）。
+   只做精确匹配会让 `apply` **永不幂等**（`applied` 恒为 93）。
+   改用「区间展开 + 按 lo 排序 + 二分查覆盖」，复杂度 O(m·log n) ——
+   线性扫版实测把 list 拖回 3.72s、apply 拖到 40s，二分后回到 0.82s。
+
+**apply 另修两处**：
+- 域名补全段原来每 IP 调 `cidr_for_ip` + `_dc_snap_covers`（117 次函数调用，
+  占 apply 16 秒里的 12 秒），改为 awk 批处理。
+- `rec_ip_put` 每次重写整个记录文件（`grep -v` + `mv`），逐条写是 O(n²)，
+  改为攒到临时文件一次性 merge。
+
+**页面侧跨请求 TTL 缓存**（10 秒，落 `/var/run/dnschain/`，tmpfs 不写 flash）：
+`selftest`（1.20s）、`triage list`（1.19s）、`health status`（0.21s）。
+LuCI 每个 HTTP 请求是独立进程，`cached()` 只覆盖请求内 —— 切一次 tab 就全重跑。
+
+⚠️ 引入缓存后必须同步的三处（否则用户点按钮看到旧结果）：
+`ds.selftest(true)` 绕过 TTL；「立即分诊」删 `.triage-list.cache`；
+「立即探测一轮」「清空改道状态」删 `.health-status.cache`。
+
+**最终实测**：
+
+| 指标 | 优化前 | 优化后 | 倍数 |
+|---|---|---|---|
+| `triage list` | 52.49 s | **0.41 s** | 128× |
+| `triage apply` | 62.65 s | **1.78 s** | 35× |
+| 整页冷启动 | 55.18 s | **3.69 s** | 15× |
+| 整页热加载 | 3.0 s | **1.44 s** | 2× |
+| 浏览器 TTFB | ~55 s | **1.58 s** | 35× |
+| `apply` 幂等性 | 恒 applied=93 | **applied=0** | — |
+
+CPU 负载：页面加载期间 `loadavg` 0.65（优化前持续打满）。
+
+**新增 16 条性能不变量断言**（`tools/verify-dnschain-domains.sh` §12）：
+锁住「不在循环里用 `set_has`」「必须有集合快照函数」「list 必须批量化」
+「必须用覆盖判定」「三个缓存文件必须存在」「按钮必须能绕过/删除缓存」。
+这类回归功能上完全正确、断言全绿、只是慢，是最难发现的一类。
+
+⚠️ 写这些断言时踩了 AGENTS §6 第 7 条记载的坑：`cmd_apply` 里有
+「旧实现每行调 set_has」的**解释性注释**，不剥注释会让断言永久误报。
+已改为先 `grep -v '^[[:space:]]*#'` 再判断。
+
+#### 变更 — 分诊结果表格：加序号/时间/IP 段，已入库折叠留档
+
+表格列从 4 列扩到 7 列：序号 / 目标 / 类型 / IP 段 / 结论 / 落库动作 / 时间。
+
+「已入库的不需要再次被看到」用**折叠**而不是删除实现：
+待处理（dead / 尚未入库）正常显示；已入库的收进默认关闭的 `<details>`
+（`dc-details`，原生元素，无需 JS，键盘可达）。保留的原因是与
+「加时间戳和序号便于追踪审计」这一条并存 —— 从 HTML 里删掉，审计线索就断了。
+
+#### 变更 — 重画「判定链路图」，与最新分流标准逐节点对齐
+
+旧图画的是另一套逻辑（域名 → 归属 → 首选链探测 → 保持/改道），那是 v0.13.0
+的「健康探测 + 自动改道」，与分诊标准不是一回事。两套图并列摆在同一页，
+用户无法判断「到底哪套在起作用」。
+
+新图三行三列，与标准逐条对应：
+
+```
+入口(未知目标) ─┬→ ① 试直连 ─→ 直连通 → 落库 china / custom-domestic.txt
+                │       ↓(不通)                    ↓(也不通)
+                ├→ ② 试代理 ─→ 代理通 → 落库 blacklist / custom-foreign.txt
+                │       ↓(不通)
+                └→ ③ 标记 dead ─→ 不加入任何集合
+       已有归属（跳过，不干预）
+```
+
+几何约束（改坐标必须同步改 `route_layout`，有断言）：
+
+- `NH` 从 48 提到 **64** —— `box()` 三行基线在 `y+21 / y+37 / y+51`，
+  取 48 时第三行跑到框外（文字压在下边框上），只查 viewBox 越界的断言发现不了。
+- 「已有归属」放 C1 而不是 C2：放 C2 会占住第三行中间列，②→③ 的竖线
+  要么穿过它、要么与第三行横线交叉。
+- 入口**只连 ①**：从入口同时连 ② 会被读成「入口可以直接试代理」，
+  与「① 不通 → 才进 ②」矛盾。①→②、②→③ 用竖虚线表达条件性推进。
+
+#### 新增 — 分诊结果思维导图（落点分布）
+
+规则图（route_map）画「为什么会这样判」，本图画「现在落在哪一档」：
+三档（① 直连通 / ② 代理通 / ③ 都不通）+ 每档条数与已入库数 + 落库去向。
+`triage_layout()` 与 `triage_map()` 共用同一套档位与行高算法。
+
+#### 修复 — 分诊开关此前只存在于脚本默认值里，页面完全没有入口
+
+后台每轮收敛都会读 `triage_enabled`（默认开）与 `triage_max`（默认 12）
+并发真实 HTTP 请求，而页面上**一个入口都没有** —— 用户既看不到它在跑，
+也无法关掉。现补三个键进 UCI 与页面：
+
+| 键 | 默认 | 作用 |
+|---|---|---|
+| `triage_enabled` | `1` | 总开关 |
+| `triage_max` | `12` | 每轮最多分诊几个目标 |
+| `triage_conc` | `8` | 并发数（脚本读环境变量，现由 `dc_triage_cycle` 从 UCI 导出） |
+
+⚠️ 并发数必须 `export DNSCHAIN_TRIAGE_CONC` 再调脚本 —— 不导出的话
+页面上的设置**完全不生效**，而界面又显示成用户改过的值。
+
+#### 变更 — 全局改名「DNS 链路」→「DNS 分流」
+
+按用户确认的范围：**只改显示文案**。以下内部标识全部保持不变（改名会让
+老配置不自动迁移、并波及 Makefile/menu.d/acl.d/controller/20 个 section/
+5 个校验脚本/docs/CHANGELOG）：
+
+包名 `luci-app-dnschain`、路由 `admin/services/dns_chain`、
+脚本 `dnschain-*`、UCI 配置名 `dnschain`。
+
+改动点：菜单标题（menu.d + controller）、页面标题与描述、`启用 DNS 分流框架`
+开关文案、PO、Makefile description、`docs/routes.md`、`docs/packages/
+luci-app-dnschain.md`、`docs/runtime/*`、`docs/adr/0003`、`docs/adr/0004`、
+`docs/adr/0005`、`docs/README.md`、`GLOSSARY.md`、`AGENTS.md`、
+运行时脚本头注释。
+
+⚠️ 仓库里**没有**「DNS改道」这个旧称（全仓库 grep 为 0），旧称实际只有
+「DNS 链路」。
+
+#### 验证
+
+**本地静态校验（全部通过）**
+
+| 工具 | 结果 |
+|---|---|
+| `python tools/check-dnschain-lua.py` | **PASS=156 FAIL=0** |
+| `python tools/render-dnschain-diagrams.py --check` | **PASS=70 FAIL=0** |
+| `python tools/extract-dnschain-i18n.py` | 481 条中文文案无缺失 |
+| `sh tools/verify-dnschain-domains.sh` | **132 OK / 0 FAIL**，RC=0 |
+| `sh tools/verify-dnschain-ci-sim.sh` | RC=0，CI 模拟校验通过 |
+| `dash -n` × 6 个脚本 | 全部通过（triage / dnschain.sh / reconcile / init.d / uci-defaults / dnsproxy） |
+| `node --check dnschain.js` | 通过 |
+| `luac -p` × 4 个 Lua 文件 | 全部通过 |
+
+⚠️ 首次运行时 `check-dnschain-lua.py` 有 6 条 FAIL、`verify-dnschain-domains.sh`
+有 9 条 FAIL —— 全部是**断言仍钉着旧图内容**（`域名判定链路图` / `直连链路` /
+`自动改走直连` 等）。图按新标准重画后这些字符串本就不该存在。已把断言改为
+新图的节点文案，并补上「IP 一律转段」「dead 不入库」两条硬约束的断言。
+这不是「改断言让它变绿」—— 改的是断言对应的**事实**，且新增了更强的检查
+（如分诊表 7 列、`dc-details` 折叠、三个分诊开关必须注册）。
+
+**真实路由器验证（OpenWrt 24.10.5 x86/64，`192.168.3.254`）**
+
+部署方式：备份到 `/root/dnschain-bak-20261024-151049` 后覆盖 10 个文件。
+
+| 项 | 结果 |
+|---|---|
+| 部署后 `sh -n` | triage 与 dnschain.sh 均通过 |
+| 菜单标题 | `"title": "DNS 分流"`（实测读到） |
+| 页面 HTTP | **200 / 286747 B**，Lua 错误 **0** |
+| 自检 | **PASS=20 FAIL=0 SKIP=0**，`CONCLUSION: 链路正常` |
+| 分诊守护进程 | 真实跑一轮：`total=12 direct=10 proxy=1 dead=0 known=1` |
+| 时间戳写入 | 实测 `example.com\|domestic\|2026-10-24T16:01:22`（3 字段） |
+| `list` 归一 | 实测输出 `ITEM 182\|example.com\|domain\|direct\|2026-10-24T16:01:22\|\|0` |
+| **apply 修复实证** | 制造 `203.0.113.77\|domestic` 脏记录 → apply 前 china 无 `203.0.113.0/24`，apply 后**有**（修复前该记录被静默跳过） |
+| 旧记录兼容 | 2 字段记录仍可读，时间列显示 `—`（不迁移） |
+
+**真实浏览器视觉验证（Chrome + luci-theme-shadcn）**
+
+- 6 个 tab 全部存在：概览与诊断 / 域名 / 解析 / 分流 / 代理 / DHCP
+- 21 个 section 全部归组，无「未归组」泄漏
+- **分诊结果区**：三个开关（启用自动分诊 ✅、每轮最多 12、并发 8）正常渲染
+- **落点分布思维导图**：三档 + 计数 + 落库去向，实测「① 直连通 162 条 · 已入库 63」
+- **7 列表格**：序号 / 目标 / 类型 / IP 段 / 结论 / 落库动作 / 时间，实测
+  `3 | 36.110.192.103 | IP | 36.110.0.0/16 | 直连通 | 已加入 china 集合（直连）| —`
+- **已入库折叠区**：`open=false`（默认关闭），summary「已入库（审计留档，默认折叠）（69）」，
+  内部 70 行；展开后完整显示审计留档
+- **判定链路图**：按新标准渲染（未知目标 → ① 试直连 → ② 试代理 → ③ 标记 dead，
+  含「已有归属」支与两条底部硬约束），连线无交叉、文字无溢出
+- 汇总行：`直连通 162 / 代理通 16 / 都不通 10 / 合计 188`
+
+**回滚命令**
+
+```sh
+cp -r /root/dnschain-bak-20261024-151049/* /   # 按需逐项覆盖
+/etc/init.d/rpcd restart
+```
 
 ## [v0.16.3] - 2026-10-24
 

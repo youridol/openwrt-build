@@ -61,26 +61,32 @@ _反例_：`uncovered → domestic` 不是随便定的 —— dnsmasq 的默认�
 _Avoid_: 默认链路、最优链路
 
 **当前**（active）：
-域名此刻**实际**使用的链路，由健康探测与改道决定，落在
-`/var/run/dnschain/health.state` 的第 3 个字段。可以与首选不同。
-_落点_：`files/usr/share/dnschain/dnschain.sh:1473-1482`（`dc_health_active`）
-_反例_：不是 UCI 里的配置 —— 状态放 `/var/run`，重启即重算。
+~~域名此刻**实际**使用的链路，由健康探测与改道决定~~
+**v0.22.0 起「当前」恒等于「首选」** —— 健康探测与改道已删除，
+不存在「配置说 A、实际走 B」的情形。
+_落点_：`dc_explain_domain` 仍输出 `ACTIVE=` 字段（页面「单域名解释」显示它），
+但它的值直接取自 `dc_domain_preferred`。
+_反例_：不要去找 `health.state` —— 该文件已不再生成。
 _Avoid_: 生效链路、实际链路
 
-**改道**：
-当**首选**链不通、且**另一条**链通时，把该域名切到另一条链。
-只改 `watch.servers` + SIGHUP，**绝不 restart dnsmasq**（否则每次约 3 秒解析中断）。
-两条链都不通时**不改道**（标 `both-bad`）—— 那是链路故障，改道只会掩盖问题。
-_落点_：`files/usr/share/dnschain/dnschain.sh:1686-1761`
-_反例_：不是「按域名列表批量切」—— 只对 `health.watch` 里的观测域名生效。
-_Avoid_: 切换、failover、故障转移
+**回落**（fallback）：
+**v0.22.0 起取代「改道」的概念。** 直连上游不可用时，由
+`dnsproxy --fallback 127.0.0.1:5336` 在**上游层**自动改走代理。
+纯内存状态、无探测、无落库、无 SIGHUP。
+_落点_：`files/usr/share/dnschain/dnschain.sh` 的 `dc_gen_dnsproxy_args()`
+（生成 `--fallback` 行）
+_反例_：⚠️ 地址格式必须是 `127.0.0.1:5336`（**冒号**），
+不能写 dnsmasq 的 `127.0.0.1#5336` —— 写成 `#` 时 dnsproxy 拒绝启动。
+⚠️ 只在「上游不可用」时触发，**不判断答案是否污染** ——
+被污染的域名仍须由 gfw 名单显式写 `server=/域名/#5336`。
+_Avoid_: 改道、切换、failover、故障转移（这些都是 v0.22.0 前的旧叫法）
 
 **补全归属**：
 自定义域名输入框的作用。用户录入只**补全数据库没覆盖的域名归属**，
-不是「锁定不改道」的开关 —— 补全后的域名照常参与健康检测与自动改道。
-_落点_：`files/usr/share/dnschain/dnschain.sh:899-931`（`dc_domain_custom`）
+决定该域名（及其所有子域名）走哪条链。
+_落点_：`dc_domain_custom()`（`files/usr/share/dnschain/dnschain.sh`）
 _反例_：v0.14.0 之前这里是 `fixed` 语义（命中即跳过改道），已删除；
-现在 `CUSTOM=1` 只表示「归属由用户补全」（`dnschain.sh:1862-1865`）。
+v0.22.0 起连改道本身也没了，`CUSTOM=1` 只表示「归属由用户补全」。
 _Avoid_: 固定域名、强制走某链
 
 **整形**：
@@ -133,29 +139,25 @@ _反例_：目标集必须先探测再写 —— SSR-Plus 未启用时 `ss_spec`
 （`dnschain.sh:949-984`）。
 _Avoid_: IP 集写入、域名集
 
-**watch.servers**：
-`--servers-file` 指向的文件，内容是一批 `server=/域名/127.0.0.1#端口` 行。
-dnsmasq 收到 SIGHUP 时会**重新读取**它，因此它是改道唯一的生效通道。
-路径固定为 `/var/run/dnsmasq/watch.servers`。
-_落点_：`files/usr/share/dnschain/dnschain.sh:607`（常量）、`:1165-1231`（生成）、
-`:1239-1245`（SIGHUP）
-_反例_：不是 `/var/etc/dnschain/watch.servers` —— 那个路径 dnsmasq（uid 453）读不到，
-SIGHUP 成功但完全不生效（`dnschain.sh:589-606`）。
-_反例_：不是 `dnschain-split.conf` —— 那个走 `--conf-dir`，改了必须 restart。
-_Avoid_: 改道文件、动态上游
+**watch.servers**（已废弃，v0.22.0 删除）：
+曾是 `--servers-file` 指向的文件，让改道只 SIGHUP 不重启即可换上游。
 
-**health.state**：
-改道状态文件，一行一个域名，7 个字段用 `|` 分隔：
+**它被删除的原因不是「冗余」，而是它会覆盖正确结果**：
+它与 `dnschain-split.conf` 是两套并存的 `server=` 源，同一域名在两处都有
+规则时 dnsmasq 把它们当**候选**（不是后者覆盖前者），取哪条不确定。
+实测 `www.wikipedia.org` 经 `:53` 返回 `31.13.106.4`（Facebook 的 IP，污染值），
+而两条 dnsproxy 链本身都返回正确的 `103.102.166.224`。
 
-```
-domain|preferred|active|fail|ok|last_epoch|last_result
-```
+现在分流规则只有 `dnschain-split.conf` 一处来源。
+升级时若发现残留文件，`init.d/dnschain` 会清掉它（自检第 18 项也会报）。
+_Avoid_: 改道文件、动态上游（这两个词都指已删除的东西）
 
-位于 `/var/run/dnschain/health.state`，重启即清空重算。
-_落点_：`files/usr/share/dnschain/dnschain.sh:1446-1455`（格式说明）、`:1493-1509`（唯一写入实现）
-_反例_：不是配置 —— 不持久化到 UCI（`ADR-0006` §9.4）。
-_反例_：`last` 是「上次**改道**的时刻」，不是「上次探测的时刻」；
-等待回切期间必须保留它，否则 `min_dwell` 永不满足（`dnschain.sh:1516-1537`）。
+**health.state**（已废弃，v0.22.0 删除）：
+曾是改道状态文件（`domain|preferred|active|fail|ok|last_epoch|last_result`）。
+健康探测与改道删除后不再生成，`dc_health_upsert` 等 10 个函数一并移除。
+
+**不要去找这个文件**。判断域名走哪条链，看归属判定（`dc_domain_class`）
+或页面的「DNS 分流去向」图。
 _Avoid_: 状态库、探测结果
 
 **vendored 包**：
@@ -243,13 +245,13 @@ _反例_：**它没有自动触发点** —— init 不调用它，无 procd 触
 （`package/luci-app-dnschain/luasrc/model/cbi/dnschain/dnschain.lua:451-469`）。
 _Avoid_: 同步器、守护进程
 
-**dnschain-health**：
-健康探测与改道的唯一实现，也是页面所有操作按钮的后端。
-8 个子命令：`cycle` / `daemon` / `status` / `explain <域名>` / `check` /
-`apply` / `reset` / `flush`。
-_落点_：`files/usr/bin/dnschain-health:350-363`（子命令分派）
-_反例_：`daemon` 由 procd 托管（`files/etc/init.d/dnschain:366-381`），
-不是 cron（`dnschain-health:283-295` 解释了为什么不用 cron）。
+**dnschain-health**（已删除，v0.22.0）：
+曾是健康探测与改道的实现（448 行）。删除后它的三个 CLI 入口移到
+`dnschain-selftest` 的子命令：`flush` / `explain <域名>` / `apply`。
+
+**为什么没新建脚本而是塞进 selftest**：`dnschain-selftest` 本来就在
+rpcd ACL 的 command 白名单里，加子命令即可，不必为一个入口新建文件
+并同步 ACL、CI 执行位清单、`.gitattributes` 三处。
 _Avoid_: 探测器、守护脚本
 
 **dnschain-selftest**：
@@ -263,7 +265,7 @@ _Avoid_: 健康检查（那是 `dnschain-health` 的职责）
 **luci-app-dnschain**：
 页面包，**只做配置读写、校验、下发、展示，不实现判定逻辑**。
 7 个 Tab：概览 / 域名 / 解析 / 分流 / 代理 / DHCP / 诊断。
-菜单在**服务 → DNS 链路**（`admin/services/dns_chain`，`order=20`）。
+菜单在**服务 → DNS 分流**（`admin/services/dns_chain`，`order=20`）。
 _落点_：`package/luci-app-dnschain/luasrc/model/cbi/dnschain/general.lua:98-106`（tab）、
 `package/luci-app-dnschain/root/usr/share/luci/menu.d/luci-app-dnschain.json:2`
 _反例_：不是「页面自己算一遍」—— 它读脚本产物，自己重算必然漂移
@@ -286,6 +288,63 @@ _反例_：`ss_spec6_*` 的规则**不由本仓库生成** —— 生成者在�
 本仓库只负责置键（ADR-0002 §2.1）。
 _反例_：不是「只代理 IPv4」—— 那是 v0.9.x 及更早的事实。
 _Avoid_: 代理插件、ssr
+
+---
+
+## 页面诊断
+
+> 本节术语来自 ADR-0007（tab 结构重构）。它们描述**页面上怎么呈现诊断结果**，
+> 与运行时链路本身无关 —— 后者见「组件角色」一节。
+
+**链路拓扑图**：
+合并后的唯一链路图。把自检的 20 项按链路阶段归成若干节点，串成一条链，
+每个节点带状态徽标（PASS/FAIL/SKIP 计数）。一张图既回答「链路长什么样」，
+也回答「哪一段坏了」。
+_落点_：`package/luci-app-dnschain/luasrc/model/cbi/dnschain/diagrams.lua`
+_反例_：不是旧版「解析链路」与「实时诊断链路」两张图 —— 那两张要并排看，
+读者得在脑中做两次映射（ADR-0007 §2.3）。
+_Avoid_: 判定链路图、诊断思维导图
+
+**分诊规则图**（已删除，v0.22.0）：
+曾画「新目标怎么被判」的规则图（试直连 → 试代理 → 标记 dead）。
+分诊功能整体删除后没有对应数据，`triage_map()` 一并移除。
+
+_反例_：不要与「链路拓扑图」混淆 —— 后者仍在，反映此刻各段的实际通断。
+_Avoid_: 判定链路（旧名，与「链路拓扑图」字面太近，已弃用）
+
+**分流去向图**：
+画「**我录入的**域名各自走哪条链」的导图。**v0.22.0 起只有两档**：
+走直连 / 走代理。数据来自 `custom-domestic.txt` 与 `custom-foreign.txt`，
+是**静态事实**，不依赖任何探测。
+_落点_：`diagrams.lua` 的 `status_map()`（函数名保留，语义已改）
+_反例_：不画 gfw 名单里那 2.3 万条 —— 画不下也无意义。
+那部分去向由「概览」tab 的链路拓扑图说明。
+_反例_：v0.22.0 前是五档（走首选链 / 首选链不稳 / 已切另一链 /
+双链故障 / 未探测），那五档依赖健康探测，已随探测一起删除。
+_Avoid_: 改道状态、改道明细（两个旧 section 名，已删除）
+
+**兜底阶段**：
+链路拓扑图里为「未被任何阶段认领的自检项」自动生成的伪阶段，标题「其他检查」。
+新增自检项时若忘记归组，它会被收进这里而不是静默消失。
+_落点_：`package/luci-app-dnschain/luasrc/model/cbi/dnschain/diagnosis.lua`
+_反例_：不是错误状态 —— 它只是「还没归类」，项本身可能全是 PASS。
+_Avoid_: 其他分组、杂项
+
+**未识别的失败模式**：
+自检项 FAIL、但其证据串匹配不到任何诊断推导规则时的**诚实输出**。
+页面会明说「不认识这个失败」，并给出证据原文与复现命令。
+_落点_：`diagnosis.lua`
+_反例_：不是「未知错误」这类搪塞 —— 它必须附上原始证据串，否则等于什么都没说。
+_Avoid_: 未知错误、其他异常
+
+**自检轮次号**：
+每次 `dnschain-selftest` 运行递增的序号，与运行时刻、耗时一起出现在
+`SUMMARY` 行（`AT=` / `DUR=` / `RUN=`）。用来判断「这份结论是第几次跑的、
+跟上次比有没有变化」。
+_落点_：`files/usr/bin/dnschain-selftest`、计数文件 `/var/run/dnschain/.selftest-run-no`
+_反例_：不是页面的渲染时刻 —— 那个值在配合 10 秒 TTL 缓存时会误导用户
+（ADR-0007 §2.6）。
+_Avoid_: 版本号、序号
 
 ---
 

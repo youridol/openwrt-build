@@ -23,7 +23,7 @@ cd "$REPO" || exit 1
 rc=0
 
 LIB=files/usr/share/dnschain/dnschain.sh
-HEALTH=files/usr/bin/dnschain-health
+HEALTH=files/usr/bin/dnschain-selftest   # v0.21.0：原 dnschain-health 已删除
 INIT=files/etc/init.d/dnschain
 CONF=files/etc/config/dnschain
 GEN=package/luci-app-dnschain/luasrc/model/cbi/dnschain/general.lua
@@ -32,6 +32,13 @@ DIA=package/luci-app-dnschain/luasrc/model/cbi/dnschain/diagrams.lua
 CSS=package/luci-app-dnschain/htdocs/luci-static/resources/dnschain/dnschain.css
 JS=package/luci-app-dnschain/htdocs/luci-static/resources/dnschain/dnschain.js
 PO=package/luci-app-dnschain/po/zh-cn/luci-app-dnschain.po
+# v0.16.5 性能断言用（第 12 节）
+DATA=package/luci-app-dnschain/luasrc/model/cbi/dnschain/dnschain.lua
+GENERAL=package/luci-app-dnschain/luasrc/model/cbi/dnschain/general.lua
+TRIAGE=files/usr/bin/dnschain-triage
+# v0.18.0 tab 结构断言用（第 13 节，ADR-0007）
+DIAG=package/luci-app-dnschain/luasrc/model/cbi/dnschain/diagnosis.lua
+SELFTEST=files/usr/bin/dnschain-selftest
 UCI_DEF=files/etc/uci-defaults/99-zz-dnschain
 GAMING=files/etc/uci-defaults/99-gaming-optimize
 RECONCILE=files/usr/bin/dnschain-reconcile
@@ -124,20 +131,40 @@ else
 	fail "配置 section 名重复：$dup（uci 会整文件解析失败）"
 fi
 
-# 页面上必须有两个 DynamicList 的 domain 选项（一个走直连、一个走代理）
-n_dyn=$(body_of "$GEN" | grep -c 'option(DynamicList, "domain"')
+# 页面上必须有两个多行域名输入框（一个走直连、一个走代理）
+#
+# v0.20.0：从 DynamicList 改为 TextValue 多行文本框（用户要求「每一行一个域名」）。
+# 断言随之改为检查 make_domain_textarea 的调用次数。
+n_dyn=$(body_of "$GEN" | grep -c 'make_domain_textarea(s, "domain"')
 if [ "$n_dyn" = "2" ]; then
-	pass "页面有两个域名输入框（DynamicList domain x2）"
+	pass "页面有两个多行域名输入框（TextValue domain x2）"
 else
 	fail "页面域名输入框数量不对：$n_dyn（应为 2）"
 fi
 
-# 两个输入框都必须挂 validate —— 缺一个就能把非法条目存进 UCI
-n_val=$(body_of "$GEN" | grep -c 'o.validate = validate_domain')
-if [ "$n_val" = "2" ]; then
-	pass "两个输入框都挂了格式校验"
+# 多行框的 write 必须逐行调 validate_domain —— 缺了就能把非法条目存进 UCI
+#
+# v0.20.0：校验从「option 级 o.validate」下移到「write 里逐行校验」，
+# 因为一个大框里有多行，必须在拆分后逐行判。断言改为检查 write 内的调用。
+n_val=$(body_of "$GEN" | grep -c 'validate_domain(t)')
+if [ "$n_val" = "1" ]; then
+	pass "多行输入框在 write 里逐行做格式校验"
 else
-	fail "挂校验的输入框只有 $n_val 个（应为 2）"
+	fail "write 里的逐行校验调用数为 $n_val（应为 1 处）"
+fi
+
+# write 必须显式 save + commit —— 只调 map:set 时值会停在 staging 丢失
+if body_of "$GEN" | grep -q 'uci:commit(self.map.config)'; then
+	pass "多行输入框写入后显式 commit"
+else
+	fail "多行输入框缺 commit（值会停在 staging 丢失）"
+fi
+
+# write 必须返回真值 —— 否则 LuCI 认为无改动，一个字节都不写
+if body_of "$GEN" | grep -qE '^		return true$'; then
+	pass "多行输入框的 write 返回真值"
+else
+	fail "多行输入框的 write 未返回真值（LuCI 会跳过落盘）"
 fi
 
 # 校验函数必须真的拦非法形态（不能只写个空函数）
@@ -156,17 +183,19 @@ else
 	fail "域名条目缺 rmempty，无法清除"
 fi
 
-# 脚本侧也必须有一道校验闸（用户可直接 uci set 绕过页面）
-if body_of "$HEALTH" | grep -q 'dc_domain_valid'; then
-	pass "脚本侧有域名格式校验（兜住直接改 UCI 的情形）"
+# v0.21.0：dnschain-health 已删除，脚本侧的域名校验闸改在库文件里
+# （dc_domain_valid，由 dc_list_normalize 调用，兜住直接改 UCI 的情形）。
+if body_of "$LIB" | grep -q 'dc_domain_valid'; then
+	pass "库文件有域名格式校验（兜住直接改 UCI 的情形）"
 else
-	fail "脚本侧缺域名格式校验"
+	fail "库文件缺域名格式校验"
 fi
 
-if body_of "$HEALTH" | grep -q 'cmd_check'; then
-	pass "脚本提供 check 子命令"
+# selftest 现在承担 flush / explain / apply 三个子命令
+if body_of "$SELFTEST" | grep -q 'flush)'; then
+	pass "dnschain-selftest 提供 flush 子命令"
 else
-	fail "脚本缺 check 子命令"
+	fail "dnschain-selftest 缺 flush 子命令"
 fi
 
 echo "── 5. 需求 2/3/4：改道规则与判定 ────────────────────────"
@@ -201,11 +230,12 @@ else
 	fail "未覆盖域名的首选链不是 domestic"
 fi
 
-# 两条需求规则的判定：首选不通 + 另一条通 → 改道
-if body_of "$LIB" | grep -q 'r_other'; then
-	pass "改道前会探测另一条链（避免双链故障时误判）"
+# v0.21.0：自动改道已删除（由 dnsproxy --fallback 承担），
+# 下面几条改道判定断言随之失效。改为反向断言：不得再出现改道循环。
+if body_of "$LIB" | grep -q 'dc_health_cycle'; then
+	fail "dc_health_cycle 已删除，但仍存在"
 else
-	fail "改道判定没有探测另一条链"
+	pass "改道判定主循环已删除（改由 --fallback 承担）"
 fi
 
 # ── v0.14.0 语义矫正：自定义列表是「补全归属」，不是「改道开关」 ──
@@ -236,40 +266,32 @@ else
 	pass "解释逻辑与改道循环走同一套判定"
 fi
 
-# status 的档位里不得再有 fixed（否则自定义域名的真实状态被吞掉）
-if grep -q '"fixed"' "$HEALTH"; then
-	fail "dnschain-health status 仍有 fixed 档（会吞掉自定义域名的真实状态）"
-else
-	pass "dnschain-health status 无 fixed 档"
-fi
-if grep -q 'custom=' "$HEALTH"; then
-	pass "汇总用 custom= 标注归属来源（而非占一档状态）"
-else
-	fail "汇总缺 custom= 标注"
-fi
+# v0.21.0：dnschain-health status 已删除。档位断言在 §8 统一验（用 $DIA）。
 
 # ── 观测基准集必须「一行一个域名」──
 #
 # v0.14.0 实测踩过：种子集写成两行字面量，而输出用了
 # `printf '%s\n' "$VAR"`（整个变量当**一个**参数）→ 8 个域名被压成
-# 2 行、每行 4 个用空格连起来 → dc_watch_list 输出 2 行多域名 →
-# 静态片段用 `grep -Fvxf`（逐行精确匹配）排除时**排除不掉** →
-# 观测域名同时出现在静态片段与 servers-file →
-# dnsmasq 把两条 server= 当候选 → 改道退化成随机走一条。
-# 自检第 18 项就是查这个，实测曾 FAIL（PASS=19 FAIL=1）。
-if body_of "$LIB" | grep -q "printf '%s\\\\n' \$DNSCHAIN_WATCH_SEED"; then
-	pass "基准观测集逐词输出（保证一行一个域名）"
+# v0.22.0：观测列表恒为空，基准集已删除。
+#
+# 原因（这是删 watch.servers 的连带修复）：观测域名原本被 dc_exclude 从
+# split.conf 剔掉，只在 watch.servers 里出现。watch.servers 删除后，
+# 这个剔除动作变成**纯粹的数据丢失** —— 实测 github.com 因在观测列表里
+# 而被剔出 split.conf，结果 `nslookup github.com 127.0.0.1` 超时，
+# 而 api.github.com（不在观测列表）正常。
+#
+# 现在 dc_watch_list 返回空，剔除 0 条。断言反向化，防止基准集被加回来。
+# ⚠️ 必须先剥注释：dc_watch_list 上方的说明里写着 DNSCHAIN_WATCH_SEED
+#    这个名字（解释为什么删掉它），不剥会永久误报。
+if sed 's/#.*//' "$LIB" 2>/dev/null | grep -q 'DNSCHAIN_WATCH_SEED'; then
+	fail "观测基准集仍在（会把域名剔出 split.conf 导致解析失败）"
 else
-	fail "基准观测集输出方式会把多个域名压成一行（静态片段排除会失效）"
+	pass "观测基准集已删除（dc_watch_list 恒返回空）"
 fi
-
-# 种子集里不得出现「一行多个域名」的写法
-seed_multi=$(body_of "$LIB" | awk '/^DNSCHAIN_WATCH_SEED=/,/^"/' \
-	| grep -cE '^[a-z0-9.-]+\.[a-z]{2,} +[a-z0-9.-]+\.[a-z]{2,}')
-if [ "$seed_multi" -eq 0 ]; then
-	pass "基准集每行只有一个域名"
+if body_of "$LIB" | awk '/^dc_watch_list\(\)/,/^}/' | grep -qE 'echo "\$d"'; then
+	fail "dc_watch_list 仍在输出域名（应从 split.conf 剔除 0 条）"
 else
-	fail "基准集有 $seed_multi 行含多个域名（会被当成一个 pattern）"
+	pass "dc_watch_list 不输出任何域名"
 fi
 
 # ── nftset 重建窗口兜底（v0.14.1）──
@@ -350,30 +372,13 @@ else
 	pass "自检缓存不用 stat（BusyBox 兼容）"
 fi
 
-if body_of "$LIB" | grep -q 'both-bad'; then
-	pass "双链都不通时标记 both-bad（不改道）"
-else
-	fail "缺双链故障标记"
-fi
+# v0.21.0：both-bad 标记与三个阈值随健康改道一起删除。
+# 反向断言：库文件里不得再有改道循环。
 if body_of "$LIB" | grep -q 'dc_health_cycle'; then
-	pass "有改道判定主循环"
+	fail "改道判定主循环仍在（应已删除）"
 else
-	fail "缺改道判定主循环"
+	pass "改道判定主循环已删除"
 fi
-
-# 阈值：连败、回切、最小驻留三个都必须存在
-for kv in fail_threshold recover_threshold min_dwell; do
-	if grep -q "option $kv" "$CONF"; then
-		pass "配置含阈值 $kv"
-	else
-		fail "配置缺阈值 $kv"
-	fi
-	if body_of "$LIB" | grep -q "$kv"; then
-		pass "判定循环使用 $kv"
-	else
-		fail "判定循环未使用 $kv"
-	fi
-done
 
 # 探测必须有超时与重试（需求第 5 条）
 if body_of "$LIB" | grep -q 'dc_run_timeout'; then
@@ -397,12 +402,13 @@ fi
 
 echo "── 6. 改道只 SIGHUP，不重启 dnsmasq ─────────────────────"
 
-# 这是稳定性核心：静态片段改动要 restart（约 3 秒中断），
-# 改道是高频事件，必须走 --servers-file + SIGHUP。
+# v0.21.0：watch.servers 通道已删除 —— 它与 dnschain-split.conf 是两套
+# 并存的 server= 源，同域名两处都有规则时 dnsmasq 当候选而非覆盖，
+# 会把正确分流覆盖成错误的（实测 www.wikipedia.org 拿到污染答案）。
 if body_of "$LIB" | grep -q 'dc_gen_watch_servers'; then
-	pass "有 watch.servers 生成函数"
+	fail "dc_gen_watch_servers 已删除，但仍存在"
 else
-	fail "缺 watch.servers 生成函数"
+	pass "watch.servers 通道已删除（消除双写冲突）"
 fi
 if body_of "$LIB" | grep -q 'dc_reload_servers_file'; then
 	pass "有 servers-file 重载（SIGHUP）"
@@ -523,11 +529,18 @@ else
 	pass "servers-file 未指回非挂载目录"
 fi
 
-# 写入后必须放开读权限（mktemp 默认 0600 root:root）
-if body_of "$LIB" | grep -q 'chmod 0644 "\$DNSCHAIN_WATCH_SERVERS"'; then
-	pass "watch.servers 写入后 chmod 0644（降权进程可读）"
+# v0.21.0：watch.servers 通道已删除，chmod 断言随之失效。
+# 反向断言：不得再有生成它的代码。
+if body_of "$LIB" | grep -q 'DNSCHAIN_WATCH_SERVERS'; then
+	# 允许保留常量定义（init/stop 清理遗留文件时仍引用它），
+	# 但不得再有「写入并 chmod」的动作
+	if body_of "$LIB" | grep -q 'chmod 0644 "\$DNSCHAIN_WATCH_SERVERS"'; then
+		fail "仍在写 watch.servers（通道应已删除）"
+	else
+		pass "watch.servers 只保留常量（供清理遗留文件），不再写入"
+	fi
 else
-	fail "watch.servers 未放开读权限（dnsmasq 以 uid 453 运行，读不到）"
+	pass "watch.servers 常量与写入逻辑均已删除"
 fi
 
 # ⚠️ 探测函数必须支持「显式端口」形式
@@ -558,16 +571,19 @@ else
 	fail "dc_exclude 空列表时没有放行路径"
 fi
 
-# 自检也必须能发现这个重叠
-if body_of files/usr/bin/dnschain-selftest | grep -q '观测域名不与静态片段重复'; then
-	pass "自检含「观测域名不与静态片段重复」项"
+# v0.22.0：watch.servers 已删除，第 18 项从「观测域名不与静态片段重复」
+# 改为「旧 watch.servers 已清理」（防升级残留把链路搞坏）。
+if body_of files/usr/bin/dnschain-selftest | grep -q '旧 watch.servers 已清理'; then
+	pass "自检含「旧 watch.servers 已清理」项"
 else
-	fail "自检缺重叠检查项"
+	fail "自检缺「旧 watch.servers 已清理」项"
 fi
 
 echo "── 8. 自检覆盖新功能 ───────────────────────────────────"
 
-for item in '自定义域名列表合法' '改道通道已就绪' '改道状态自洽'; do
+# v0.22.0：「改道通道已就绪」改为「改道通道已清理」；
+# 「改道状态自洽」随改道状态文件一起删除。
+for item in '自定义域名列表合法' '改道通道已清理'; do
 	if body_of files/usr/bin/dnschain-selftest | grep -q "$item"; then
 		pass "自检含「$item」"
 	else
@@ -583,10 +599,18 @@ else
 	fail "图示没有独立模块"
 fi
 
-# 判定链路图必须画出「归属 → 首选 → 探测 → 结论」四个阶段
-for node in '自定义 · 国内' '自定义 · 国外' '数据库命中' '未覆盖' \
-            '直连链路' '代理链路' '探测首选链路' '探测另一条链路' \
-            '保持' '改道' '双链故障'; do
+# 判定链路图必须画出「最新分流链路标准」的三步
+#
+# ⚠️ v0.16.4 起这张图按用户给的「最新分流链路标准」重画：
+#     入口条件（不在任何库） → ① 试直连 → ② 试代理 → ③ 标记 dead
+#   旧图（v0.13.0）画的是「归属 → 首选链探测 → 保持/改道」，
+#   那是健康探测与自动改道，与分诊标准不是一回事。
+#   断言随之改为新图的节点 —— 这些字符串就是「图与标准一一对应」的落点，
+#   改图必须同步改这里，否则断言会静默失去意义。
+for node in '未知目标' '不在任何库' '① 试直连' '② 试代理' '③ 标记 dead' \
+            '已有归属' '不加入任何集合' \
+            'IP → china 集合' 'IP → blacklist 集合' \
+            'custom-domestic.txt' 'custom-foreign.txt'; do
 	if body_of "$DIA" | grep -q "$node"; then
 		pass "判定链路图含节点「$node」"
 	else
@@ -594,19 +618,27 @@ for node in '自定义 · 国内' '自定义 · 国外' '数据库命中' '未�
 	fi
 done
 
-# 需求规则必须写在图下（图能表达结构，规则要可核对）
-if body_of "$DIA" | grep -q '访问国外链路不通 → 自动改走直连'; then
-	pass "图下写明需求规则（国外不通改直连 / 国内不通改代理）"
+# 标准里的两条硬约束必须写在图下（图能表达结构，规则要可核对）：
+#   ① IP 一律转 IP 段入库，不写单个 /32
+#   ② dead 不进任何集合
+if body_of "$DIA" | grep -q '不写单个 /32'; then
+	pass "图下写明「IP 一律转 IP 段入库」"
 else
-	fail "图下没写需求规则"
+	fail "图下没写「IP 一律转 IP 段入库」"
 fi
 
-# 状态导图必须分五档，且问题档带「查什么」
-for st in '正常' '降级中' '已改道' '双链故障' '未探测'; do
+if body_of "$DIA" | grep -q 'dead 不进任何集合'; then
+	pass "图下写明「dead 不进任何集合」"
+else
+	fail "图下没写「dead 不进任何集合」"
+fi
+
+# 分流去向图必须分两档（v0.21.0：五档健康状态 → 两档分流去向）
+for st in '走直连' '走代理'; do
 	if body_of "$DIA" | grep -q "title = translate(\"$st\")"; then
-		pass "状态导图含档位「$st」"
+		pass "分流去向图含档位「$st」"
 	else
-		fail "状态导图缺档位「$st」"
+		fail "分流去向图缺档位「$st」"
 	fi
 done
 
@@ -694,15 +726,15 @@ if sed 's/--.*//' "$MOD" 2>/dev/null | grep -q 'pidof dnsmasq'; then
 else
 	pass "Lua 侧不用 pidof dnsmasq（避免选错 PID）"
 fi
-if grep -q 'dnschain-health flush' "$MOD" 2>/dev/null; then
-	pass "清缓存委托给 dnschain-health flush（复用 dc_dnsmasq_pid）"
+if grep -q 'dnschain-selftest flush' "$MOD" 2>/dev/null; then
+	pass "清缓存委托给 dnschain-selftest flush（复用 dc_dnsmasq_pid）"
 else
-	fail "清缓存没有走 dnschain-health flush（会各自实现、迟早漂移）"
+	fail "清缓存没有走 dnschain-selftest flush（会各自实现、迟早漂移）"
 fi
-if grep -q 'cmd_flush' "$HEALTH" 2>/dev/null; then
-	pass "dnschain-health 有 flush 子命令"
+if body_of "$SELFTEST" | grep -q 'flush)'; then
+	pass "dnschain-selftest 有 flush 子命令"
 else
-	fail "dnschain-health 缺 flush 子命令（dc_flush_cache 会成死代码）"
+	fail "dnschain-selftest 缺 flush 子命令（dc_flush_cache 会成死代码）"
 fi
 
 # ── dnsmasq 日志不能是 /dev/null（v0.14.8）──
@@ -770,17 +802,16 @@ fi
 # daemon 每 interval 秒跑一轮，页面按钮随时可触发。并发时
 # dc_health_upsert 的「读-过滤-写- mv」不原子，会丢状态行。
 if body_of "$LIB" | grep -q '\.cycle\.lock'; then
-	pass "健康探测有互斥锁（并发 cycle 不会丢状态行）"
+	fail "健康探测的互斥锁仍在（dc_health_cycle 应已删除）"
 else
-	fail "健康探测无互斥锁（daemon 与手动触发并发会丢行）"
+	pass "健康探测已删除（互斥锁一并移除）"
 fi
 
-# ── 状态写入必须只有一处实现（v0.14.2 瘦身）──
-n_upsert=$(body_of "$LIB" | grep -c "awk -F'|' -v d=\"\$d\" '\$1 != d'")
-if [ "$n_upsert" -eq 1 ]; then
-	pass "状态文件写盘只有一处实现（dc_health_upsert）"
+# ── v0.21.0：状态写盘逻辑随改道一起删除 ──
+if body_of "$LIB" | grep -q 'dc_health_upsert'; then
+	fail "dc_health_upsert 已删除，但仍存在"
 else
-	fail "状态写盘有 $n_upsert 处重复实现（改一处忘另一处会写出不同格式）"
+	pass "状态文件写盘逻辑已删除（无改道状态需要维护）"
 fi
 
 # 动态文本必须转义（域名/原因含 & < > 会让整个 SVG 解析失败）
@@ -832,6 +863,242 @@ if grep -qF 'msgid "改道状态思维导图"' "$PO"; then
 	pass "PO 含图示文案"
 else
 	fail "PO 缺图示文案（图内文字会中英混排）"
+fi
+
+echo "── 12. 性能不变量（v0.21.0 重写）────────────────────────"
+#
+# 原 §12 锁的是分诊的三项性能修复（集合快照、IP 段批量化、覆盖判定）。
+# 分诊功能整体删除后，这些断言失去对象 —— 改为锁**删除本身**，
+# 防止有人把分诊加回来（它每轮 logread + 最多 12 个并发探测）。
+for _f in "files/usr/bin/dnschain-triage" "files/usr/bin/dnschain-health"; do
+	if [ -e "$_f" ]; then
+		fail "$_f 应已删除（分诊/改道功能移除）"
+	else
+		pass "$_f 已删除"
+	fi
+done
+
+# 页面侧不得再出现分诊/改道的数据采集（它们曾是整页 55 秒的主因）
+if body_of "$DATA" | grep -q 'dnschain-triage'; then
+	fail "数据层仍在调 dnschain-triage"
+else
+	pass "数据层不再调 dnschain-triage"
+fi
+# ⚠️ 必须先剥注释：dnschain.lua 里保留了「v0.21.0 起入口从
+#    dnschain-health 挪到 selftest」这类说明性注释，不剥会永久误报
+#    （AGENTS §6 第 6 条记载的同类坑，本仓库踩过多次）。
+if sed 's/--.*//' "$DATA" 2>/dev/null | grep -q 'dnschain-health'; then
+	fail "数据层仍在调 dnschain-health"
+else
+	pass "数据层不再调 dnschain-health"
+fi
+
+# 库文件里不得再有每轮 logread（分诊的数据源）
+if body_of "$LIB" | grep -q 'logread'; then
+	fail "库文件仍在 logread（分诊的数据源应已删除）"
+else
+	pass "库文件不再 logread（每轮 cycle 少一次采集）"
+fi
+
+# 自检缓存必须保留（它是页面响应速度的关键，与分诊无关）
+if body_of "$DATA" | grep -qF '.selftest.cache'; then
+	pass "数据层保留自检跨请求缓存 .selftest.cache"
+else
+	fail "数据层缺自检缓存（切 tab 会重跑完整自检）"
+fi
+
+# 按钮必须能绕过缓存
+if body_of "$GENERAL" | grep -q 'ds.selftest(true)'; then
+	pass "「立即重新自检」绕过缓存"
+else
+	fail "「立即重新自检」未绕过缓存（点了看到旧结果）"
+fi
+
+
+echo "── 13. tab 结构不变量（v0.18.0，ADR-0007）────────────────"
+
+# ① SECTION_TAB 里每个 section 标题都要能在 general.lua 找到 m:section 声明
+#
+#    这条防的是「登记了但没建」与「建了但没登记」两种漂移：
+#    前者导致 SECTION_TAB 有死键，后者导致该 section 不被 JS 归组
+#    （会渲染在所有 tab 之外，看起来像页面错乱）。
+#
+#    ⚠️ 只比对**标题字符串**是否出现在 m:section(...) 那一行里。
+#       不解析 Lua，避免引入脆弱的正则。
+# v0.22.0：18 → 16 个 section。删除「DNS 分流状态」「分诊结果」「观测与阈值」
+# （健康改道与分诊整体移除），新增「DNS 分流去向」（原「DNS 分流状态」改名
+# 并改为静态两档）。
+_sec_missing=""
+for _t in "当前状态" "DNS 分流去向" "自检" "操作" \
+          "自定义域名 · 国内（补全归属）" "自定义域名 · 国外（补全归属）" \
+          "已录入清单" \
+          "国内上游" "国外上游" "双栈策略" "端口与实例" "缓存" \
+          "名单规模" "SSR-Plus 兼容" "拦截与框架开关" "DHCP 下发 DNS（明文）"; do
+	if ! body_of "$GENERAL" | grep -qF "translate(\"$_t\")"; then
+		_sec_missing="$_sec_missing $_t"
+	fi
+done
+if [ -z "$_sec_missing" ]; then
+	pass "SECTION_TAB 的 16 个 section 都有 m:section 声明"
+else
+	fail "SECTION_TAB 有 section 无声明:$_sec_missing"
+fi
+
+# v0.22.0：每个 section 都必须登记进 SECTION_TAB，否则 dnschain.js 的
+# activate() 会走 `if (!sec.tab) { sec.el.hidden = false }` ——
+# 该 section 在**所有 tab 里都显示**。
+# 实测：漏登记「DNS 分流去向」导致这张图在 4 个 tab 全都渲染。
+for _t in "DNS 分流去向" "已录入清单" "名单规模"; do
+	if body_of "$GENERAL" | grep -qF "[translate(\"$_t\")]"; then
+		pass "section「$_t」已登记进 SECTION_TAB（不会在所有 tab 都显示）"
+	else
+		fail "section「$_t」未登记进 SECTION_TAB（会在所有 tab 都显示）"
+	fi
+done
+
+# ①a2 v0.19.0：两个 section 已删除，不得再作为 m:section 出现
+#
+#   「判定链路」—— 规则图与分流去向图语义重叠，整节删除
+#   「域名操作」—— 唯一按钮与页底「保存并应用」重复，整节删除
+for _gone in "判定链路" "域名操作"; do
+	if body_of "$GENERAL" | grep -qE "^s = m:section\([^)]*translate\(\"$_gone\"\)"; then
+		fail "旧 section「$_gone」仍在（v0.19.0 应已删除）"
+	else
+		pass "旧 section「$_gone」已删除"
+	fi
+done
+
+# ①b v0.19.0：「改道状态」+「改道明细」已合并为「DNS 分流状态」
+#
+#     用户指出「其实改道就是 DNS 分流」—— 代码里成立：dc_health_cycle
+#     决定域名走哪条链，写进 watch.servers 的就是 server=/域名/...#port。
+#     合并后这两个旧 section 标题不得再作为 m:section 出现，
+#     否则会出现「同一件事两块」的老问题。
+for _old in "改道状态" "改道明细"; do
+	if body_of "$GENERAL" | grep -qE "^s = m:section\([^)]*translate\(\"$_old\"\)"; then
+		fail "旧 section「$_old」仍在（应与「DNS 分流状态」合并）"
+	else
+		pass "旧 section「$_old」已合并"
+	fi
+done
+
+# ①c v0.21.0：「分流明细」整节已删除（随健康改道移除），
+# 改为反向断言，防止有人把那张 8 行表加回来。
+if body_of "$GENERAL" | grep -qF '个观测域名，全部分流正常'; then
+	fail "分流明细表仍存在（应随改道功能删除）"
+else
+	pass "分流明细表已删除（首屏不再被全绿表占满）"
+fi
+
+# ② TAB_ORDER（JS）与 TAB_LABELS（Lua）的 tab id 集合必须一致
+#
+#    漏改 JS 会让 tab 顺序错乱或某个 tab 不出现；
+#    漏改 Lua 会让 tab 显示成 id 原文（如 "overview"）。
+# v0.19.0：6 个 tab 重划为 4 个（overview/resolve/split/proxy/dhcp → status/upstream/lists）
+for _id in status domains upstream lists; do
+	# ⚠️ TAB_LABELS 里各 id 的等号对齐空格数可能不同，
+	#    所以不能用固定字符串匹配，用「id 后跟可选空格再跟 =」的正则。
+	if body_of "$GENERAL" | grep -qE "^[[:space:]]*${_id}[[:space:]]*=[[:space:]]*translate"; then
+		:
+	else
+		fail "TAB_LABELS 缺 tab id「$_id」"
+	fi
+	if body_of "$JS" | grep -qF "'$_id'"; then
+		:
+	else
+		fail "TAB_ORDER 缺 tab id「$_id」（漏改 JS 会导致该 tab 不出现）"
+	fi
+done
+pass "TAB_ORDER（JS）与 TAB_LABELS（Lua）的 4 个 tab id 都存在"
+
+# ②b 旧 tab id 不得残留（否则会出现空 tab 或归组失败）
+for _old in overview resolve split proxy dhcp; do
+	if body_of "$JS" | grep -qF "'$_old'"; then
+		fail "TAB_ORDER 残留旧 tab id「$_old」（v0.19.0 应已合并）"
+	else
+		:
+	fi
+done
+pass "TAB_ORDER 无旧 tab id 残留"
+
+# ③ diagnosis.lua 必须存在兜底阶段（新增自检项不能静默消失）
+if [ -f "$DIAG" ]; then
+	pass "diagnosis.lua 存在"
+else
+	fail "缺 diagnosis.lua（归组与证据推导无处安放）"
+fi
+
+if body_of "$DIAG" | grep -qF 'FALLBACK_LABEL'; then
+	pass "diagnosis.lua 有兜底阶段常量"
+else
+	fail "diagnosis.lua 缺兜底阶段（新增检查项会从图中消失）"
+fi
+
+if body_of "$DIAG" | grep -qF '未归入链路阶段'; then
+	pass "兜底阶段会标注「未归入链路阶段（共 N 项）」"
+else
+	fail "兜底阶段没标注未归组数量（维护者不知道要去归组）"
+fi
+
+# ④ 规则未命中时必须诚实说「未识别」，不能编造原因
+if body_of "$DIAG" | grep -qF '未识别的失败模式'; then
+	pass "规则未命中时输出「未识别的失败模式」"
+else
+	fail "规则未命中时未诚实标注（会生成看起来合理但可能错误的诊断）"
+fi
+
+# ⑤ 两个重复按钮已合并：import_lists 不得再存在
+#
+#    它曾与 reconcile_now 逐字相同（都是 dnschain-reconcile）。
+#    留着这个函数名，后来者会再接一个重复入口回来。
+if body_of "$DATA" | grep -q 'function M.import_lists'; then
+	fail "M.import_lists 仍存在（与 M.reconcile_now 重复，会引出第二个入口）"
+else
+	pass "重复的 M.import_lists 已删除"
+fi
+
+if body_of "$GENERAL" | grep -qF 'translate("手动导入名单")'; then
+	fail "「手动导入名单」按钮仍存在（与「一键归一」执行同一命令）"
+else
+	pass "「手动导入名单」按钮已合并"
+fi
+
+# ⑥ 「已录入清单」必须有独立 section 且已进 SECTION_TAB
+if body_of "$GENERAL" | grep -qF 'm:section(TypedSection, "dnschain", translate("已录入清单"))'; then
+	pass "「已录入清单」是独立 section"
+else
+	fail "「已录入清单」未拆成独立 section（会挂在「国外」下面，语义错）"
+fi
+
+if body_of "$GENERAL" | grep -qF '[translate("已录入清单")]'; then
+	pass "「已录入清单」已登记进 SECTION_TAB"
+else
+	fail "「已录入清单」未登记进 SECTION_TAB（JS 归组时找不到）"
+fi
+
+# ⑦ 链路拓扑图必须取代旧的两张图（不重复渲染）
+if body_of "$GENERAL" | grep -qF '_live_diag_map'; then
+	pass "页面用链路拓扑图（_live_diag_map）"
+else
+	fail "页面缺链路拓扑图"
+fi
+
+# ⚠️ 判据必须**剥掉注释**再查：general.lua 里有一句
+#    「解析链路（_chain_graph）拓扑图 + 端口存活色」的解释性注释，
+#    不剥注释会让这条断言永久误报（AGENTS §6 第 7 条记载的坑）。
+if body_of "$GENERAL" | grep -qF 's:option(DummyValue, "_chain_graph"'; then
+	fail "旧的「解析链路」图仍在（与链路拓扑重复）"
+else
+	pass "旧的「解析链路」图已删除"
+fi
+
+# ⑧ selftest 必须输出 AT / DUR / RUN（用户要的时间戳与序列号）
+if body_of "$SELFTEST" | grep -qF 'AT=${_at}' && \
+   body_of "$SELFTEST" | grep -qF 'DUR=${_dur}s' && \
+   body_of "$SELFTEST" | grep -qF 'RUN=${_run_no}'; then
+	pass "selftest 的 SUMMARY 输出 AT / DUR / RUN"
+else
+	fail "selftest 的 SUMMARY 缺 AT / DUR / RUN（用户无法判断结论新旧）"
 fi
 
 echo ""

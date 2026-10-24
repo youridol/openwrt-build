@@ -123,16 +123,39 @@ lan_addr() {
 # 返回值经 stdout 传回（后台任务只能这么传）。
 # ------------------------------------------------------------
 
-# 第 2 项：框架分流片段里有没有「不符合预期端口」的 server= 行
+# 第 2 项：框架分流片段里的 server= 端口是否都合法
 # 输出："MISSING"（片段不存在）| 空（全部正确）| 第一条异常行
+#
+# ── ⚠️ 判据修正（v0.19.0）───────────────────────────────────────
+#
+# 原判据：split.conf 里**所有** server= 必须指向 foreign_port，
+#         任何其它端口都算「未预期」。
+#
+# 这个判据是错的。`dc_gen_dnsmasq_split`（dnschain.sh:1346）**故意**
+# 把「自定义国内域名」写成 `server=/域名/127.0.0.1#${eport}` ——
+# 自定义国内域名就该走国内链，这是分流功能本身。
+#
+# 实测后果（路由器 2026-10-24）：split.conf 里 23743 条 #5336 与
+# 26 条 #5353（www.qq.com / api.bilibili.com / amdc.alipay.com 等
+# 自定义国内域名）。自检把 26 条**正确规则**报成
+# 「出现未预期端口: 5336 5353（应为 5336）」，
+# 于是页面的链路拓扑图「分流规则」阶段永久显示红色 FAIL。
+#
+# 这比不检查更糟：用户看到常驻红点，会以为分流坏了，实际完全正常 ——
+# 一个假的警报会训练用户忽略所有警报。
+#
+# 新判据：允许 foreign_port（国外链）与 entry_port（国内链）两种，
+#         只有**其它**端口才算异常。
 _scan_item2() {
-	local split_file fport
+	local split_file fport eport
 	fport=$(dc_get main foreign_port 5336)
+	eport=$(dc_get main entry_port 5353)
 	split_file="$DNSCHAIN_DNSMASQ_CONF_DIR/dnschain-split.conf"
 
 	[ -r "$split_file" ] || { printf 'MISSING\n'; return 0; }
 
-	grep -vE "^server=/[^/]+/127\.0\.0\.1#${fport}\$" "$split_file" 2>/dev/null \
+	# 先滤掉两种合法端口，剩下的 server= 行就是异常
+	grep -vE "^server=/[^/]+/127\.0\.0\.1#(${fport}|${eport})\$" "$split_file" 2>/dev/null \
 		| grep -E '^server=' | head -1
 }
 
@@ -334,11 +357,16 @@ check_all() {
 	# 而 :5335 无监听时 dnsmasq 会自动重试其它候选（实测 10/10 成功）。
 	#
 	# 该验的是「框架生成的片段本身正确」——即 dnschain-split.conf 里
-	# 所有 server= 都指向 foreign_port，且没有残留指向 :5335 的旧规则。
+	# 所有 server= 都指向合法端口（foreign_port 或 entry_port），
+	# 且没有残留指向 :5335 的旧规则。
+	#
+	# ⚠️ v0.19.0：原注释写「都指向 foreign_port」，那是错的判据 ——
+	#    自定义国内域名按设计就走 entry_port（见 _scan_item2 的说明）。
 	#
 	# 扫描本身已由 _scan_item2 在后台完成（见 check_all 开头的并行块）。
-	local split_file bad_ports ports_found fport first_bad
+	local split_file bad_ports ports_found fport eport first_bad
 	fport=$(dc_get main foreign_port 5336)
+	eport=$(dc_get main entry_port 5353)
 	split_file="$DNSCHAIN_DNSMASQ_CONF_DIR/dnschain-split.conf"
 
 	# 取回后台扫描结果（若没跑成后台，则就地同步算一次）
@@ -352,11 +380,16 @@ check_all() {
 	if [ "$first_bad" = "MISSING" ]; then
 		emit 2 FAIL "框架分流规则正确" "缺少 ${split_file}"
 	elif [ -z "$first_bad" ]; then
-		emit 2 PASS "框架分流规则正确" "dnschain-split.conf 全部指向 :${fport}"
+		# 合法端口有两个：国外链 fport 与国内链 eport（自定义国内域名用它）
+		emit 2 PASS "框架分流规则正确" "dnschain-split.conf 端口合法（国外 :${fport} / 国内 :${eport}）"
 	else
+		# ⚠️ bad_ports 也必须滤掉两个合法端口，否则会把正确端口一起列出来
+		#    （原实现列出全部端口，实测报成「5336 5353」，其中 5336 就是
+		#    它自己要求的那个 —— 报告本身自相矛盾）。
 		bad_ports=$(grep -hoE '^server=/[^/]+/127\.0\.0\.1#[0-9]+' "$split_file" 2>/dev/null \
-			| sed 's/.*#//' | sort -u | tr '\n' ' ')
-		emit 2 FAIL "框架分流规则正确" "出现未预期端口: ${bad_ports}（应为 ${fport}），例如 ${first_bad}"
+			| sed 's/.*#//' | sort -u \
+			| grep -vE "^(${fport}|${eport})$" | tr '\n' ' ')
+		emit 2 FAIL "框架分流规则正确" "出现未预期端口: ${bad_ports:-（无端口列表）}（合法只有 :${fport} / :${eport}），例如 ${first_bad}"
 	fi
 
 	# 3. dnsmasq 唯一默认上游恰好一条
@@ -406,39 +439,46 @@ check_all() {
 		emit 4 FAIL "dnsproxy 在监听" ":${entry} 无监听"
 	fi
 
-	# 5. dnsproxy 参数与配置一致，且不含 --cache
+	# 5. dnsproxy 参数与配置一致
+	#
+	# ── v0.21.0：判据变更 ────────────────────────────────────────
+	#
+	# 旧判据：不得出现 --fallback。
+	#   理由（旧架构）：fallback 指向国内明文 DoH，gfw 域名回落时
+	#   拿到污染答案（实测 youtube.com → 31.13.92.37）。
+	#
+	# 新判据：**允许** --fallback，但它必须指向 127.0.0.1:<foreign_port>。
+	#   理由：v0.21.0 起 fallback 用来实现「直连不通自动改走代理」，
+	#   目标是国外实例 :5336（DoH 经代理出站），不会返回污染答案。
+	#
+	#   ⚠️ 但仍必须校验目标 —— 这才是那条旧约束真正要防的东西。
+	#   若有人把 fallback 改成 1.12.12.12 之类的明文上游，
+	#   gfw 域名回落时又会拿到污染答案，必须报 FAIL。
+	#
+	# 判据写成「取值必须精确等于 127.0.0.1:<fport>」，
+	# 这样既放行正确用法，又拦住任何指向外部明文上游的 fallback。
 	pid=$(dc_port_owner_from "$ns_udp" "$entry")
 	if [ -n "$pid" ] && [ -r "/proc/${pid}/cmdline" ]; then
 		dp_args=$(tr '\0' '\n' < "/proc/${pid}/cmdline")
-		# 三处 grep 合并成一次 case 匹配：--cache / --fallback /
-		# --ipv6-disabled 都是「行首」模式，用 case 的多分支保持原有
-		# 优先级（先报 --cache），且省掉 3 次 fork。
-		case "$dp_args" in
-			*'--cache'*)
-				# 精确到行首才算（argv 里 `--cache` 独占一行）
-				if printf '%s\n' "$dp_args" | grep -q '^--cache'; then
-					emit 5 FAIL "dnsproxy 参数一致" "出现 --cache，违反「缓存只在 dnsmasq 一层」"
-				elif printf '%s\n' "$dp_args" | grep -q '^--fallback'; then
-					emit 5 FAIL "dnsproxy 参数一致" "出现 --fallback，会回落明文/污染上游"
-				elif printf '%s\n' "$dp_args" | grep -q '^--ipv6-disabled'; then
-					emit 5 FAIL "dnsproxy 参数一致" "出现 --ipv6-disabled，会连国内 AAAA 一起砍"
-				else
-					emit 5 PASS "dnsproxy 参数一致" "无 --cache、无 --fallback、无 --ipv6-disabled"
-				fi
-				;;
-			*'--fallback'*|*'--ipv6-disabled'*)
-				if printf '%s\n' "$dp_args" | grep -q '^--fallback'; then
-					emit 5 FAIL "dnsproxy 参数一致" "出现 --fallback，会回落明文/污染上游"
-				elif printf '%s\n' "$dp_args" | grep -q '^--ipv6-disabled'; then
-					emit 5 FAIL "dnsproxy 参数一致" "出现 --ipv6-disabled，会连国内 AAAA 一起砍"
-				else
-					emit 5 PASS "dnsproxy 参数一致" "无 --cache、无 --fallback、无 --ipv6-disabled"
-				fi
-				;;
-			*)
-				emit 5 PASS "dnsproxy 参数一致" "无 --cache、无 --fallback、无 --ipv6-disabled"
-				;;
-		esac
+		fport=$(dc_get main foreign_port 5336)
+
+		if printf '%s\n' "$dp_args" | grep -q '^--cache'; then
+			emit 5 FAIL "dnsproxy 参数一致" "出现 --cache，违反「缓存只在 dnsmasq 一层」"
+		elif printf '%s\n' "$dp_args" | grep -q '^--ipv6-disabled'; then
+			emit 5 FAIL "dnsproxy 参数一致" "出现 --ipv6-disabled，会连国内 AAAA 一起砍"
+		elif printf '%s\n' "$dp_args" | grep -q '^--fallback'; then
+			# 有 fallback：必须是本机国外实例
+			fb=$(printf '%s\n' "$dp_args" | grep -A1 '^--fallback$' | sed -n '2p')
+			if [ "$fb" = "127.0.0.1:${fport}" ]; then
+				emit 5 PASS "dnsproxy 参数一致" \
+					"fallback 指向本机代理实例 :${fport}（直连不通自动改走代理）"
+			else
+				emit 5 FAIL "dnsproxy 参数一致" \
+					"fallback 指向 ${fb:-（空）}，应为 127.0.0.1:${fport}（外部明文上游会拿到污染答案）"
+			fi
+		else
+			emit 5 PASS "dnsproxy 参数一致" "无 --cache、无 --ipv6-disabled"
+		fi
 	else
 		emit 5 SKIP "dnsproxy 参数一致" "取不到 dnsproxy 的 pid"
 	fi
@@ -706,130 +746,46 @@ check_all() {
 		emit 17 FAIL "自定义域名列表合法" "${bad_n} 条非法，例如 ${first_bad}"
 	fi
 
-	# 18. 静态分流片段里不出现观测域名
+	# 18/19. v0.21.0：改道通道已删除
 	#
-	# 这是本设计最容易破的约束：同一个域名若同时出现在
-	# dnschain-split.conf（静态）与 watch.servers（动态）里，
-	# dnsmasq 会把两条 server= 当作**候选**（不是后者覆盖前者），
-	# 改道就退化成「随机走一条」，而且两条链都能解析时完全看不出问题。
+	# 原来这两项检查：
+	#   18. 观测域名不得同时出现在 split.conf 与 watch.servers 里
+	#       （dnsmasq 把两条 server= 当**候选**而非覆盖，改道会随机走一条）
+	#   19. servers-file 通道已就绪（UCI + 文件 + 生效配置三处一致）
 	#
-	# 性能要点（v0.14.9）：这是自检最大的热点，原实现 1350ms。
+	# 健康改道整体删除后，watch.servers 不再生成、serversfile 也已清理。
+	# 两项改为**反向检查** —— 防止从老版本升级上来时残留配置把链路搞坏：
 	#
-	#   原实现对**每个**观测域名都跑 `echo | sed | grep -qE` 三个进程，
-	#   且每次 grep 都**全文件扫描**。实测 dnschain-split.conf 有
-	#   23714 行 / 2.0MB，8 个观测域名 × 约 165ms = 1320ms。
-	#
-	#   改成「一次扫描把域名抽出来，再与观测列表求交集」：
-	#     grep -oE '^server=/[^/]+/'  ← 1 个进程、1 次全文件扫描
-	#     sed 去掉前缀与尾斜杠        ← 复用同一条管道
-	#     sort -u                     ← 去重（判定只需集合语义）
-	#     grep -Fxcf <watch 文件>     ← 精确整行匹配，直接得到交集条数
-	#   实测 1320ms → 290ms。
-	#
-	# ⚠️ 语义必须与原实现**逐字等价**（已用合成数据验证）：
-	#   原判据 `^server=/<域名转义>/` 是**精确前缀匹配** ——
-	#   `server=/github.com/` 不匹配 `server=/www.github.com/`，
-	#   也不匹配 `server=/notgithub.com/`。
-	#   `grep -Fxf`（整行精确匹配）恰好是同一个语义：
-	#   抽取时按第一个 `/` 切断，得到的就是 dnsmasq 认的那个域名键。
-	local dup_n
-	dup_n=0
-	# 扫描已由 _scan_item18 在后台完成（见 check_all 开头的并行块）。
-	if [ -n "$pid18" ]; then
-		wait "$pid18" 2>/dev/null
-		dup_n=$(sed -n '1p' "$r18" 2>/dev/null)
+	#   · 若 serversfile 仍指向 watch.servers，dnsmasq 会读一个不存在的
+	#     文件并在日志里报错（不致命但会刷日志）
+	#   · 若该文件仍存在且含旧规则，会与 split.conf 冲突（实测
+	#     www.wikipedia.org 因此拿到污染答案 31.13.106.4）
+	local _sf_uci _sf_legacy _legacy_n
+	_sf_legacy="/var/run/dnsmasq/watch.servers"
+	_sf_uci=$(uci -q get dhcp.@dnsmasq[0].serversfile 2>/dev/null)
+
+	if [ -z "$_sf_uci" ]; then
+		emit 19 PASS "改道通道已清理" "serversfile 未设置（v0.21.0 起不再需要）"
+	elif [ "$_sf_uci" = "$_sf_legacy" ]; then
+		emit 19 FAIL "改道通道已清理" \
+			"serversfile 仍指向旧的 watch.servers（应清空；重跑 init.d/dnschain start 会自动清）"
 	else
-		dup_n=$(_scan_item18)
-	fi
-	case "$dup_n" in
-		''|*[!0-9]*) dup_n=0 ;;
-	esac
-	if [ "$dup_n" -eq 0 ]; then
-		emit 18 PASS "观测域名不与静态片段重复" "watch.servers 与 dnschain-split.conf 无交集"
-	else
-		emit 18 FAIL "观测域名不与静态片段重复" "${dup_n} 个观测域名同时出现在静态片段里，改道会变成随机走一条"
+		emit 19 PASS "改道通道已清理" \
+			"serversfile=${_sf_uci}（用户自配，非本框架的旧通道）"
 	fi
 
-	# 19. 改道通道（servers-file）已就绪
-	#
-	# 只设了 UCI 不等于生效：要同时满足三件事。
-	#
-	# ⚠️ 判据不能只看进程 argv 里有没有 `--servers-file`（v0.13.0 实测修正）：
-	#   OpenWrt 的 init.d/dnsmasq 是 `append_parm "$cfg" "serversfile"
-	#   "--servers-file"`，它把这个选项写进**生成的配置文件**
-	#   （/var/etc/dnsmasq.conf.*），而不是放在命令行上。
-	#   实测 dnsmasq 的 cmdline 只有：
-	#     /usr/sbin/dnsmasq -C /var/etc/dnsmasq.conf.cfg01411c -k -x ...
-	#   而 `servers-file=` 出现在该配置文件的第 21 行。
-	#   按 argv 判定会**永远 FAIL**，而通道其实是好的。
-	#
-	# 三条判据：
-	#   a) UCI 配了路径
-	#   b) 文件存在且 dnsmasq 能读到（ujail 挂载 + 权限）
-	#   c) 生效的 dnsmasq 配置文件里真有 servers-file 指向它
-	local sf_uci sf_conf sf_ok
-	sf_uci=$(uci -q get dhcp.@dnsmasq[0].serversfile 2>/dev/null)
-	if [ -z "$sf_uci" ]; then
-		emit 19 FAIL "改道通道已就绪" "dhcp.@dnsmasq[0].serversfile 未设置，改道无法生效"
-	elif [ ! -r "$sf_uci" ]; then
-		emit 19 FAIL "改道通道已就绪" "serversfile=${sf_uci} 但文件不存在"
-	else
-		sf_ok=0
-		# c) 生效的配置文件里有没有指向它的 servers-file
-		for sf_conf in /var/etc/dnsmasq.conf.*; do
-			[ -r "$sf_conf" ] || continue
-			if grep -q "^servers-file=${sf_uci}$" "$sf_conf" 2>/dev/null; then
-				sf_ok=1
-				break
-			fi
-		done
-
-		# b2) ujail 是否允许 dnsmasq 读这个目录
-		#
-		# dnsmasq 由 ujail 降权到 uid 453 运行，只能看到 init 脚本里
-		# `procd_add_jail_mount` 声明过的路径。servers-file 指向白名单
-		# 之外的目录时**既不报错也不生效** —— 这是最隐蔽的一种失效。
-		local dpid jail_ok jail_dir
-		dpid="$dp_pid_cached"
-		jail_ok=0
-		jail_dir=$(dirname "$sf_uci")
-		if [ -n "$dpid" ]; then
-			local ppid
-			ppid=$(awk '/^PPid:/ { print $2 }' "/proc/${dpid}/status" 2>/dev/null)
-			if [ -n "$ppid" ] && [ -r "/proc/${ppid}/cmdline" ]; then
-				# ujail 的挂载参数形如 `-r <path>` / `-w <path>`，
-				# 而 init.d/dnsmasq 里写的是 `procd_add_jail_mount_rw
-				# /var/run/dnsmasq/ $leasefile` —— **带尾斜杠**。
-				# 故比较时两侧都去掉尾斜杠再比，否则永远匹配不上
-				# （实测：dirname 给出 /var/run/dnsmasq，而白名单里是
-				#  /var/run/dnsmasq/，直接 grep -qxF 会漏）。
-				#
-				# v0.14.9：原来是对每一行跑 `echo | sed` 去尾斜杠再比，
-				# 实测 50 个参数就要 120ms（每行 2 个进程）。改成**一次**
-				# sed 处理整份 cmdline，再 `grep -qxF` 整行精确比对 ——
-				# 语义相同（都是「去掉尾部斜杠后整行相等」），实测 0ms。
-				if tr '\0' '\n' < "/proc/${ppid}/cmdline" 2>/dev/null \
-					| sed 's:/*$::' \
-					| grep -qxF "$jail_dir" 2>/dev/null; then
-					jail_ok=1
-				fi
-			else
-				# 没有 ujail 包装（或读不到父进程）时视为不受限
-				jail_ok=1
-			fi
-		fi
-
-		if [ "$sf_ok" = "1" ] && [ "$jail_ok" = "1" ]; then
-			emit 19 PASS "改道通道已就绪" \
-				"servers-file=${sf_uci}（已进 dnsmasq 配置，且在 ujail 白名单内）"
-		elif [ "$sf_ok" != "1" ]; then
-			emit 19 FAIL "改道通道已就绪" \
-				"UCI 配了 ${sf_uci}，但生效的 dnsmasq 配置里没有 servers-file（需重启 dnsmasq）"
+	if [ -e "$_sf_legacy" ]; then
+		_legacy_n=$(grep -c '^server=/' "$_sf_legacy" 2>/dev/null || echo 0)
+		if [ "$_legacy_n" -gt 0 ]; then
+			emit 18 FAIL "旧 watch.servers 已清理" \
+				"${_sf_legacy} 仍存在且有 ${_legacy_n} 条规则，会与 split.conf 冲突"
 		else
-			emit 19 FAIL "改道通道已就绪" \
-				"servers-file=${sf_uci} 所在目录 ${jail_dir} 不在 ujail 白名单内（dnsmasq 读不到，改道会静默失效）"
+			emit 18 PASS "旧 watch.servers 已清理" "文件存在但无规则"
 		fi
+	else
+		emit 18 PASS "旧 watch.servers 已清理" "文件已删除"
 	fi
+
 
 	# 20. 健康状态自洽：已改道的域名必须有原因记录
 	#
@@ -871,6 +827,81 @@ check_all() {
 main() {
 	local use_cache cache_file cache_ttl now age
 
+	# ---- 子命令：flush（v0.21.0）--------------------------------
+	#
+	# 清空 dnsmasq 缓存（SIGHUP），零中断。
+	#
+	# 为什么放在这里而不是保留 dnschain-health：
+	#   v0.21.0 删除了 dnschain-health（健康改道整体移除），
+	#   但「清空缓存」按钮还需要一个 CLI 入口。
+	#   dnschain-selftest 已在 rpcd ACL 的 command 白名单里，
+	#   加一个子命令即可，不必为它新建脚本。
+	#
+	# 输出契约（Lua 侧 M.flush_cache 按此解析）：
+	#   成功：OK=<pid>
+	#   失败：ERROR=<原因>
+	#
+	# ⚠️ 必须用库里的 dc_flush_cache —— 它按 :53 socket inode 反查真正的
+	#    dnsmasq PID。`pidof dnsmasq` 的第一个是 ujail 辅助子进程，
+	#    对它 SIGHUP 是空操作（页面却报成功）。
+	case "$1" in
+		flush)
+			if ! dc_flush_cache >/dev/null 2>&1; then
+				printf 'ERROR=清空缓存失败（dnsmasq 未运行或找不到 :53 监听进程）\n'
+				return 1
+			fi
+			printf 'OK=%s\n' "$(dc_dnsmasq_pid)"
+			return 0
+			;;
+		explain)
+			# 单域名解释（页面「单域名解释」用）
+			# 输出 KEY=VALUE 行，Lua 侧 M.explain 按此解析。
+			# 逻辑在库里的 dc_explain_domain，这里只做 CLI 包装。
+			[ -n "$2" ] || { printf 'ERROR=缺少域名参数\n'; return 1; }
+			dc_explain_domain "$2"
+			return 0
+			;;
+		apply)
+			# 应用自定义域名列表（页面保存后调）
+			#
+			# 原实现走 dnschain-health apply。该脚本删除后改到这里：
+			# 重建 custom-*.txt → 重建 split.conf → 重载 dnsmasq。
+			#
+			# ⚠️ 必须 restart 而非 reload —— reload（SIGHUP）不重读 conf-dir，
+			#    实测往 conf-dir 放新规则后 reload 不生效（AGENTS §4.4）。
+			local _n_dom _n_for _n_split
+			dc_gen_custom_lists >/dev/null 2>&1 || {
+				printf 'ERROR=生成自定义列表失败\n'
+				return 1
+			}
+			_n_dom=$(wc -l < "$DNSCHAIN_CUSTOM_DOM" 2>/dev/null || echo 0)
+			_n_for=$(wc -l < "$DNSCHAIN_CUSTOM_FOR" 2>/dev/null || echo 0)
+			# dc_gen_dnsmasq_split 输出两个数（server= 条数与 nftset 条数），
+			# 取第一个即可。
+			_n_split=$(dc_gen_dnsmasq_split 2>/dev/null | awk '{print $1}') || _n_split=0
+			/etc/init.d/dnsmasq restart >/dev/null 2>&1
+			printf 'OK=国内 %s 条、国外 %s 条，分流 %s 条已生效\n' \
+				"$_n_dom" "$_n_for" "${_n_split:-0}"
+			return 0
+			;;
+	esac
+
+	# ---- 运行时刻与耗时（v0.18.0，ADR-0007 §2.6）------------------
+	#
+	# 为什么要输出真实的运行时刻而不是让页面记渲染时刻：
+	#
+	#   自检有 60 秒结果缓存（见下），页面又有 10 秒跨请求 TTL 缓存。
+	#   用户看到一份结论时，必须能判断它是「刚跑的」还是「缓存里的」——
+	#   否则排障时会把 1 分钟前的状态当成此刻状态。
+	#
+	#   页面渲染时刻没有诊断价值：它永远是「现在」，
+	#   而结论可能是 70 秒前的。
+	#
+	# 格式：SUMMARY PASS=x FAIL=y SKIP=z AT=<ISO8601> DUR=<秒> RUN=<轮次>
+	#   单项行不变（避免破坏现有解析）。
+	local _t_start _run_no
+	_t_start=$(date +%s 2>/dev/null || echo 0)
+
 	# ---- 结果缓存（v0.14.1）--------------------------------------
 	#
 	# 为什么加：自检 20 项里有 4 处真实 DNS 查询，实测 3.5 秒。
@@ -901,6 +932,12 @@ main() {
 			fp_now=$(selftest_fingerprint)
 			fp_cached=$(sed -n '1s/^#FP=//p' "$cache_file" 2>/dev/null)
 			if [ "$fp_now" = "$fp_cached" ]; then
+				# ⚠️ 这里直接吐缓存内容，其中的 SUMMARY 行**自带**那一次
+				#    真跑时的 AT / DUR / RUN。所以：
+				#      · AT 是「结论产生时刻」而非「本次调用时刻」—— 正确，
+				#        用户要判断的正是「这份结论有多旧」
+				#      · RUN 沿用那次的值，**不**递增 —— 轮次号的含义是
+				#        「第几次真跑」，读缓存不算一次运行
 				sed -n '2,$p' "$cache_file"
 				return 0
 			fi
@@ -929,7 +966,37 @@ main() {
 	[ -n "$_fail_n" ] || _fail_n=0
 	[ -n "$_pass_n" ] || _pass_n=0
 	[ -n "$_skip_n" ] || _skip_n=0
-	_DC_SUM="SUMMARY PASS=${_pass_n} FAIL=${_fail_n} SKIP=${_skip_n}"
+
+	# ── 运行时刻 / 耗时 / 轮次号（v0.18.0，ADR-0007 §2.6）──────────
+	#
+	# AT  —— 本次自检**运行**时刻（不是页面渲染时刻，理由见 main 开头）
+	# DUR —— 总耗时（秒，1 位小数）
+	# RUN —— 轮次号：每次真跑递增，读缓存时**不**递增
+	#
+	# ⚠️ 为什么 RUN 落文件而不是内存：每次 selftest 都是独立进程，
+	#    内存变量活不过一次调用。
+	#
+	# ⚠️ 为什么缓存命中时不递增：轮次号的含义是「第几次真跑」。
+	#    如果读缓存也加 1，用户会以为自检跑了很多次，而实际只有一次。
+	#    缓存命中时沿用缓存里那次的 RUN 号（见下方读缓存分支）。
+	local _t_end _dur _at _run_no_f
+	_t_end=$(date +%s 2>/dev/null || echo 0)
+	_at=$(date '+%Y-%m-%dT%H:%M:%S' 2>/dev/null || echo "")
+	if [ "$_t_start" -gt 0 ] && [ "$_t_end" -ge "$_t_start" ]; then
+		_dur=$((_t_end - _t_start))
+	else
+		_dur=0
+	fi
+
+	# 轮次号：读旧值 +1，写回
+	_run_no_f="/var/run/dnschain/.selftest-run-no"
+	mkdir -p /var/run/dnschain 2>/dev/null
+	_run_no=$(cat "$_run_no_f" 2>/dev/null || echo 0)
+	case "$_run_no" in ''|*[!0-9]*) _run_no=0 ;; esac
+	_run_no=$((_run_no + 1))
+	printf '%s\n' "$_run_no" > "$_run_no_f" 2>/dev/null
+
+	_DC_SUM="SUMMARY PASS=${_pass_n} FAIL=${_fail_n} SKIP=${_skip_n} AT=${_at} DUR=${_dur}s RUN=${_run_no}"
 
 	printf '%s\n' "$_DC_BODY"
 	echo ""

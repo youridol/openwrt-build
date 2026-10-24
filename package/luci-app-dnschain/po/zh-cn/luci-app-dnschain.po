@@ -1,8 +1,8 @@
 msgid ""
 msgstr "Content-Type: text/plain; charset=UTF-8\n"
 
-msgid "DNS 链路"
-msgstr "DNS 链路"
+msgid "DNS 分流"
+msgstr "DNS 分流"
 
 msgid ""
 "集中控制 DNS 解析链路。本页面只负责配置与校验，不实现解析逻辑——解析由 dnsproxy 与策略过滤器完成。"
@@ -95,8 +95,8 @@ msgid ""
 msgstr ""
 "开启：拦截静态 IP 客户机与 DHCP 客户机的 53，DHCP 下发路由器自身地址。关闭：停用拦截规则，客户机自行解析；DHCP 客户机按下方「DHCP 下发 DNS」配置的地址解析。<br/><b>注意</b>：切换约 3 秒内新客户机拿不到地址、现有客户机 DNS 短暂中断（需重启 dnsmasq）。"
 
-msgid "启用 DNS 链路框架"
-msgstr "启用 DNS 链路框架"
+msgid "启用 DNS 分流框架"
+msgstr "启用 DNS 分流框架"
 
 msgid "关闭后过滤器不再监听，gfw 域名会 SERVFAIL（不会回落明文上游）。"
 msgstr "关闭后过滤器不再监听，gfw 域名会 SERVFAIL（不会回落明文上游）。"
@@ -1451,8 +1451,8 @@ msgstr "静态分流：gfw 名单命中 → nftset 写 blacklist → 流量进 :
 msgid "动态分诊：不在任何库 → 试直连，通→写 china；不通→试代理，通→写 blacklist；都不通→标 dead"
 msgstr "动态分诊：不在任何库 → 试直连，通→写 china；不通→试代理，通→写 blacklist；都不通→标 dead"
 
-msgid "不在 GFW 名单、不在代理 IP 集、不在国内 IP 段、也不在任何数据库的目标，会按「先试直连 → 直连不通试代理 → 都不通标 dead」判定。跑通的落库：IP 进对应集合（nft 自动合并成 IP 段），域名进对应列表。"
-msgstr "不在 GFW 名单、不在代理 IP 集、不在国内 IP 段、也不在任何数据库的目标，会按「先试直连 → 直连不通试代理 → 都不通标 dead」判定。跑通的落库：IP 进对应集合（nft 自动合并成 IP 段），域名进对应列表。"
+msgid "不在 GFW 名单、不在代理 IP 集、不在国内 IP 段、也不在任何数据库的目标，会按「先试直连 → 直连不通试代理 → 都不通标 dead」判定。跑通的落库：IP 一律先算成 CIDR 段再进对应集合，域名进对应列表。"
+msgstr "不在 GFW 名单、不在代理 IP 集、不在国内 IP 段、也不在任何数据库的目标，会按「先试直连 → 直连不通试代理 → 都不通标 dead」判定。跑通的落库：IP 一律先算成 CIDR 段再进对应集合，域名进对应列表。"
 
 msgid "还没有分诊记录。点「概览与诊断 → 操作 → 立即分诊未知目标」，或等待守护进程自动跑一轮。"
 msgstr "还没有分诊记录。点「概览与诊断 → 操作 → 立即分诊未知目标」，或等待守护进程自动跑一轮。"
@@ -1510,3 +1510,374 @@ msgstr "全通"
 
 msgid "整体结论"
 msgstr "整体结论"
+
+# ── v0.16.4：分诊结果（表格审计字段 + 开关 + 两张新图）──────────
+
+msgid "序号"
+msgstr "序号"
+
+msgid "时间"
+msgstr "时间"
+
+msgid "IP 段"
+msgstr "IP 段"
+
+msgid "落点分布"
+msgstr "落点分布"
+
+msgid "启用自动分诊"
+msgstr "启用自动分诊"
+
+msgid "每轮最多分诊（个）"
+msgstr "每轮最多分诊（个）"
+
+msgid "并发数"
+msgstr "并发数"
+
+msgid "已入库（审计留档，默认折叠）"
+msgstr "已入库（审计留档，默认折叠）"
+
+msgid "没有待处理的目标 —— 已分诊的全部已入库。"
+msgstr "没有待处理的目标 —— 已分诊的全部已入库。"
+
+msgid "分诊记录"
+msgstr "分诊记录"
+
+msgid "① 直连通"
+msgstr "① 直连通"
+
+msgid "② 代理通"
+msgstr "② 代理通"
+
+msgid "③ 都不通"
+msgstr "③ 都不通"
+
+msgid "落库 china 集 / custom-domestic.txt"
+msgstr "落库 china 集 / custom-domestic.txt"
+
+msgid "落库 blacklist 集 / custom-foreign.txt"
+msgstr "落库 blacklist 集 / custom-foreign.txt"
+
+msgid "不入任何集合，下一轮重试"
+msgstr "不入任何集合，下一轮重试"
+
+msgid "分诊结果思维导图"
+msgstr "分诊结果思维导图"
+
+msgid "未知目标分诊链路图"
+msgstr "未知目标分诊链路图"
+
+msgid "未知目标"
+msgstr "未知目标"
+
+msgid "不在任何库"
+msgstr "不在任何库"
+
+msgid "入口条件"
+msgstr "入口条件"
+
+msgid "① 试直连"
+msgstr "① 试直连"
+
+msgid "② 试代理"
+msgstr "② 试代理"
+
+msgid "真实发请求"
+msgstr "真实发请求"
+
+msgid "先移入 blacklist"
+msgstr "先移入 blacklist"
+
+msgid "再发真实请求"
+msgstr "再发真实请求"
+
+msgid "已有归属"
+msgstr "已有归属"
+
+msgid "跳过，不干预"
+msgstr "跳过，不干预"
+
+msgid "③ 标记 dead"
+msgstr "③ 标记 dead"
+
+msgid "两条链路都不通"
+msgstr "两条链路都不通"
+
+msgid "直连通 → 落库"
+msgstr "直连通 → 落库"
+
+msgid "代理通 → 落库"
+msgstr "代理通 → 落库"
+
+msgid "IP → china 集合"
+msgstr "IP → china 集合"
+
+msgid "IP → blacklist 集合"
+msgstr "IP → blacklist 集合"
+
+msgid "域名 → custom-domestic.txt"
+msgstr "域名 → custom-domestic.txt"
+
+msgid "域名 → custom-foreign.txt"
+msgstr "域名 → custom-foreign.txt"
+
+msgid "不加入任何集合"
+msgstr "不加入任何集合"
+
+msgid "下一轮重新分诊"
+msgstr "下一轮重新分诊"
+
+msgid "IP 一律先算成 CIDR 段再入库（已知网段表优先，否则 /24），不写单个 /32"
+msgstr "IP 一律先算成 CIDR 段再入库（已知网段表优先，否则 /24），不写单个 /32"
+
+msgid "dead 不进任何集合 —— 它没有可用链路，写进去只会把错误答案固化"
+msgstr "dead 不进任何集合 —— 它没有可用链路，写进去只会把错误答案固化"
+
+msgid "共 %d 条 · 已入库 %d"
+msgstr "共 %d 条 · 已入库 %d"
+
+msgid "%d 条"
+msgstr "%d 条"
+
+msgid "%d 条 · 已入库 %d"
+msgstr "%d 条 · 已入库 %d"
+
+msgid "IP 一律先算成 CIDR 段再进对应集合，域名进对应列表。"
+msgstr "IP 一律先算成 CIDR 段再进对应集合，域名进对应列表。"
+
+msgid "集中控制 DNS 解析分流。dnsmasq / dnsproxy / SSR-Plus 三层的可控参数都在这里，按功能分 Tab。"
+msgstr "集中控制 DNS 解析分流。dnsmasq / dnsproxy / SSR-Plus 三层的可控参数都在这里，按功能分 Tab。"
+
+msgid "每轮收敛时对「客户机访问过、但不在任何库里」的目标执行「试直连 → 试代理 → 标 dead」并落库。<br/><b>会产生真实的出网请求</b>：每个目标最多 2 轮 × 3 秒。"
+msgstr "每轮收敛时对「客户机访问过、但不在任何库里」的目标执行「试直连 → 试代理 → 标 dead」并落库。<br/><b>会产生真实的出网请求</b>：每个目标最多 2 轮 × 3 秒。"
+
+msgid "防止日志里域名太多把一轮收敛拖长。按每个目标最坏 6 秒估算，12 个约 12~72 秒（并发 8 时约 10~20 秒）。"
+msgstr "防止日志里域名太多把一轮收敛拖长。按每个目标最坏 6 秒估算，12 个约 12~72 秒（并发 8 时约 10~20 秒）。"
+
+msgid "同时分诊几个目标。取 8 是 4 核 N2930 的实测平衡点：串行 12 目标 41 秒，8 并发约 8 秒；再高会让 curl 争抢 CPU，收益递减。"
+msgstr "同时分诊几个目标。取 8 是 4 核 N2930 的实测平衡点：串行 12 目标 41 秒，8 并发约 8 秒；再高会让 curl 争抢 CPU，收益递减。"
+
+msgid "重新执行全部自检项。页面默认复用 10 秒内的结果以加快加载，点此可强制真跑一次（绕过缓存）。"
+msgstr "重新执行全部自检项。页面默认复用 10 秒内的结果以加快加载，点此可强制真跑一次（绕过缓存）。"
+
+msgid "链路拓扑"
+msgstr "链路拓扑"
+
+msgid "断点诊断"
+msgstr "断点诊断"
+
+msgid "运行于"
+msgstr "运行于"
+
+msgid "耗时"
+msgstr "耗时"
+
+msgid "第 %d 轮"
+msgstr "第 %d 轮"
+
+msgid "20 项自检全部通过，没有断点需要诊断。"
+msgstr "20 项自检全部通过，没有断点需要诊断。"
+
+msgid "未识别"
+msgstr "未识别"
+
+msgid "证据缺失"
+msgstr "证据缺失"
+
+msgid "位置"
+msgstr "位置"
+
+msgid "症状与影响"
+msgstr "症状与影响"
+
+msgid "排查"
+msgstr "排查"
+
+msgid "组件状态与指标"
+msgstr "组件状态与指标"
+
+msgid "存活"
+msgstr "存活"
+
+msgid "国内 dnsproxy"
+msgstr "国内 dnsproxy"
+
+msgid "监听中"
+msgstr "监听中"
+
+msgid "未监听，客户机无法解析"
+msgstr "未监听，客户机无法解析"
+
+msgid "国外 dnsproxy"
+msgstr "国外 dnsproxy"
+
+msgid "监听中，PID "
+msgstr "监听中，PID "
+
+msgid "未监听，gfw 域名将 SERVFAIL"
+msgstr "未监听，gfw 域名将 SERVFAIL"
+
+msgid "被非 dnsproxy 进程占用："
+msgstr "被非 dnsproxy 进程占用："
+
+msgid "代理入口"
+msgstr "代理入口"
+
+msgid "未运行，国外域名将失败"
+msgstr "未运行，国外域名将失败"
+
+msgid "展开组件状态与指标"
+msgstr "展开组件状态与指标"
+
+msgid "清单与生效状态"
+msgstr "清单与生效状态"
+
+msgid "立即重放不变量集：把 SSR-Plus / dnsmasq / dnsproxy 的相关键归一到框架期望值。<br/><b>同时导入名单</b>：gfw 名单有变化时会重新生成框架的域名文件（这两件事本就是同一条命令的两个阶段，v0.18.0 起合并为一个入口）。"
+msgstr "立即重放不变量集：把 SSR-Plus / dnsmasq / dnsproxy 的相关键归一到框架期望值。<br/><b>同时导入名单</b>：gfw 名单有变化时会重新生成框架的域名文件（这两件事本就是同一条命令的两个阶段，v0.18.0 起合并为一个入口）。"
+
+msgid "分诊摘要"
+msgstr "分诊摘要"
+
+msgid "还没有分诊记录。点上方「立即分诊未知目标」，或等待守护进程自动跑一轮。"
+msgstr "还没有分诊记录。点上方「立即分诊未知目标」，或等待守护进程自动跑一轮。"
+
+msgid "逐条明细（序号 / IP 段 / 时间 / 落库动作）在「域名」tab 的「分诊结果」里。"
+msgstr "逐条明细（序号 / IP 段 / 时间 / 落库动作）在「域名」tab 的「分诊结果」里。"
+
+msgid "跑一轮健康检测并按阈值判定是否改道。<b>不会重启 dnsmasq</b>：改道只改 servers-file 并 SIGHUP。<br/>结果看上面的「改道状态」与「改道明细」。"
+msgstr "跑一轮健康检测并按阈值判定是否改道。<b>不会重启 dnsmasq</b>：改道只改 servers-file 并 SIGHUP。<br/>结果看上面的「改道状态」与「改道明细」。"
+
+msgid "链路拓扑图"
+msgstr "链路拓扑图"
+
+msgid "DNS 分流状态"
+msgstr "DNS 分流状态"
+
+msgid "分流去向"
+msgstr "分流去向"
+
+msgid "自动改道"
+msgstr "自动改道"
+
+msgid "serversfile 未设置，改道无法生效"
+msgstr "serversfile 未设置，改道无法生效"
+
+msgid "serversfile 指向的文件不存在，框架可能未启动"
+msgstr "serversfile 指向的文件不存在，框架可能未启动"
+
+msgid "生效配置里没有 servers-file，需重启 dnsmasq"
+msgstr "生效配置里没有 servers-file，需重启 dnsmasq"
+
+msgid "目录不在 ujail 白名单内，dnsmasq 读不到"
+msgstr "目录不在 ujail 白名单内，dnsmasq 读不到"
+
+msgid "通道就绪"
+msgstr "通道就绪"
+
+msgid "通道未就绪"
+msgstr "通道未就绪"
+
+msgid "不自动探测；静态分流照常工作"
+msgstr "不自动探测；静态分流照常工作"
+
+msgid "守护未运行"
+msgstr "守护未运行"
+
+msgid "开关已启用但进程没起来，自动改道不会发生。执行 <code>/etc/init.d/dnschain restart</code>"
+msgstr "开关已启用但进程没起来，自动改道不会发生。执行 <code>/etc/init.d/dnschain restart</code>"
+
+msgid "守护运行中"
+msgstr "守护运行中"
+
+msgid "仅手动触发"
+msgstr "仅手动触发"
+
+msgid "分流明细"
+msgstr "分流明细"
+
+msgid "%d 个观测域名，全部分流正常"
+msgstr "%d 个观测域名，全部分流正常"
+
+msgid "走首选链"
+msgstr "走首选链"
+
+msgid "按归属走，链路可达"
+msgstr "按归属走，链路可达"
+
+msgid "首选链不稳"
+msgstr "首选链不稳"
+
+msgid "首选链开始失败，未达切换阈值"
+msgstr "首选链开始失败，未达切换阈值"
+
+msgid "已切另一链"
+msgstr "已切另一链"
+
+msgid "已自动切到另一条链，恢复后自动回切"
+msgstr "已自动切到另一条链，恢复后自动回切"
+
+msgid "DNS 分流去向导图"
+msgstr "DNS 分流去向导图"
+
+msgid "上游"
+msgstr "上游"
+
+msgid "名单"
+msgstr "名单"
+
+msgid "把所有「已切另一链」撤回，回到「按归属走」。用于排障时确认某条链是否真的坏了 —— 清空后如果域名又自己切走，说明那条链确实不通。"
+msgstr "把所有「已切另一链」撤回，回到「按归属走」。用于排障时确认某条链是否真的坏了 —— 清空后如果域名又自己切走，说明那条链确实不通。"
+
+msgid "名单源文件变化时自动重新导入并重建分流规则。<br/>由守护进程每轮顺带检查（指纹未变则不做任何事，不会重启 dnsmasq）。<br/>关闭后需手动改配置才能让新名单生效。"
+msgstr "名单源文件变化时自动重新导入并重建分流规则。<br/>由守护进程每轮顺带检查（指纹未变则不做任何事，不会重启 dnsmasq）。<br/>关闭后需手动改配置才能让新名单生效。"
+
+msgid "期望导入间隔（秒）"
+msgstr "期望导入间隔（秒）"
+
+msgid "期望的名单检查频率。<b>实际节拍由「观测与阈值」里的「轮询间隔」决定</b> —— 名单检查搭在同一个守护循环里，不会单独起定时器。此值仅作记录。"
+msgstr "期望的名单检查频率。<b>实际节拍由「观测与阈值」里的「轮询间隔」决定</b> —— 名单检查搭在同一个守护循环里，不会单独起定时器。此值仅作记录。"
+
+msgid "重新执行全部 20 项自检。页面默认复用 10 秒内的结果以加快加载，点此可强制真跑一次（绕过缓存）。"
+msgstr "重新执行全部 20 项自检。页面默认复用 10 秒内的结果以加快加载，点此可强制真跑一次（绕过缓存）。"
+
+msgid "还没有分诊记录。守护进程会按「观测与阈值」的间隔自动跑一轮。"
+msgstr "还没有分诊记录。守护进程会按「观测与阈值」的间隔自动跑一轮。"
+
+msgid "20 项检查覆盖链路可达性、分流正确性、上游加密、双栈策略、fw4 可加载性与明文旁路。<br/>页面加载时自动跑一次（复用 10 秒内结果）；需要强制重跑点「操作」里的按钮。"
+msgstr "20 项检查覆盖链路可达性、分流正确性、上游加密、双栈策略、fw4 可加载性与明文旁路。<br/>页面加载时自动跑一次（复用 10 秒内结果）；需要强制重跑点「操作」里的按钮。"
+
+msgid "…（共 %d 条）"
+msgstr "…（共 %d 条）"
+
+msgid "已跳过 %d 个格式非法的域名（后端同样不接受，不会生效）：%s"
+msgstr "已跳过 %d 个格式非法的域名（后端同样不接受，不会生效）：%s"
+
+msgid "手工补全数据库没覆盖的域名归属。<b>这里只决定「归属」，不是改道开关</b>：归属定了之后由 dnsmasq 与 dnsproxy 分流，且<b>仍然参与健康检测</b> —— 首选链不通、另一条链通时照样自动改道。<br/>格式：<b>每行一个域名</b>（含 <code>xn--</code> 形式），空行与 <code>#</code> 开头的行会被忽略；不接受通配符、IP、URL。"
+msgstr "手工补全数据库没覆盖的域名归属。<b>这里只决定「归属」，不是改道开关</b>：归属定了之后由 dnsmasq 与 dnsproxy 分流，且<b>仍然参与健康检测</b> —— 首选链不通、另一条链通时照样自动改道。<br/>格式：<b>每行一个域名</b>（含 <code>xn--</code> 形式），空行与 <code>#</code> 开头的行会被忽略；不接受通配符、IP、URL。"
+
+msgid "同上，但归属记为国外 → 首选走国外 dnsproxy 实例（经 <code>:1234</code> 代理出口），解析结果写入 <code>blacklist</code> IP 集。<br/><b>每行一个域名</b>，空行与 <code>#</code> 开头的行会被忽略。"
+msgstr "同上，但归属记为国外 → 首选走国外 dnsproxy 实例（经 <code>:1234</code> 代理出口），解析结果写入 <code>blacklist</code> IP 集。<br/><b>每行一个域名</b>，空行与 <code>#</code> 开头的行会被忽略。"
+
+msgid "取不到解释结果 —— 检查 /usr/bin/dnschain-selftest 是否存在且可执行。"
+msgstr "取不到解释结果 —— 检查 /usr/bin/dnschain-selftest 是否存在且可执行。"
+
+msgid "DNS 分流去向"
+msgstr "DNS 分流去向"
+
+msgid "这里显示<b>你录入的域名</b>各自走哪条链。每个域名同时覆盖它的所有子域名（dnsmasq 的 <code>server=/域名/</code> 按标签后缀匹配）。<br/>未录入的域名默认走直连；直连不通时由 dnsproxy 自动改走代理，无需人工干预。"
+msgstr "这里显示<b>你录入的域名</b>各自走哪条链。每个域名同时覆盖它的所有子域名（dnsmasq 的 <code>server=/域名/</code> 按标签后缀匹配）。<br/>未录入的域名默认走直连；直连不通时由 dnsproxy 自动改走代理，无需人工干预。"
+
+msgid "走直连"
+msgstr "走直连"
+
+msgid "国内直连出口，不经代理"
+msgstr "国内直连出口，不经代理"
+
+msgid "走代理"
+msgstr "走代理"
+
+msgid "经代理出口，可访问境外站点"
+msgstr "经代理出口，可访问境外站点"
+
+msgid "共 %d 个"
+msgstr "共 %d 个"

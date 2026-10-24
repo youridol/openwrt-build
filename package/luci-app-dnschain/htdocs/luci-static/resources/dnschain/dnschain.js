@@ -43,7 +43,7 @@
 	 *   它同时承担「看」和「配」两件事（判定链路图与状态导图都是只读诊断），
 	 *   放到「代理」后面会让用户以为它只是又一张配置表。
 	 */
-	var TAB_ORDER = ['overview', 'domains', 'resolve', 'split', 'proxy', 'dhcp'];
+	var TAB_ORDER = ['status', 'domains', 'upstream', 'lists'];
 
 	var meta = null;
 
@@ -252,9 +252,13 @@
 	 * 刻意**不含** dc-chip：chip 只在表格单元格里出现，
 	 * 而 markBlockRows 只看字段区的直接子元素，加了也不会命中；
 	 * 写进来反而让人以为有额外作用。
+	 *
+	 * v0.16.4 新增 dc-details —— 分诊结果里「已入库（审计留档）」的折叠区。
+	 * 它和 dc-table-wrap 一样是整块内容，放在 160px 标签列右侧会被压窄，
+	 * 表格横向溢出。
 	 */
 	var BLOCK_CLASSES = ['dc-chain', 'dc-metrics', 'dc-stats', 'dc-table-wrap',
-		'dc-alert', 'dc-badge', 'dc-inline-form', 'dc-hint'];
+		'dc-alert', 'dc-badge', 'dc-inline-form', 'dc-hint', 'dc-details'];
 	function markBlockRows() {
 		var fields = document.querySelectorAll('.cbi-value > .cbi-value-field');
 		for (var i = 0; i < fields.length; i++) {
