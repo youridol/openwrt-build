@@ -168,7 +168,13 @@ cmd_save() {
 
 	existing=$(gh release view "$TAG" --repo "$GH_REPO" --json assets --jq '.assets[].name')
 	for name in $existing; do
-		[ -f "$DIR/$name" ] && continue
+		# 写成 if 而不是 `[ -f ] && continue`：本函数在 `set -eu` 下运行，
+		# `[ -f ]` 为假时整个 `&&` 链返回 1；出现在循环体**末尾**就会让
+		# set -e 直接杀掉脚本。此处后面还有语句、暂时安全，但同一形态在
+		# dir-mirror.sh 已真实引发过「退出码 1 且无任何错误输出」，故统一改掉。
+		if [ -f "$DIR/$name" ]; then
+			continue
+		fi
 		owned=0
 		for n in $NAMES; do
 			case "$name" in

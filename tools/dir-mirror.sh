@@ -96,13 +96,23 @@ cmd_pack() {
 	[ -n "$NAME" ] && [ -n "$SRC" ] && [ -n "$OUT" ] || usage
 	[ -d "$SRC" ] || die "源根目录不存在: $SRC"
 
-	# 收集实际存在的路径；允许通配。
+	# 收集实际存在的路径；允许通配，也允许部分路径不存在。
 	#
 	# ⚠️ 通配必须在 **$SRC 目录内** 展开：调用方给的是相对 src-root 的
 	#    模式（如 'staging_dir/toolchain-*'），若在当前工作目录展开，
 	#    匹配结果取决于调用者所在目录 —— 在仓库根跑就永远匹配不到，
 	#    表现为「指定的路径一个都不存在」。故用子 shell cd 进 $SRC。
 	#    （实测踩过：第一版在仓库根展开，glob 全部落空。）
+	#
+	# ⚠️ 循环体末尾必须有 `|| true`（或等价写法）：
+	#    本函数在 `set -eu` 下运行，而 `matches=$(...)` 的退出码
+	#    就是**命令替换里最后一条命令**的退出码。原写法
+	#       for m in $p; do [ -e "$m" ] && printf ...; done
+	#    在「最后一个 glob 没匹配到」时 `[ -e ]` 返回 1 →
+	#    整个赋值返回 1 → `set -e` 让**脚本静默退出**，
+	#    连 die 都来不及打印。CI 里表现为「打包 host 时退出码 1、
+	#    日志里没有任何错误信息」（run 40068902057 就是这样挂的）。
+	#    这里用显式 `exit 0` 收尾，保证命令替换恒返回 0。
 	PICKED=""
 	if [ "$#" -eq 0 ]; then
 		PICKED="."
@@ -110,7 +120,13 @@ cmd_pack() {
 		for p in "$@"; do
 			# shellcheck disable=SC2013
 			# 故意不加引号：让 $p 里的 * 在 cd 后的目录里按 glob 展开
-			matches=$(cd "$SRC" && for m in $p; do [ -e "$m" ] && printf '%s\n' "$m"; done)
+			matches=$(
+				cd "$SRC" || exit 1
+				for m in $p; do
+					[ -e "$m" ] && printf '%s\n' "$m"
+				done
+				exit 0
+			)
 			if [ -n "$matches" ]; then
 				PICKED="$PICKED $(printf '%s' "$matches" | tr '\n' ' ')"
 			fi

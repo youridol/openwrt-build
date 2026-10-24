@@ -194,8 +194,12 @@ jobs:
           git clone --depth 1 --branch main "$THEME_REPO" /tmp/luci-theme-shadcn
           mkdir -p package/luci-theme-shadcn
           for item in Makefile root htdocs ucode LICENSE; do
-            [ -e "/tmp/luci-theme-shadcn/$item" ] && \
+            # 写成 if 而不是 `[ -e ] && cp`：run 块在 bash -e 下执行，
+            # 若最后一项不存在，`&&` 链返回 1 会让整个步骤静默失败。
+            # （dir-mirror.sh 就栽在这个形态上，见该脚本 pack 的注释。）
+            if [ -e "/tmp/luci-theme-shadcn/$item" ]; then
               cp -r "/tmp/luci-theme-shadcn/$item" package/luci-theme-shadcn/
+            fi
           done
 
           ./scripts/feeds update -a
