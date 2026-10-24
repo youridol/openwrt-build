@@ -205,7 +205,7 @@ jobs:
 
           # 断言运行时组件也在
           #
-          # v0.21.0：dnschain-health 与 dnschain-triage 已删除
+          # v0.22.0：dnschain-health 与 dnschain-triage 已删除
           # （健康改道与分诊整体移除，改由 dnsproxy --fallback 承担
           #   「直连不通自动改走代理」），故本断言只剩库文件。
           #
