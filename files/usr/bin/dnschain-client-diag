@@ -35,6 +35,53 @@ DIAG_FIX_STATE="${DNSCHAIN_STATE_DIR}/autofix.state"
 DIAG_LAST_SCAN="${DNSCHAIN_STATE_DIR}/diag-last-scan"
 DIAG_LOCK="${DNSCHAIN_STATE_DIR}/.diag.lock"
 
+# ── 自动补全（v0.24.0，ADR-0010）──────────────────────────────
+#
+# 计数器：<域名>|<客户机>|<次数>|<首次>|<最近>
+# 由流水表（DIAG_FLOW_LOG）按游标增量累加而来。
+# 为什么单独一张表而不是直接查流水：流水只留 600 秒，
+# 而判定一个域名「值得学」需要跨多轮累计（阈值默认 3 次、
+# 可能分散在半小时里）。游标保证同一批流水不会被重复累加。
+DIAG_LEARN_COUNTER="${DNSCHAIN_STATE_DIR}/learn-counters.txt"
+DIAG_LEARN_CURSOR="${DNSCHAIN_STATE_DIR}/learn-cursors.txt"
+# 重试队列：<域名>|<失败轮数>|<最近时刻>
+# 「两条链都不通」的域名不写规则，但要记轮数 —— 否则每轮都会
+# 重新实测一遍（每轮 ×9 秒），永远学不完。
+DIAG_LEARN_RETRY="${DNSCHAIN_STATE_DIR}/learn-retry.txt"
+DIAG_LEARN_AUDIT="${DNSCHAIN_STATE_DIR}/learn-audit.log"
+# L4 翻转的独立时间窗（与 L1-L3 的 autofix.state 分开）
+DIAG_LEARN_L4="${DNSCHAIN_STATE_DIR}/learn-l4.state"
+# 学习互斥锁 + 运行状态
+#
+# 为什么必须有锁（v0.24.0 实测踩过）：
+#   学习一轮实测 68~152 秒（43~92 个候选 × 每条最多 24 秒）。
+#   LuCI 的按钮走 CGI，超时后浏览器报 502 Bad Gateway，
+#   而**进程还在跑** —— 用户以为失败又点一次，于是同一时刻
+#   实测出现 **6 个 learn 进程并发**，每个都在做 DNS 探测，
+#   把路由器与上游一起打满。
+#   故：① 加锁，第二个实例直接退出并说明原因；
+#       ② 页面按钮改成「后台启动 + 轮询状态」，不阻塞请求。
+DIAG_LEARN_LOCK="${DNSCHAIN_STATE_DIR}/.learn.lock"
+DIAG_LEARN_RUN="${DNSCHAIN_STATE_DIR}/learn-run.state"
+# 学习进度：<TOTAL=..>/<DONE=..>/<CURRENT=..>，每判定完一个域名就更新
+DIAG_LEARN_PROGRESS="${DNSCHAIN_STATE_DIR}/learn-progress.state"
+
+# 「两条链都不通」累计多少轮后放弃（不再实测）
+#
+# 为什么是 3：单轮两条链都失败可能只是网络抖动（尤其跨境），
+# 连续 3 轮都失败说明这个域名本身有问题（已下线 / 需要客户端
+# 特定 SNI），再测也是白花时间。放弃后仍留在重试队列里，
+# 用户点「清空计数器」可以重新开始。
+_LEARN_GIVEUP_MAX=3
+
+# 单轮学习的硬时间预算（秒）
+#
+# 每个域名最坏要 2 条链 × (1+retries) 次 × timeout，
+# 默认 3 秒 × 4 次 × 2 = 24 秒。75 个候选就是 30 分钟。
+# 清单里写的是「后台跑、页面显示进度」，但 daemon 是单线程 ——
+# 学习一旦跑起来就挡住了日志消费。故设预算，超了就留到下一轮。
+_LEARN_BUDGET_SEC=600
+
 # ------------------------------------------------------------
 # 日志解析
 #
@@ -483,6 +530,11 @@ _diag_mark_fix() {
 # L1: flush（SIGHUP dnsmasq，零中断）
 # L2: apply（重建 split.conf）
 # L3: 重启 dnsmasq（实测 3 秒中断）
+# L4: 改归属（实测后翻转，v0.24.0）
+#
+# ⚠️ L4 只对「已学过、且现在直连不通」的域名生效，见 _learn_flip。
+#    对不在自动国内列表里的域名调用它是空操作 —— 返回 0 会让
+#    _diag_autofix 误判「L4 成功」，故这里要求调用方先判断适用性。
 _diag_heal_level() {
 	local lv out
 	lv="$1"
@@ -505,6 +557,12 @@ _diag_heal_level() {
 			/etc/init.d/dnsmasq restart >/dev/null 2>&1
 			return 0
 			;;
+		4)
+			# L4 需要域名参数，由 _diag_heal_level 的第 2 个参数传入
+			[ -n "$2" ] || return 1
+			_learn_flip "$2"
+			return $?
+			;;
 		*) return 1 ;;
 	esac
 }
@@ -525,17 +583,40 @@ _diag_log_fix() {
 	tail -n "$max_n" "$DIAG_FIX_LOG" > "$tmp" && mv -f "$tmp" "$DIAG_FIX_LOG"
 }
 
-# 自动自愈主流程：先 L1，无效升 L2，再无效升 L3
+# 自动自愈主流程：先 L1，无效升 L2，再无效升 L3，最后 L4
+#
+# ⚠️ L4 的门槛与 L1-L3 **不同**（v0.24.0）：
+#   L1-L3 在 fail_threshold（默认 3）就触发，动作是清缓存/重放/重启，
+#   都是幂等的服务动作，代价可控。
+#   L4 改 UCI 并触发分流重建，代价高得多，故用独立的
+#   learn_autofix_threshold（默认 5），且只对「已学成国内」的域名生效。
+#
+#   把两者混用一个阈值会出两种错：要么 L4 太早翻转（3 次失败就改
+#   归属，而失败可能只是上游抖动），要么把 L1-L3 拖到 5 次才动
+#   （用户明显感觉「坏了半天系统才自愈」）。
 _diag_autofix() {
-	local dom ts lv ok
+	local dom ts lv ok cnt l4_need l4_ok
 	dom="$1"
 	ts=$(date +%s)
 
 	# 时间窗：自动路径必须检查
 	_diag_window_ok || return 0
 
-	for lv in 1 2 3; do
-		if _diag_heal_level "$lv"; then
+	for lv in 1 2 3 4; do
+		# L4 的适用性与门槛在此判断，不满足就跳过（不算失败）
+		if [ "$lv" = "4" ]; then
+			l4_need=$(dc_get client_diag learn_autofix_threshold 5)
+			case "$l4_need" in ''|*[!0-9]*) l4_need=5 ;; esac
+
+			cnt=$(_diag_fail_count "$dom")
+			[ "$cnt" -ge "$l4_need" ] 2>/dev/null || continue
+
+			# 只对自动国内列表里的域名翻转（其它域名没有可翻的归属）
+			dc_get_list dom_auto_domestic domain 2>/dev/null \
+				| grep -qxF "$dom" || continue
+		fi
+
+		if _diag_heal_level "$lv" "$dom"; then
 			ok=1
 			_diag_log_fix "$ts" "L$lv" "$dom" "ok" "自动自愈（域名 $dom 连续失败）"
 			_diag_mark_fix
@@ -544,10 +625,940 @@ _diag_autofix() {
 		fi
 	done
 
-	_diag_log_fix "$ts" "L3" "$dom" "fail" "三级自愈均失败"
+	_diag_log_fix "$ts" "L3" "$dom" "fail" "四级自愈均失败"
 	_diag_mark_fix
-	dnschain_log "客户机诊断：$dom 连续失败，L1-L3 均失败"
+	dnschain_log "客户机诊断：$dom 连续失败，L1-L4 均失败"
 	return 1
+}
+
+# ============================================================
+# 自动补全：学习层（v0.24.0，ADR-0010）
+# ------------------------------------------------------------
+# 要解决的问题（实测 2026-10-25）：客户机实际访问通的国内站点，
+# 70% 的答案 IP 判不出归属 —— 112 个实测域名里 79 个的 IP 不在
+# china 集合，APNIC 官方数据对其中 110 个也查不到。
+#
+# 判据来自**客户机实际收发**，不是地理库：
+#   客户机查过、且解析成功的域名 → 候选
+#   实测「直连通、代理不通或答案不同」→ 国内
+#   实测「直连不通、代理通」        → 国外
+#   两条都不通                      → 不写规则，记重试
+#
+# 三层文件：
+#   计数器 learn-counters.txt  跨轮累计「某域名被某客户机查了几次」
+#   游标   learn-cursors.txt   流水表已消费到的位置（避免重复累加）
+#   重试   learn-retry.txt     「都不通」的域名与已试轮数
+# ============================================================
+
+# 「已覆盖域名」集合与「父域覆盖」判据，v0.24.0 已并入 _learn_candidates 的
+# 单遍 awk（见该函数的性能说明）。
+#
+# 原来这里是两个独立函数：
+#   _learn_known()             cat 三个文件 | sort -u
+#   _learn_parent_covered()    逐级 grep -qxF
+# 它们的调用者只有 _learn_candidates，而那个调用方式是**每行 fork 数次**，
+# 实测 647 个候选 109 秒。现在这两个函数已删除 —— 逻辑仍在（在 awk 里
+# 用哈希实现，语义相同），但不再有 shell 层的逐行 fork。
+#
+# 「已覆盖」的三个来源（顺序无关，awk 里统一建哈希）：
+#   db-domains.txt        数据库（gfw 名单等）
+#   custom-domestic.txt   手写国内 + 自动国内（dc_gen_custom_lists 已合并）
+#   custom-foreign.txt    手写国外 + 自动国外
+#
+# ⚠️ 这份集合是**防震荡的核心**：学到的域名写进 dom_auto_* 之后，
+#    下一轮 dc_gen_custom_lists 会把它合并进 custom-*.txt，
+#    于是它算「已覆盖」→ 不再是候选 → 不会每轮重复实测。
+#    少了这一步，同一个域名会被反复实测并反复改写 UCI。
+
+# 按游标把流水表增量累加进计数器
+#
+# 流水格式（DIAG_FLOW_LOG）：<epoch>|<客户机>|<域名>|<上游>|<状态>|<段>|<答案>
+# 计数器格式：            <域名>|<客户机>|<次数>|<首次>|<最近>
+#
+# 只统计「解析成功」的状态（ok / nodata）：
+#   · servfail / noreply 是失败，学它会把坏域名写成规则
+#   · nxdomain 说明域名不存在，学了没意义
+#
+# 游标按**客户机**分别记（<客户机>|<epoch>）：不同客户机的流水交错
+# 写入，用单一游标会漏掉「较晚写入但 epoch 较小」的记录。
+#
+# ⚠️ 必须用 awk 单遍扫描，不能逐行 shell 循环：
+#    流水一轮上千行，逐行 fork 会拖垮 N2930（与 _diag_parse 同一教训）。
+_learn_accumulate() {
+	local tmp ctmp
+
+	[ -f "$DIAG_FLOW_LOG" ] || return 0
+	[ -f "$DIAG_LEARN_CURSOR" ] || : > "$DIAG_LEARN_CURSOR"
+	[ -f "$DIAG_LEARN_COUNTER" ] || : > "$DIAG_LEARN_COUNTER"
+
+	# ── 新计数器 ────────────────────────────────────────────
+	tmp=$(mktemp) || return 1
+	awk -F'|' -v counter="$DIAG_LEARN_COUNTER" -v cursor="$DIAG_LEARN_CURSOR" '
+		BEGIN {
+			while ((getline line < counter) > 0) {
+				split(line, f, "|")
+				if (f[1] == "" || f[2] == "") continue
+				k = f[1] "|" f[2]
+				cn[k] = f[3] + 0
+				cf[k] = f[4] + 0
+				cl[k] = f[5] + 0
+				keys[k] = 1
+			}
+			close(counter)
+			while ((getline line < cursor) > 0) {
+				split(line, f, "|")
+				if (f[1] == "") continue
+				cur[f[1]] = f[2] + 0
+			}
+			close(cursor)
+		}
+		{
+			ep = $1 + 0
+			ip = $2
+			dom = $3
+			st = $5
+			if (dom == "" || ip == "") next
+			if (st != "ok" && st != "nodata") next
+			if (ep <= cur[ip]) next
+			k = dom "|" ip
+			cn[k]++
+			if (!(k in cf) || cf[k] == 0) cf[k] = ep
+			if (ep > cl[k]) cl[k] = ep
+			keys[k] = 1
+		}
+		END {
+			for (k in keys) {
+				split(k, p, "|")
+				printf "%s|%s|%d|%d|%d\n", p[1], p[2], cn[k], cf[k], cl[k]
+			}
+		}' "$DIAG_FLOW_LOG" 2>/dev/null | sort -t'|' -k1,1 -k2,2 > "$tmp"
+
+	# 空结果也要落盘：否则「所有记录都被游标过滤」时旧文件会一直留着，
+	# 而它里面可能含有已被 learn_clear 清掉的域名。
+	mv -f "$tmp" "$DIAG_LEARN_COUNTER"
+
+	# ── 游标 ────────────────────────────────────────────────
+	#
+	# 取「旧游标」与「流水里该客户机的最大 epoch」的较大者。
+	# 只升不降 —— 流水被修剪后最大 epoch 会变小，若据此回退游标，
+	# 下一轮会把已经计过的记录再计一遍，次数虚高。
+	ctmp=$(mktemp) || return 1
+	{
+		[ -f "$DIAG_LEARN_CURSOR" ] && cat "$DIAG_LEARN_CURSOR"
+		awk -F'|' '$1 != "" && $2 != "" {
+				if ($1 + 0 > m[$2]) m[$2] = $1 + 0
+			}
+			END { for (i in m) printf "%s|%d\n", i, m[i] }' "$DIAG_FLOW_LOG" 2>/dev/null
+	} | awk -F'|' '$1 != "" && $2 != "" {
+			if ($2 + 0 > best[$1]) best[$1] = $2 + 0
+		}
+		END { for (i in best) printf "%s|%d\n", i, best[i] }' \
+		| sort > "$ctmp"
+	mv -f "$ctmp" "$DIAG_LEARN_CURSOR"
+
+	chmod 644 "$DIAG_LEARN_COUNTER" "$DIAG_LEARN_CURSOR" 2>/dev/null
+	return 0
+}
+
+# 修剪计数器：按 learn_retain_days 丢弃过旧记录
+_learn_trim_counter() {
+	local days cutoff now tmp
+	[ -f "$DIAG_LEARN_COUNTER" ] || return 0
+
+	days=$(dc_get client_diag learn_retain_days 30)
+	case "$days" in ''|*[!0-9]*) days=30 ;; esac
+	[ "$days" -lt 1 ] 2>/dev/null && days=1
+
+	now=$(date +%s)
+	cutoff=$((now - days * 86400))
+
+	tmp=$(mktemp) || return 1
+	awk -F'|' -v c="$cutoff" '($5 + 0) >= c' "$DIAG_LEARN_COUNTER" > "$tmp" 2>/dev/null \
+		&& mv -f "$tmp" "$DIAG_LEARN_COUNTER"
+	chmod 644 "$DIAG_LEARN_COUNTER" 2>/dev/null
+	return 0
+}
+
+# 筛出候选域名（写到 stdout，每行一个）
+#
+# 五道过滤，每道都对应一种实测过的坏情况：
+#   ① 次数 ≥ learn_threshold     —— 单次访问可能是误点，累计才算「常用」
+#   ② 不在已覆盖集合             —— 已学过/手写/数据库里有的不再学
+#   ③ 不以 `_` 开头              —— `_dns.resolver.arpa` 这类服务记录不是站点
+#   ④ 父域未被覆盖               —— www.example.com 学过就不学 a.www.example.com
+#   ⑤ 不在重试队列的「已放弃」   —— 连续 3 轮都不通的域名不再实测
+#
+# ⚠️ 必须单遍 awk，不能逐行 shell 循环（v0.24.0 实测，这是最大的一处性能坑）。
+#
+#   原实现是 `awk ... | sort | while read dom; do ... done`，循环体里
+#   每条域名要 fork 出 3~4 个进程（grep -qxF、_learn_parent_covered
+#   内部又循环 grep、awk 查重试队列）。实测 647 个候选耗时 **109 秒**，
+#   而这只是学习一轮的**准备阶段** —— 真正的实测还没开始。
+#
+#   改成一个 awk 进程里做完五道过滤：读三个「已覆盖」文件建哈希，
+#   读重试队列建哈希，再扫计数器。实测同样的 647 条降到约 60ms。
+#
+#   注意 awk 里做「父域逐级检查」：对每个候选反复去掉最左标签，
+#   每级查一次哈希。域名最多 10 级，即每条约 10 次哈希查找 —— 零 fork。
+_learn_candidates() {
+	local threshold
+
+	[ -f "$DIAG_LEARN_COUNTER" ] || return 0
+
+	threshold=$(dc_get client_diag learn_threshold 3)
+	case "$threshold" in ''|*[!0-9]*) threshold=3 ;; esac
+	[ "$threshold" -lt 1 ] 2>/dev/null && threshold=1
+
+	# 每台客户机分别累计：同一域名在 3 台机器上各查 1 次
+	# 与在 1 台机器上查 3 次，是两种不同强度的证据。
+	# 取**最大值**而不是总和 —— 总和会让「很多人偶尔查一次」
+	# 的公共域名轻易达标，而那些域名多半已在数据库里。
+	awk -F'|' -v t="$threshold" \
+		-v db="$DNSCHAIN_DB_DOMAINS" \
+		-v cd="$DNSCHAIN_CUSTOM_DOM" \
+		-v cf="$DNSCHAIN_CUSTOM_FOR" \
+		-v retry="$DIAG_LEARN_RETRY" \
+		-v giveup_max="$_LEARN_GIVEUP_MAX" '
+		# 读「已覆盖域名」三个来源
+		function load_known(path,    line, k) {
+			while ((getline line < path) > 0) {
+				gsub(/^[ \t]+|[ \t]+$/, "", line)
+				if (line == "" || line ~ /^#/) continue
+				known[line] = 1
+			}
+			close(path)
+		}
+
+		# 读重试队列：域名 → 已试轮数
+		function load_retry(path,    line, f) {
+			while ((getline line < path) > 0) {
+				split(line, f, "|")
+				if (f[1] == "") continue
+				giveup[f[1]] = f[2] + 0
+			}
+			close(path)
+		}
+
+		BEGIN {
+			load_known(db)
+			load_known(cd)
+			load_known(cf)
+			load_retry(retry)
+		}
+
+		{
+			dom = $1
+			n = $3 + 0
+			if (dom == "" || n < t) next
+			if (n > best[dom]) best[dom] = n
+		}
+
+		END {
+			for (dom in best) {
+				# ③ 服务记录前缀
+				if (dom ~ /^_/ || dom ~ /\._/) continue
+
+				# ② 已覆盖
+				if (dom in known) continue
+
+				# ④ 父域已覆盖：逐级去掉最左标签
+				d = dom
+				covered = 0
+				while (match(d, /\./)) {
+					d = substr(d, RSTART + 1)
+					if (d in known) { covered = 1; break }
+				}
+				if (covered) continue
+
+				# ⑤ 已放弃
+				if ((dom in giveup) && giveup[dom] >= giveup_max) continue
+
+				print dom
+			}
+		}' "$DIAG_LEARN_COUNTER" 2>/dev/null | sort
+}
+
+# 链路实测判定
+#
+# 输出：domestic | foreign | both-bad | both-ok-same | invalid
+#
+# 判定表（清单原文，ADR-0010 §2）：
+#   直连通 + (代理不通 或 两条链答案不同) → domestic
+#   直连不通 + 代理通                     → foreign
+#   两条都不通                            → both-bad
+#   两条都通且答案相同                    → both-ok-same（不需要规则）
+#   两条都 NXDOMAIN                       → invalid
+#
+# ⚠️ 「答案不同 → domestic」这条的正确性有前提，必须写清楚（ADR-0010 §8）：
+#
+#   对**合法的国内 CDN 域名**（如 www.taobao.com），两条链返回不同 IP
+#   是正常的（不同 CDN 节点），判 domestic 正确。
+#
+#   对**未入 gfw 名单但被污染**的域名，直连侧拿到的是污染答案，
+#   此时判 domestic 是错的 —— 它该走代理。但这类域名在本功能里
+#   **本来就该由 L4 纠错**：客户机会因为答案不可用而查询失败，
+#   累计到 learn_autofix_threshold 后 _learn_flip 会把它翻成国外。
+#   所以这里的误判不是永久性的，但有最长一个 learn_interval 的窗口。
+#
+#   不做「TCP 实测」来区分这两种情况：那需要每域名 2 次 nc 探测
+#   （实测每个 3 秒超时），首轮 75 个候选就是 7.5 分钟，
+#   而 DNS 级探测已足够筛掉「根本不通」的情形。
+_learn_judge() {
+	local d tmo retries r_dom r_for a_dom a_for dom_up for_up
+
+	d="$1"
+	tmo=$(dc_get client_diag learn_timeout 3)
+	retries=$(dc_get client_diag learn_retries 3)
+
+	r_dom=$(dc_probe_chain "$d" domestic "$tmo" "$retries")
+	r_for=$(dc_probe_chain "$d" foreign "$tmo" "$retries")
+
+	# NX 说明域名不存在（可能是日志里的历史记录），不学
+	if [ "$r_dom" = "NX" ] && [ "$r_for" = "NX" ]; then
+		echo "invalid"
+		return 0
+	fi
+
+	dom_up=0
+	for_up=0
+	case "$r_dom" in OK|EMPTY) dom_up=1 ;; esac
+	case "$r_for" in OK|EMPTY) for_up=1 ;; esac
+
+	if [ "$dom_up" = "1" ] && [ "$for_up" = "1" ]; then
+		a_dom=$(dc_dns_first_addr "$d" "127.0.0.1:$(dc_get main entry_port 5353)" a "$tmo")
+		a_for=$(dc_dns_first_addr "$d" "127.0.0.1:$(dc_get main foreign_port 5336)" a "$tmo")
+		if [ -n "$a_dom" ] && [ -n "$a_for" ] && [ "$a_dom" != "$a_for" ]; then
+			echo "domestic"
+		else
+			echo "both-ok-same"
+		fi
+		return 0
+	fi
+
+	if [ "$dom_up" = "1" ]; then
+		echo "domestic"
+		return 0
+	fi
+	if [ "$for_up" = "1" ]; then
+		echo "foreign"
+		return 0
+	fi
+	echo "both-bad"
+	return 0
+}
+
+# 写一条自动归属（互斥：写入前先删另一侧）
+#
+# ⚠️ del_list 另一侧是必须的（清单明确要求，也是实测教训）：
+#    v0.22.0 删掉自动改道，正是因为「同一域名在两处都有规则时
+#    dnsmasq 把两条 server= 当候选而非覆盖」。写 UCI 时若不删
+#    另一侧，会制造出完全相同的冲突。
+_learn_write() {
+	local d side
+
+	d="$1"
+	side="$2"
+
+	case "$side" in
+		domestic)
+			uci -q del_list "dnschain.dom_auto_foreign.domain=$d" 2>/dev/null
+			uci -q add_list "dnschain.dom_auto_domestic.domain=$d" 2>/dev/null || return 1
+			;;
+		foreign)
+			uci -q del_list "dnschain.dom_auto_domestic.domain=$d" 2>/dev/null
+			uci -q add_list "dnschain.dom_auto_foreign.domain=$d" 2>/dev/null || return 1
+			;;
+		*) return 1 ;;
+	esac
+
+	# 手写列表里已有的不重复写（手写优先，自动让位）
+	local hand
+	hand=$(dc_get_list "dom_${side}" domain 2>/dev/null)
+	printf '%s\n' "$hand" | grep -qxF "$d" && return 0
+
+	uci -q commit dnschain 2>/dev/null || return 1
+	return 0
+}
+
+# 记一条学习审计
+#
+# 格式：<epoch>|<域名>|<归属>|<来源>|<判定依据>
+# 来源：manual = 用户点「立即学习」；auto = daemon 定时
+_learn_log() {
+	local ts d side src why
+	ts="$1"; d="$2"; side="$3"; src="$4"; why="$5"
+	printf '%s|%s|%s|%s|%s\n' "$ts" "$d" "$side" "$src" "$why" >> "$DIAG_LEARN_AUDIT"
+
+	local max_n tmp
+	max_n=$(dc_get client_diag retain_max 500)
+	tmp=$(mktemp) || return 0
+	tail -n "$max_n" "$DIAG_LEARN_AUDIT" > "$tmp" 2>/dev/null \
+		&& mv -f "$tmp" "$DIAG_LEARN_AUDIT"
+	chmod 644 "$DIAG_LEARN_AUDIT" 2>/dev/null
+	return 0
+}
+
+# 记一条「都不通」的重试记录（轮数 +1）
+_learn_retry_bump() {
+	local d tmp now n
+	d="$1"
+	now=$(date +%s)
+
+	n=0
+	if [ -f "$DIAG_LEARN_RETRY" ]; then
+		n=$(awk -F'|' -v x="$d" '$1 == x { print $2 + 0 }' "$DIAG_LEARN_RETRY" 2>/dev/null)
+		case "$n" in ''|*[!0-9]*) n=0 ;; esac
+	fi
+	n=$((n + 1))
+
+	tmp=$(mktemp) || return 0
+	{
+		[ -f "$DIAG_LEARN_RETRY" ] && awk -F'|' -v x="$d" '$1 != x' "$DIAG_LEARN_RETRY"
+		printf '%s|%d|%d\n' "$d" "$n" "$now"
+	} > "$tmp" && mv -f "$tmp" "$DIAG_LEARN_RETRY"
+	chmod 644 "$DIAG_LEARN_RETRY" 2>/dev/null
+	return 0
+}
+
+# 从重试队列里删掉某域名（学到之后）
+_learn_retry_drop() {
+	local d tmp
+	d="$1"
+	[ -f "$DIAG_LEARN_RETRY" ] || return 0
+	tmp=$(mktemp) || return 0
+	awk -F'|' -v x="$d" '$1 != x' "$DIAG_LEARN_RETRY" > "$tmp" 2>/dev/null \
+		&& mv -f "$tmp" "$DIAG_LEARN_RETRY"
+	return 0
+}
+
+# L4：实测后翻转归属
+#
+# 规则（清单原文，与 L1-L3 的「服务动作」性质不同）：
+#   直连实测不通 + 代理实测通 → 从 dom_auto_domestic 删、写 dom_auto_foreign
+#   其他（both-bad / 直连通） → 不写，只记审计
+#
+# 为什么只做「国内 → 国外」这一个方向：
+#   反方向（国外 → 国内）是「学新域名」，由 cmd_learn 负责；
+#   L4 处理的是「已经学成国内、但实测发现其实该走代理」的纠错。
+#   两个方向都做会让 L4 与 cmd_learn 互相覆盖，来回翻转。
+#
+# ⚠️ 时间窗独立（learn_autofix_interval，默认 3600 秒）：
+#    与 L1-L3 的 autofix_interval 分开计 —— L4 会改 UCI 并触发
+#    分流重建，代价远高于清缓存，不能与 L1-L3 共用一个频率限制。
+_learn_flip() {
+	local d win last now tmo retries r_dom r_for ts
+
+	d="$1"
+	[ -n "$d" ] || return 1
+
+	win=$(dc_get client_diag learn_autofix_interval 3600)
+	case "$win" in ''|*[!0-9]*) win=3600 ;; esac
+	last=$(cat "$DIAG_LEARN_L4" 2>/dev/null)
+	case "$last" in ''|*[!0-9]*) last=0 ;; esac
+	now=$(date +%s)
+	[ $((now - last)) -ge "$win" ] || return 0
+
+	tmo=$(dc_get client_diag learn_timeout 3)
+	retries=$(dc_get client_diag learn_retries 3)
+
+	r_dom=$(dc_probe_chain "$d" domestic "$tmo" "$retries")
+	r_for=$(dc_probe_chain "$d" foreign "$tmo" "$retries")
+
+	# 只处理「直连不通 + 代理通」
+	case "$r_dom" in
+		OK|EMPTY) 
+			ts=$(date +%s)
+			_learn_log "$ts" "$d" "-" "L4" "直连仍可达（${r_dom}），不翻转"
+			return 0
+			;;
+	esac
+	case "$r_for" in
+		OK|EMPTY) ;;
+		*)
+			ts=$(date +%s)
+			_learn_log "$ts" "$d" "-" "L4" "代理也不通（${r_for}），不翻转"
+			return 0
+			;;
+	esac
+
+	# 从自动国内列表删除，写进自动国外列表
+	uci -q del_list "dnschain.dom_auto_domestic.domain=$d" 2>/dev/null
+	uci -q del_list "dnschain.dom_auto_foreign.domain=$d" 2>/dev/null
+	uci -q add_list "dnschain.dom_auto_foreign.domain=$d" 2>/dev/null || return 1
+	uci -q commit dnschain 2>/dev/null
+
+	date +%s > "$DIAG_LEARN_L4"
+
+	ts=$(date +%s)
+	_learn_log "$ts" "$d" "foreign" "L4" "直连 ${r_dom} 不通、代理 ${r_for} 通 → 翻转为国外"
+	dnschain_log "自动补全 L4：$d 直连不通、代理通，归属已翻转为国外"
+	return 0
+}
+
+# ------------------------------------------------------------
+# learn：学习一轮
+#
+# 用法：learn [--dry-run] [--source manual|auto]
+#
+# 输出 KEY=VALUE（与 dnschain-selftest 一致），供页面与 Lua 解析：
+#   CANDIDATES / LEARNED_DOMESTIC / LEARNED_FOREIGN / SKIPPED_BOTH_BAD
+#   SKIPPED_BELOW_THRESHOLD / SKIPPED_COVERED / CIDR_V4 / CIDR_V6
+#   HOOKED / DRY_RUN
+#
+# ⚠️ --dry-run 必须**完全不落盘**：不写 UCI、不写 learn-cidr.txt、
+#    不动 nft。它只跑判定并报告「如果真跑会怎样」。
+#    这是清单明确要求的「演练」语义，也是用户敢在页面上点的前提。
+# ------------------------------------------------------------
+cmd_learn() {
+	local dry src batch max_dom budget t_start
+	local n_cand n_dom n_for n_bad n_below n_covered n_invalid
+	local dom verdict cnt i
+
+	dry=0
+	src="manual"
+	while [ $# -gt 0 ]; do
+		case "$1" in
+			--dry-run) dry=1 ;;
+			--source)  shift; src="${1:-manual}" ;;
+			*) ;;
+		esac
+		shift
+	done
+
+	# 总开关（手动触发也要看它：用户关掉学习后按钮应无效）
+	#
+	# 但 --dry-run 不受限：演练不改任何东西，用户想先看看会学到什么
+	# 是合理的，不该被开关挡住。
+	if [ "$dry" != "1" ] && [ "$(dc_get client_diag learn_enabled 1)" != "1" ]; then
+		printf 'ERROR=学习功能已关闭（learn_enabled=0）\n'
+		return 1
+	fi
+
+	mkdir -p "$DNSCHAIN_STATE_DIR" 2>/dev/null
+	mkdir -p "$DNSCHAIN_RUN_DIR" 2>/dev/null
+
+	# ── 互斥（v0.24.0 实测必须）───────────────────────────────
+	#
+	# 实测：页面按钮超时（502）后用户重点，出现 6 个 learn 并发，
+	# 每个都在做 DNS 探测。锁的存在把「并发叠加」变成「第二个直接退出」。
+	#
+	# 死锁清理：锁目录超过 10 分钟视为残留（一轮学习的最坏耗时约
+	# 92 候选 × 24 秒 ≈ 37 分钟，但那已超过 _LEARN_BUDGET_SEC 预算，
+	# 正常路径不会跑那么久；10 分钟足以区分「在跑」与「残留」）。
+	if ! mkdir "$DIAG_LEARN_LOCK" 2>/dev/null; then
+		local age
+		age=$(( $(date +%s) - $(date -r "$DIAG_LEARN_LOCK" +%s 2>/dev/null || echo 0) ))
+		if [ "$age" -gt 600 ]; then
+			rmdir "$DIAG_LEARN_LOCK" 2>/dev/null
+			mkdir "$DIAG_LEARN_LOCK" 2>/dev/null || {
+				printf 'ERROR=学习锁被占用，稍后重试\n'
+				return 1
+			}
+		else
+			printf 'ERROR=已有一轮学习在跑（%s 秒前开始），请等它结束\n' "$age"
+			return 1
+		fi
+	fi
+	trap 'rmdir "$DIAG_LEARN_LOCK" 2>/dev/null' EXIT INT TERM
+
+	# 运行状态：页面据此显示「进行中 / 已完成」
+	printf 'RUNNING=1\nSTART=%s\nDRY=%s\n' "$(date +%s)" "$dry" > "$DIAG_LEARN_RUN"
+
+	# 进度文件：页面轮询它显示「正在实测 12/92」
+	#
+	# ⚠️ 必须有（v0.24.0 实测踩过）：原来只在**全部结束时**才输出一次，
+	#    于是页面在整个 8 分钟里只能显示「进行中」，日志文件 0 字节。
+	#    用户无法区分「在跑」与「卡死」，只能反复点击 —— 这又反过来
+	#    制造并发。进度要逐条落盘。
+	printf 'TOTAL=0\nDONE=0\nCURRENT=\n' > "$DIAG_LEARN_PROGRESS"
+
+	# 先把派生物刷新到最新：候选判定依赖 custom-*.txt 与 db-domains.txt
+	dc_gen_db_domains >/dev/null 2>&1
+	dc_gen_custom_lists >/dev/null 2>&1
+
+	_learn_accumulate
+	_learn_trim_counter
+
+	n_cand=0
+	n_dom=0
+	n_for=0
+	n_bad=0
+	n_below=0
+	n_covered=0
+	n_invalid=0
+
+	# 「低于阈值」与「已覆盖」的计数只能靠对比得出：
+	# _learn_candidates 已经把两类都过滤掉了，故这里单独算。
+	#
+	# ⚠️ 必须单遍 awk（v0.24.0 实测）：原来是 `for dom in $all` 循环，
+	#    每条域名 fork 两次 awk + 一次 grep，647 条就是约 1900 个进程。
+	#    这是 _learn_candidates 之外的第二处同类瓶颈。
+	local thr
+	thr=$(dc_get client_diag learn_threshold 3)
+	case "$thr" in ''|*[!0-9]*) thr=3 ;; esac
+
+	if [ -f "$DIAG_LEARN_COUNTER" ]; then
+		set -- $(awk -F'|' -v t="$thr" \
+			-v db="$DNSCHAIN_DB_DOMAINS" \
+			-v cd="$DNSCHAIN_CUSTOM_DOM" \
+			-v cf="$DNSCHAIN_CUSTOM_FOR" '
+			function load(path,    line) {
+				while ((getline line < path) > 0) {
+					gsub(/^[ \t]+|[ \t]+$/, "", line)
+					if (line == "" || line ~ /^#/) continue
+					known[line] = 1
+				}
+				close(path)
+			}
+			BEGIN { load(db); load(cd); load(cf) }
+			{
+				d = $1; n = $3 + 0
+				if (d == "") next
+				if (n > best[d]) best[d] = n
+			}
+			END {
+				below = 0; covered = 0
+				for (d in best) {
+					if (best[d] < t) { below++; continue }
+					if (d in known) { covered++; continue }
+				}
+				print below + 0, covered + 0
+			}' "$DIAG_LEARN_COUNTER" 2>/dev/null)
+		n_below="${1:-0}"
+		n_covered="${2:-0}"
+	fi
+
+	batch=$(dc_get client_diag learn_batch 0)
+	case "$batch" in ''|*[!0-9]*) batch=0 ;; esac
+
+	max_dom=$(dc_get client_diag learn_max_domains 0)
+	case "$max_dom" in ''|*[!0-9]*) max_dom=0 ;; esac
+
+	dc_clock_ms
+	t_start=$DC_CLOCK_MS
+
+	# 候选逐个判定
+	_learn_candidates > /tmp/.learn-cand.$$ 2>/dev/null
+	n_cand=$(wc -l < /tmp/.learn-cand.$$ 2>/dev/null || echo 0)
+
+	# 进度：总条数 + 当前正在实测的域名，逐条更新
+	printf 'TOTAL=%s\nDONE=0\nCURRENT=\n' "$n_cand" > "$DIAG_LEARN_PROGRESS"
+	n_done=0
+
+	while read -r dom; do
+		[ -n "$dom" ] || continue
+
+		# 单轮上限（learn_batch，0 = 不限）
+		if [ "$batch" -gt 0 ] 2>/dev/null && \
+		   [ $((n_dom + n_for + n_bad)) -ge "$batch" ]; then
+			break
+		fi
+
+		# 域名总量上限（learn_max_domains，0 = 不限）
+		#
+		# 判据是「现有自动条目 + 本轮已学」，不是计数器里的域名数 ——
+		# 后者会把学不进去的域名也算进去，导致上限提前触发。
+		if [ "$max_dom" -gt 0 ] 2>/dev/null; then
+			local cur_auto
+			cur_auto=$(dc_get_list dom_auto_domestic domain 2>/dev/null | wc -l)
+			cur_auto=$((cur_auto + $(dc_get_list dom_auto_foreign domain 2>/dev/null | wc -l)))
+			[ $((cur_auto + n_dom + n_for)) -ge "$max_dom" ] && break
+		fi
+
+		# 时间预算：超了留到下一轮（避免拖住 daemon 的日志消费）
+		dc_clock_ms
+		[ $((DC_CLOCK_MS - t_start)) -ge $((_LEARN_BUDGET_SEC * 1000)) ] && break
+
+		# 进度：把「正在测谁」写出去，页面才能显示 12/92
+		printf 'TOTAL=%s\nDONE=%s\nCURRENT=%s\n' \
+			"$n_cand" "$n_done" "$dom" > "$DIAG_LEARN_PROGRESS"
+
+		verdict=$(_learn_judge "$dom")
+		n_done=$((n_done + 1))
+
+		case "$verdict" in
+			domestic)
+				if [ "$dry" = "1" ]; then
+					n_dom=$((n_dom + 1))
+				else
+					if _learn_write "$dom" domestic; then
+						n_dom=$((n_dom + 1))
+						_learn_retry_drop "$dom"
+						_learn_log "$(date +%s)" "$dom" "domestic" "$src" \
+							"直连可达、代理不可达或答案不同"
+					fi
+				fi
+				;;
+			foreign)
+				if [ "$dry" = "1" ]; then
+					n_for=$((n_for + 1))
+				else
+					if _learn_write "$dom" foreign; then
+						n_for=$((n_for + 1))
+						_learn_retry_drop "$dom"
+						_learn_log "$(date +%s)" "$dom" "foreign" "$src" \
+							"直连不可达、代理可达"
+					fi
+				fi
+				;;
+			both-bad)
+				n_bad=$((n_bad + 1))
+				[ "$dry" = "1" ] || _learn_retry_bump "$dom"
+				;;
+			invalid)
+				n_invalid=$((n_invalid + 1))
+				[ "$dry" = "1" ] || _learn_retry_bump "$dom"
+				;;
+			*)
+				# both-ok-same：两条链都对且答案一致，不需要规则。
+				# 不计入 any skipped 计数（它不是跳过，是「不需要」）。
+				;;
+		esac
+	done < /tmp/.learn-cand.$$
+	rm -f /tmp/.learn-cand.$$
+
+	# ── IP 层：从已学国内域名派生 CIDR 并灌入集合 ──────────────
+	#
+	# 只在**真的学过**之后重建：dry-run 不碰，本轮一条没学到也不碰
+	# （否则每轮都重新解析所有已学域名，白花几分钟）。
+	#
+	# ⚠️ 三步顺序不能换（v0.24.0 实测踩过）：
+	#   ① dc_learn_hook        建集合 + 插挂钩
+	#   ② dc_learn_derive_cidr 解析域名写 learn-cidr.txt
+	#   ③ dc_learn_apply_cidr  把文件灌进集合
+	#   原来写成 ②③①，首次运行时集合还不存在，apply_cidr 在
+	#   `dc_learn_set_exists 4 || return 0` 处直接返回 ——
+	#   结果是「TABLE=1 / HOOKED=1 / V4_COUNT=0 / CIDR_V4=53」：
+	#   文件有 53 条、集合是空的、页面显示一切正常。
+	#   这个组合只在**首次**学习时出现，第二轮起集合已存在就自愈了，
+	#   故很容易被漏掉。
+	if [ "$dry" != "1" ] && [ $((n_dom + n_for)) -gt 0 ]; then
+		dc_learn_hook >/dev/null 2>&1
+		dc_learn_derive_cidr >/dev/null 2>&1
+		dc_learn_apply_cidr >/dev/null 2>&1
+	fi
+
+	# 学过之后必须重建分流片段，否则新规则要等下次收敛才生效
+	if [ "$dry" != "1" ] && [ $((n_dom + n_for)) -gt 0 ]; then
+		dc_gen_custom_lists >/dev/null 2>&1
+		dc_gen_dnsmasq_split >/dev/null 2>&1
+	fi
+
+	printf 'CANDIDATES=%s\n' "$n_cand"
+	printf 'LEARNED_DOMESTIC=%s\n' "$n_dom"
+	printf 'LEARNED_FOREIGN=%s\n' "$n_for"
+	printf 'SKIPPED_BOTH_BAD=%s\n' "$n_bad"
+	printf 'SKIPPED_BELOW_THRESHOLD=%s\n' "$n_below"
+	printf 'SKIPPED_COVERED=%s\n' "$n_covered"
+	printf 'CIDR_V4=%s\n' "$(dc_count_lines '^4 ' "$DNSCHAIN_LEARN_CIDR")"
+	printf 'CIDR_V6=%s\n' "$(dc_count_lines '^6 ' "$DNSCHAIN_LEARN_CIDR")"
+	printf 'HOOKED=%s\n' "$(dc_learn_status | sed -n 's/^HOOKED=//p')"
+	printf 'DRY_RUN=%s\n' "$dry"
+
+	# 运行状态收尾：页面轮询它判断「跑完了没有」
+	printf 'RUNNING=0\nSTART=0\nDRY=%s\nEND=%s\n' "$dry" "$(date +%s)" \
+		> "$DIAG_LEARN_RUN"
+	# 进度收尾：DONE 归位到总数，CURRENT 清空（页面据此显示 100%）
+	printf 'TOTAL=%s\nDONE=%s\nCURRENT=\n' "$n_cand" "$n_done" \
+		> "$DIAG_LEARN_PROGRESS"
+	return 0
+}
+
+# learn-start：后台启动一轮学习，立即返回
+#
+# 为什么需要它（v0.24.0 实测踩过）：
+#   一轮学习实测 68~152 秒，而 LuCI 按钮走 CGI，超时后浏览器报
+#   **502 Bad Gateway**，可进程还在跑 —— 用户以为失败又点一次，
+#   实测出现 6 个并发 learn 进程，把路由器与上游一起打满。
+#
+#   故按钮不再直接跑学习，而是调本子命令：fork 到后台后立刻返回，
+#   页面显示「进行中」，用户再点「立即刷新」看结果。
+#
+# 用法：learn-start [--dry-run]
+cmd_learn_start() {
+	local dry_flag lock_busy age
+
+	dry_flag=""
+	[ "$1" = "--dry-run" ] && dry_flag="--dry-run"
+
+	mkdir -p "$DNSCHAIN_STATE_DIR" 2>/dev/null
+
+	# 先探锁：已有实例在跑就直接告诉用户，不再 fork
+	if [ -d "$DIAG_LEARN_LOCK" ]; then
+		age=$(( $(date +%s) - $(date -r "$DIAG_LEARN_LOCK" +%s 2>/dev/null || echo 0) ))
+		if [ "$age" -le 600 ]; then
+			printf 'BUSY=1\nAGE=%s\n' "$age"
+			return 0
+		fi
+		rmdir "$DIAG_LEARN_LOCK" 2>/dev/null
+	fi
+
+	# 后台执行，输出落到 learn-run.log 供页面读
+	#
+	# ⚠️ 必须 setsid + 三重重定向（v0.24.0 实测踩过）：
+	#   1. LuCI 的 sys.exec 走 `sh -c`，它退出时会给**同进程组**发信号；
+	#      普通 `( ... ) &` 起的子进程仍在同一进程组 → 被连带杀掉，
+	#      日志文件 0 字节，而锁目录还在 → 页面永远显示「进行中」。
+	#   2. stdin/stdout/stderr 都必须重定向，否则子进程继承 CGI 的
+	#      管道，管道关闭后子进程写 stdout 会 SIGPIPE 退出。
+	#   setsid 让子进程进入独立会话，脱离 CGI 的进程组与终端。
+	#
+	# BusyBox 的 setsid 不一定可用，故带回落：没有 setsid 时用
+	# nohup + 完整重定向，仍然脱离终端（只是不换进程组）。
+	#
+	# ⚠️ 不能在 `setsid ... &` 之后用 `$!` 取 PID（v0.24.0 实测踩过）：
+	#    BusyBox ash 在这种「外部命令 + 重定向 + &」的组合下 $! 为空，
+	#    于是 printf 只输出 `STARTED=1\nPID=`，而 Lua 侧判 STARTED
+	#    为 "1" 之前先被空 PID 干扰 —— 实测页面显示「✗ 启动失败：」，
+	#    但学习确实已经在跑（状态行正确显示「进行中」）。
+	#    故不再输出 PID：这个值页面上没人用，输出一个可能为空的值
+	#    只会制造「看起来失败」的假象。
+	if command -v setsid >/dev/null 2>&1; then
+		setsid /usr/bin/dnschain-client-diag learn --source manual $dry_flag \
+			> "${DNSCHAIN_STATE_DIR}/learn-run.log" 2>&1 \
+			< /dev/null &
+	else
+		nohup /usr/bin/dnschain-client-diag learn --source manual $dry_flag \
+			> "${DNSCHAIN_STATE_DIR}/learn-run.log" 2>&1 \
+			< /dev/null &
+	fi
+
+	# 等 1 秒再确认：进程若立刻退出（例如总开关关闭），
+	# 用户应当当场看到原因，而不是等一轮周期后发现什么都没发生。
+	sleep 1
+	if [ -d "$DIAG_LEARN_LOCK" ]; then
+		printf 'STARTED=1\n'
+		return 0
+	fi
+
+	# 锁没建起来 = 进程已退出。把日志里的 ERROR 带出来。
+	if [ -s "${DNSCHAIN_STATE_DIR}/learn-run.log" ]; then
+		printf 'STARTED=0\n'
+		printf 'REASON=%s\n' "$(grep -m1 'ERROR=' "${DNSCHAIN_STATE_DIR}/learn-run.log" 2>/dev/null)"
+		return 0
+	fi
+
+	printf 'STARTED=0\nREASON=进程启动后立即退出（无输出）\n'
+	return 0
+}
+
+# learn-run-state：学习是否在进行中（页面轮询用）
+cmd_learn_run_state() {
+	local running start dry end last
+
+	running=0
+	if [ -d "$DIAG_LEARN_LOCK" ]; then
+		running=1
+	fi
+
+	start=0; dry=0; end=0
+	if [ -f "$DIAG_LEARN_RUN" ]; then
+		start=$(sed -n 's/^START=//p' "$DIAG_LEARN_RUN" 2>/dev/null | head -1)
+		dry=$(sed -n 's/^DRY=//p' "$DIAG_LEARN_RUN" 2>/dev/null | head -1)
+		end=$(sed -n 's/^END=//p' "$DIAG_LEARN_RUN" 2>/dev/null | head -1)
+	fi
+	case "$start" in ''|*[!0-9]*) start=0 ;; esac
+	case "$dry" in ''|*[!0-9]*) dry=0 ;; esac
+	case "$end" in ''|*[!0-9]*) end=0 ;; esac
+
+	printf 'RUNNING=%s\n' "$running"
+	printf 'START=%s\n' "$start"
+	printf 'DRY=%s\n' "$dry"
+	printf 'END=%s\n' "$end"
+
+	# 上一轮结果：优先读日志里的 KEY=VALUE；日志缺失时回落进度文件。
+	#
+	# 两条路径必须都能给出「学到几条」：
+	#   · 页面按钮 → learn-start → 日志有完整输出
+	#   · 命令行直接跑 learn → 日志不存在，但进度文件有 TOTAL/DONE
+	# 原来只读日志，命令行跑完后页面显示「候选 0，学到直连 0」，
+	# 与实际刚学的 60 条矛盾 —— 用户会以为功能没生效。
+	local last n_cand n_done
+	last=""
+	if [ -f "${DNSCHAIN_STATE_DIR}/learn-run.log" ]; then
+		last=$(tail -n 20 "${DNSCHAIN_STATE_DIR}/learn-run.log" 2>/dev/null \
+			| grep -E '^(CANDIDATES|LEARNED_DOMESTIC|LEARNED_FOREIGN|SKIPPED_BOTH_BAD|ERROR)=' \
+			| tr '\n' ' ')
+	fi
+
+	n_cand=0
+	n_done=0
+	if [ -f "$DIAG_LEARN_PROGRESS" ]; then
+		n_cand=$(sed -n 's/^TOTAL=//p' "$DIAG_LEARN_PROGRESS" 2>/dev/null | head -1)
+		n_done=$(sed -n 's/^DONE=//p' "$DIAG_LEARN_PROGRESS" 2>/dev/null | head -1)
+	fi
+	case "$n_cand" in ''|*[!0-9]*) n_cand=0 ;; esac
+	case "$n_done" in ''|*[!0-9]*) n_done=0 ;; esac
+
+	# 日志缺失但有进度 → 用「候选 N / 已判定 M」表达，不假装是 0
+	if [ -z "$last" ] && [ "$n_cand" -gt 0 ]; then
+		last="CANDIDATES=${n_cand} DONE=${n_done}"
+	fi
+	printf 'LAST=%s\n' "$last"
+
+	# 进度：TOTAL / DONE / CURRENT
+	if [ -f "$DIAG_LEARN_PROGRESS" ]; then
+		printf '%s\n' "$(sed -n 's/^TOTAL=/PROGRESS_TOTAL=/p' "$DIAG_LEARN_PROGRESS" 2>/dev/null | head -1)"
+		printf '%s\n' "$(sed -n 's/^DONE=/PROGRESS_DONE=/p' "$DIAG_LEARN_PROGRESS" 2>/dev/null | head -1)"
+		printf '%s\n' "$(sed -n 's/^CURRENT=/PROGRESS_CURRENT=/p' "$DIAG_LEARN_PROGRESS" 2>/dev/null | head -1)"
+	else
+		printf 'PROGRESS_TOTAL=0\nPROGRESS_DONE=0\nPROGRESS_CURRENT=\n'
+	fi
+	return 0
+}
+
+# learn-status：学习层状态（KEY=VALUE，直接透传 dc_learn_status）
+cmd_learn_status() {
+	dc_learn_status
+	printf 'ENABLED=%s\n' "$(dc_get client_diag learn_enabled 1)"
+	printf 'INTERVAL=%s\n' "$(dc_get client_diag learn_interval 1800)"
+	printf 'THRESHOLD=%s\n' "$(dc_get client_diag learn_threshold 5)"
+	printf 'BATCH=%s\n' "$(dc_get client_diag learn_batch 60)"
+	printf 'RETAIN_DAYS=%s\n' "$(dc_get client_diag learn_retain_days 30)"
+	printf 'TIMEOUT=%s\n' "$(dc_get client_diag learn_timeout 3)"
+	printf 'RETRIES=%s\n' "$(dc_get client_diag learn_retries 3)"
+	printf 'MAX_DOMAINS=%s\n' "$(dc_get client_diag learn_max_domains 0)"
+	printf 'MAX_CIDR=%s\n' "$(dc_get client_diag learn_max_cidr 0)"
+	printf 'AUTOFIX_THRESHOLD=%s\n' "$(dc_get client_diag learn_autofix_threshold 5)"
+	printf 'AUTOFIX_INTERVAL=%s\n' "$(dc_get client_diag learn_autofix_interval 3600)"
+	printf 'AUTO_DOMESTIC=%s\n' "$(dc_get_list dom_auto_domestic domain 2>/dev/null | wc -l)"
+	printf 'AUTO_FOREIGN=%s\n' "$(dc_get_list dom_auto_foreign domain 2>/dev/null | wc -l)"
+	# ⚠️ 不能写 `wc -l < "$file" 2>/dev/null`：输入重定向由 **shell** 处理，
+	#    文件不存在时错误发生在命令执行之前，`2>/dev/null` 挂不到它上面 ——
+	#    实测报 "can't open /var/run/dnschain/learn-retry.txt: no such file"
+	#    并污染 KEY=VALUE 输出。必须先判文件存在。
+	local rp=0
+	[ -f "$DIAG_LEARN_RETRY" ] && rp=$(wc -l < "$DIAG_LEARN_RETRY" 2>/dev/null)
+	case "$rp" in ''|*[!0-9]*) rp=0 ;; esac
+	printf 'RETRY_PENDING=%s\n' "$rp"
+	return 0
+}
+
+# learn-clear：清空学习层
+#
+#   learn-clear counter  只清计数器 + 游标（保留已学规则，重新开始计数）
+#   learn-clear rules    清 dom_auto_* + learn-cidr.txt + 集合 + 计数器 + 游标
+#   learn-clear all      同 rules（页面用这个）
+cmd_learn_clear() {
+	local what
+	what="${1:-all}"
+
+	case "$what" in
+		counter|rules|all) ;;
+		*) echo "ERROR=参数必须是 counter / rules / all"; return 1 ;;
+	esac
+
+	# 计数器与游标：两种模式都清
+	rm -f "$DIAG_LEARN_COUNTER" "$DIAG_LEARN_CURSOR" "$DIAG_LEARN_RETRY" 2>/dev/null
+
+	if [ "$what" = "counter" ]; then
+		echo "OK=计数器与游标已清空（已学规则保留）"
+		return 0
+	fi
+
+	dc_learn_clear rules || { echo "ERROR=清空已学规则失败"; return 1; }
+	echo "OK=已清空全部学习结果（规则 + IP 段 + 计数器）"
+	return 0
 }
 
 # ------------------------------------------------------------
@@ -1128,17 +2139,22 @@ cmd_undo() {
 # 手动路径**不受时间窗限制** —— 用户明知可以断网才会点。
 # ------------------------------------------------------------
 cmd_heal() {
-	local lv ts
+	local lv ts dom
 	lv="$1"
-	case "$lv" in 1|2|3) ;; *) echo "ERROR=级别必须是 1/2/3"; return 1 ;; esac
+	dom="$2"
+	case "$lv" in
+		1|2|3) ;;
+		4) [ -n "$dom" ] || { echo "ERROR=L4 需要域名参数"; return 1; } ;;
+		*) echo "ERROR=级别必须是 1/2/3/4"; return 1 ;;
+	esac
 
 	ts=$(date +%s)
-	if _diag_heal_level "$lv"; then
-		_diag_log_fix "$ts" "L$lv" "-" "ok" "手动触发"
+	if _diag_heal_level "$lv" "$dom"; then
+		_diag_log_fix "$ts" "L$lv" "${dom:--}" "ok" "手动触发"
 		echo "OK=已执行 L$lv 自愈"
 		return 0
 	else
-		_diag_log_fix "$ts" "L$lv" "-" "fail" "手动触发失败"
+		_diag_log_fix "$ts" "L$lv" "${dom:--}" "fail" "手动触发失败"
 		echo "ERROR=L$lv 自愈失败"
 		return 1
 	fi
@@ -1240,6 +2256,31 @@ cmd_daemon() {
 			_diag_trim
 			_diag_trim_flow
 			echo "$ts" > "$DIAG_LAST_SCAN"
+
+			# ③ 学习定时器（v0.24.0）
+			#
+			# 为什么挂在「每 20 条」而不是另起一个循环：
+			#   本守护是单线程 + 管道消费模型，另起 `while sleep` 循环
+			#   会与管道消费争抢，而 `sleep` 期间日志会积压。
+			#   挂在已有的节流点上，既不需要额外进程，也不会因为
+			#   空闲（没有查询）而永远不触发 —— 有空闲就意味着
+			#   没有新日志，那时也不该学习。
+			#
+			# 判据：距上次学习超过 learn_interval 秒。
+			# 用文件记上次时刻而不是内存变量：daemon 重启后
+			# 不该立刻又学一轮（那会在每次重连时重复实测）。
+			if [ "$(dc_get client_diag learn_enabled 1)" = "1" ]; then
+				local linterval llast
+				linterval=$(dc_get client_diag learn_interval 1800)
+				case "$linterval" in ''|*[!0-9]*) linterval=1800 ;; esac
+				llast=$(cat "$DNSCHAIN_STATE_DIR/learn-last-run" 2>/dev/null)
+				case "$llast" in ''|*[!0-9]*) llast=0 ;; esac
+				if [ "$linterval" -gt 0 ] 2>/dev/null && \
+				   [ $((ts - llast)) -ge "$linterval" ]; then
+					echo "$ts" > "$DNSCHAIN_STATE_DIR/learn-last-run"
+					cmd_learn --source auto >/dev/null 2>&1
+				fi
+			fi
 		fi
 	done
 
@@ -1249,20 +2290,25 @@ cmd_daemon() {
 
 main() {
 	case "$1" in
-		scan)        shift; cmd_scan "$@" ;;
-		daemon)      shift; cmd_daemon "$@" ;;
-		list)        shift; cmd_list "$@" ;;
-		detail)      shift; cmd_detail "$@" ;;
-		flow)        shift; cmd_flow "$@" ;;
-		hosts)       shift; cmd_hosts "$@" ;;
-		probe)       shift; cmd_probe "$@" ;;
-		cdncheck)    shift; cmd_cdncheck "$@" ;;
-		trace)       shift; cmd_trace "$@" ;;
-		search)      shift; cmd_search "$@" ;;
-		autofix-log) shift; cmd_autofix_log "$@" ;;
-		undo)        shift; cmd_undo "$@" ;;
-		heal)        shift; cmd_heal "$@" ;;
-		status)      shift; cmd_status "$@" ;;
+		scan)         shift; cmd_scan "$@" ;;
+		daemon)       shift; cmd_daemon "$@" ;;
+		list)         shift; cmd_list "$@" ;;
+		detail)       shift; cmd_detail "$@" ;;
+		flow)         shift; cmd_flow "$@" ;;
+		hosts)        shift; cmd_hosts "$@" ;;
+		probe)        shift; cmd_probe "$@" ;;
+		cdncheck)     shift; cmd_cdncheck "$@" ;;
+		trace)        shift; cmd_trace "$@" ;;
+		search)       shift; cmd_search "$@" ;;
+		autofix-log)  shift; cmd_autofix_log "$@" ;;
+		undo)         shift; cmd_undo "$@" ;;
+		heal)         shift; cmd_heal "$@" ;;
+		status)       shift; cmd_status "$@" ;;
+		learn)        shift; cmd_learn "$@" ;;
+		learn-start)  shift; cmd_learn_start "$@" ;;
+		learn-state)  shift; cmd_learn_run_state "$@" ;;
+		learn-status) shift; cmd_learn_status "$@" ;;
+		learn-clear)  shift; cmd_learn_clear "$@" ;;
 		*)
 			cat <<'USAGE'
 用法：dnschain-client-diag <子命令>
@@ -1279,8 +2325,13 @@ main() {
   search <关键词> [IP] [N]  按域名搜索
   autofix-log      自愈审计记录（TSV）
   undo <id>        撤销一条自动归属调整
-  heal <1|2|3>     手动触发自愈（不受时间窗限制）
+  heal <1|2|3|4> [域名]  手动触发自愈（不受时间窗限制；L4 需域名）
   status           运行状态
+  learn [--dry-run] [--source manual|auto]  学习一轮（自动补全，阻塞）
+  learn-start [--dry-run]  后台启动一轮学习，立即返回（页面按钮用这个）
+  learn-state      学习是否进行中 + 上一轮结果（KEY=VALUE）
+  learn-status     学习层状态（KEY=VALUE）
+  learn-clear counter|rules|all  清空计数器 / 已学规则 / 全部
 USAGE
 			return 1
 			;;

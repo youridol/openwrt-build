@@ -185,6 +185,11 @@ local SECTION_TAB = {
 	-- 「参数」（ADR-0007 判据），且是排障入口，应靠前。
 	-- ⚠️ 必须登记：漏了会让它在所有 tab 都显示（见上方 v0.22.0 的教训）。
 	[translate("客户机链路诊断")] = "status",
+	-- v0.24.0：自动补全是「配置 + 结果」混合体，但主体是配置
+	-- （开关、周期、阈值、上限 9 项输入框），按 ADR-0007 的判据
+	-- 应归「域名」tab —— 它管的就是「哪个域名走哪条链」。
+	-- ⚠️ 必须登记：漏了会让它在所有 tab 都显示。
+	[translate("自动补全")]      = "domains",
 	[translate("操作")]          = "status",
 	-- 自检是「状态检查」，与断点诊断同类，放状态 tab（用户确认 Q5）
 	[translate("自检")]          = "status",
@@ -271,7 +276,7 @@ local function emit_tab_meta(map)
 		--   （tools/check-dnschain-lua.py）的桩缺失而整个文件加载失败
 		--   （实测 PASS 从 132 掉到 78，报 "general.lua 能加载 FAIL"）。
 		--   包版本是常量、无依赖，且语义正好 —— 「包升级了，资源该重拉」。
-		local ver = "?v=1.9.0"
+		local ver = "?v=1.10.0"
 
 		return string.format(
 			'<link rel="stylesheet" href="%s/dnschain/dnschain.css%s">' ..
@@ -1250,7 +1255,7 @@ end
 -- ⚠️ 客户机识别用 IP + 主机名，**不用 MAC**：
 --    实测三台移动设备的 MAC 都是本地管理位（随机 MAC，第 2 位为 2/6/a/e），
 --    用它认设备会失效。稳定的标识是 IP（租期内固定）与主机名（设备自报）。
-s = m:section(TypedSection, "dnschain", translate("客户机链路诊断"),
+s = m:section(TypedSection, "client_diag", translate("客户机链路诊断"),
 	translate("按<b>客户机视角</b>分析：这台设备查了什么域名、收到什么答案、" ..
 		"哪一段失败。<br/>与上方「自检」互补 —— 自检看路由器自身，" ..
 		"这里看客户机实际收发。「自检全绿但某台设备打不开」正是这里要解释的。"))
@@ -1770,6 +1775,375 @@ function o.cfgvalue()
 		'<th>' .. translate("域名") .. '</th>' ..
 		'<th>' .. translate("结果") .. '</th>' ..
 		'<th>' .. translate("备注") .. '</th>' ..
+		'</tr></thead><tbody>' .. table.concat(trs) .. '</tbody></table></div>'
+end
+
+-- ══════════════════════════════════════════════════════════════
+-- 自动补全（v0.24.0，ADR-0010）
+-- --------------------------------------------------------------
+-- 从**客户机实际收发**学出域名归属，补上数据库覆盖不到的 70%。
+--
+-- 为什么单独一节而不是塞进「客户机链路诊断」：
+--   那一节是**排障视图**（看哪台设备哪一段失败），本节是**配置 + 结果**
+--   （学什么、学到了什么、怎么清）。两者数据源相同但用途不同，
+--   合在一起会让「诊断」变成一个又长又杂的页面（ADR-0007 的判据：
+--   结果视图与参数视图分开）。
+--
+-- 为什么表用 DummyValue + rawhtml 而不是 Table：
+--   Table 的每行是一个 UCI section，而这里的行来自
+--   dom_auto_* 列表与 learn-cidr.txt 文件，不是 section。
+--   用 Table 就得先造一个影子 section 类型，反而更绕。
+--   现有「已录入清单」「自愈记录」都是这个做法，保持一致。
+-- ══════════════════════════════════════════════════════════════
+s = m:section(TypedSection, "client_diag", translate("自动补全"),
+	translate("从<b>客户机实际收发</b>学出域名归属：客户机查过且解析成功的域名，" ..
+		"再实测两条链，判出该走直连还是代理，自动写进规则。<br/>" ..
+		"依据是「这台设备真的访问通了」，不是地理库 —— 实测 112 个域名里 " ..
+		"79 个的答案 IP 判不出归属，APNIC 官方数据对其中 110 个也查不到。"))
+s.anonymous = true
+s.addremove = false
+
+o = s:option(Flag, "learn_enabled", translate("启用自动补全"),
+	translate("关闭后不再学习、不写新规则。<b>已学的规则仍然生效</b> —— " ..
+		"要撤销请用下方的「清空已学规则」。"))
+o.default = "1"
+o.rmempty = false
+
+o = s:option(Value, "learn_interval", translate("学习周期（分钟）"),
+	translate("每隔这么久学一轮。<b>0 = 不自动学习</b>，只能点下方按钮手动学。" ..
+		"<br/>首轮候选可能较多，每个域名最坏要 24 秒（两条链 × 4 次 × 3 秒），" ..
+		"可配合「单轮上限」分批。"))
+o.datatype = "range(0,1440)"
+o.default = "30"
+o.write = function(self, section, value)
+	-- 页面用分钟，UCI 存秒。两者差 60 倍，存错会让学习周期变成 30 秒
+	-- （每 30 秒实测一轮，路由器持续满载）或 30 小时（功能形同不存在）。
+	--
+	-- ⚠️ 必须用 `self.map.uci`，不能用 `Map.uci`（v0.24.0 实测）。
+	--    `Map` 是 require "luci.cbi" 里的类，`uci` 是 **Map 实例** 的字段
+	--    （在 Map.__init__ 里赋 self.uci = cursor()），类上并没有它。
+	--    写成 Map.uci 会得到 nil → 保存时抛
+	--      attempt to index field 'uci' (a nil value)
+	--    而这是 cfgvalue 路径，直接让整页 500。
+	local n = tonumber(value) or 30
+	self.map.uci:set("dnschain", section, "learn_interval", tostring(n * 60))
+	self.map.uci:commit("dnschain")
+end
+function o.cfgvalue(self, section)
+	local v = self.map.uci:get("dnschain", section, "learn_interval")
+	local n = tonumber(v) or 1800
+	return tostring(math.floor(n / 60))
+end
+
+o = s:option(Value, "learn_threshold", translate("触发次数"),
+	translate("同一域名被同一台客户机查过多少次才算候选。" ..
+		"默认 <b>5</b> —— 实测阈值 3 会收进 954 个域名，" ..
+		"其中大量是一次性 CDN 边缘主机名；阈值 5 剩 429 个，" ..
+		"阈值 8 剩 127 个（只想学主力站点就填 8）。"))
+o.datatype = "range(1,50)"
+o.default = "5"
+
+o = s:option(Value, "learn_batch", translate("单轮上限（条）"),
+	translate("一轮最多学多少个域名。<b>0 = 不限</b>。" ..
+		"默认 <b>60</b> —— 实测家用环境累计后候选可达 800 条，" ..
+		"不限的话一轮要跑几十分钟并占满时间预算。" ..
+		"60 条约 40 秒一轮，剩余候选在后续周期逐轮消化。"))
+o.datatype = "range(0,500)"
+o.default = "60"
+
+o = s:option(Value, "learn_retain_days", translate("计数器保留（天）"),
+	translate("「查了多少次」的记录保留多久。超过就丢弃，避免文件无限膨胀。"))
+o.datatype = "range(1,365)"
+o.default = "30"
+
+o = s:option(Value, "learn_timeout", translate("实测超时（秒）"),
+	translate("单次链路实测的硬超时。比自检的 2 秒长 —— " ..
+		"跨境首包常超过 2 秒，太短会把可用的代理链路判成不通。"))
+o.datatype = "range(1,10)"
+o.default = "3"
+
+o = s:option(Value, "learn_retries", translate("实测重试次数"),
+	translate("单次 UDP 丢包很常见，不重试会让学习结果随网络抖动漂移。"))
+o.datatype = "range(0,5)"
+o.default = "3"
+
+o = s:option(Value, "learn_max_domains", translate("域名总量上限"),
+	translate("已学域名的总量上限。<b>0 = 不限</b>。实测 2000 条约 65 KB UCI。"))
+o.datatype = "range(0,100000)"
+o.default = "0"
+
+o = s:option(Value, "learn_max_cidr", translate("IP 段总量上限"),
+	translate("已学 IP 段的总量上限。<b>0 = 不限</b>。" ..
+		"实测灌入 50000 条约 1.4 秒。"))
+o.datatype = "range(0,100000)"
+o.default = "0"
+
+o = s:option(Value, "learn_autofix_threshold", translate("L4 翻转阈值"),
+	translate("L4（改归属）的失败阈值。<b>必须与上方「失败阈值」分开</b> —— " ..
+		"L1-L3 是清缓存/重放/重启这类幂等动作，3 次就够；" ..
+		"L4 会改配置并重建分流，代价高得多，且失败可能只是抖动。"))
+o.datatype = "range(1,100)"
+o.default = "5"
+
+-- ── 三个操作按钮 ────────────────────────────────────────────────
+
+o = s:option(Button, "_learn_run", translate("立即学习"))
+o.inputtitle = translate("立即学习")
+o.description = translate("马上学一轮（不受「学习周期」限制）。" ..
+	"<b>后台执行</b>：一轮实测需要 1~3 分钟，点完稍后刷新看结果。" ..
+	"学完会立即重建分流规则并灌入 IP 段集合。")
+function o.write(self, section)
+	local out = ds.learn_run(false)
+	ds.invalidate()
+	setmsg(out)
+end
+
+o = s:option(Button, "_learn_dry", translate("演练（不落盘）"))
+o.inputtitle = translate("演练")
+o.description = translate("只跑判定并报告结果，<b>不写任何配置、不动 nft</b>。" ..
+	"用来先看看「如果真跑会学到什么」。同样是后台执行。")
+function o.write(self, section)
+	local out = ds.learn_run(true)
+	ds.invalidate()
+	setmsg(out)
+end
+
+o = s:option(Button, "_learn_clear_counter", translate("清空计数器"))
+o.inputtitle = translate("清空计数器")
+o.description = translate("只清「查了多少次」的记录与游标，<b>已学规则保留</b>。" ..
+	"想让某个域名重新进入候选时用它。")
+function o.write(self, section)
+	local ok, out = ds.learn_clear("counter")
+	ds.invalidate()
+	setmsg((ok and "✓ " or "✗ ") .. out)
+end
+
+o = s:option(Button, "_learn_clear_all", translate("清空已学规则"))
+o.inputtitle = translate("清空已学规则")
+o.description = translate("彻底重置：删掉全部自动学到的域名、" ..
+	"IP 段文件与 nft 集合、计数器与游标。<b>手写列表不受影响</b>。")
+o.inputstyle = "remove"
+function o.write(self, section)
+	local ok, out = ds.learn_clear("all")
+	ds.invalidate()
+	setmsg((ok and "✓ " or "✗ ") .. out)
+end
+
+-- ── 三个状态显示 ────────────────────────────────────────────────
+
+o = s:option(DummyValue, "_learn_status", translate("学习层状态"))
+o.rawhtml = true
+function o.cfgvalue()
+	local st = ds.learn_status()
+	local run = ds.learn_state()
+
+	local function row(label, badge_cls, badge_text, hint)
+		return string.format(
+			'<tr><td>%s</td>' ..
+			'<td><span class="dc-badge dc-badge--%s">%s</span></td>' ..
+			'<td>%s</td></tr>',
+			label, badge_cls, badge_text, hint or "")
+	end
+
+	local rows = {}
+
+	-- ⓪ 学习进程状态（放最前 —— 用户点完按钮第一件事就是看它）
+	--
+	-- 这一行是「后台执行」方案的必要配套：按钮立即返回后，
+	-- 用户必须能看到「还在跑」或「跑完了、学到几条」，
+	-- 否则会重复点击（实测因此产生 6 个并发 learn 进程）。
+	if run.running == "1" then
+		local pct = ""
+		local tot = tonumber(run.progress_total) or 0
+		local dn  = tonumber(run.progress_done) or 0
+		if tot > 0 then
+			pct = string.format(" · %d/%d（%d%%）", dn, tot,
+				math.floor(dn * 100 / tot))
+		end
+		rows[#rows + 1] = row(
+			translate("学习进程"),
+			"warn",
+			translate("⏳ 进行中"),
+			string.format(translate("开始于 %s%s%s，一轮约 1~3 分钟"),
+				os.date("%H:%M:%S", tonumber(run.start) or 0),
+				pct,
+				run.progress_current ~= ""
+					and ("，正在实测 <code>" .. dg.esc(run.progress_current) .. "</code>")
+					or ""))
+	elseif run.last_error and run.last_error ~= "" then
+		rows[#rows + 1] = row(
+			translate("学习进程"), "bad", translate("❌ 上轮失败"),
+			dg.esc(run.last_error))
+	elseif (tonumber(run.finish) or 0) > 0 then
+		rows[#rows + 1] = row(
+			translate("学习进程"), "ok", translate("✅ 空闲"),
+			string.format(translate("上一轮 %s：候选 %s，已判定 %s，学到直连 %s / 代理 %s"),
+				os.date("%H:%M:%S", tonumber(run.finish) or 0),
+				run.last_candidates, run.last_done,
+				run.last_domestic, run.last_foreign))
+	else
+		rows[#rows + 1] = row(
+			translate("学习进程"), "mute", translate("— 未运行过"), "")
+	end
+
+	-- ① 学习集合（两个地址族分开看）
+	rows[#rows + 1] = row(
+		translate("IPv4 学习集合"),
+		st.table == "1" and "ok" or "bad",
+		st.table == "1" and translate("✅ 已建立") or translate("❌ 不存在"),
+		string.format(translate("IPv4 元素 %s 条"), st.v4_count))
+
+	rows[#rows + 1] = row(
+		translate("IPv6 学习集合"),
+		(tonumber(st.v6_count) or 0) > 0 and "ok" or "mute",
+		(tonumber(st.v6_count) or 0) > 0
+			and translate("✅ 有元素") or translate("— 空"),
+		string.format(translate("IPv6 元素 %s 条"), st.v6_count))
+
+	-- ② 挂钩状态：这一条是**最容易失效**的，必须显式显示
+	rows[#rows + 1] = row(
+		translate("ss_spec_wan_ac 挂钩"),
+		st.hooked == "1" and "ok" or "bad",
+		st.hooked == "1" and translate("✅ 已挂") or translate("❌ 未挂"),
+		st.hooked == "1"
+			and string.format(
+				translate("学到的 IP 段已在直连豁免集合里生效（已命中 %s 个包）"),
+				st.hook_hits)
+			or translate("重启 SSR-Plus 后会丢，收敛每轮自动补回；也可点「立即学习」"))
+
+	-- ③ 来源侧计数：与 nft 侧对照，能看出「文件有、集合空」这类不一致
+	rows[#rows + 1] = row(
+		translate("已学域名"),
+		"info",
+		string.format(translate("国内 %s / 国外 %s"),
+			st.auto_domestic, st.auto_foreign),
+		translate("来自 dom_auto_domestic / dom_auto_foreign"))
+
+	rows[#rows + 1] = row(
+		translate("来源 IP 段"),
+		"info",
+		string.format("v4 %s / v6 %s", st.cidr_v4, st.cidr_v6),
+		translate("来自 learn-cidr.txt，灌入上方的集合"))
+
+	local html = '<div class="dc-table-wrap"><table class="dc-table">' ..
+		'<thead><tr>' ..
+		'<th>' .. translate("项") .. '</th>' ..
+		'<th>' .. translate("状态") .. '</th>' ..
+		'<th>' .. translate("说明") .. '</th>' ..
+		'</tr></thead><tbody>' .. table.concat(rows) .. '</tbody></table></div>'
+
+	-- ④ 关闭开关时的显式提示（清单要求）
+	--
+	-- 用户关掉开关后如果没有任何提示，会以为规则已经撤销，
+	-- 而实际上 IP 段仍在豁免集合里、域名仍在 split.conf 里 ——
+	-- 那时排障会完全找错方向。
+	if st.enabled ~= "1" then
+		local n = (tonumber(st.auto_domestic) or 0) + (tonumber(st.auto_foreign) or 0)
+		html = html ..
+			'<div class="dc-alert dc-alert--warn">' ..
+			'<span class="dc-alert__icon">!</span><div>' ..
+			string.format(
+				translate("⚠️ 已停止学习，%d 条规则仍在生效。" ..
+					"要撤销请点上方「清空已学规则」。"), n) ..
+			'</div></div>'
+	end
+
+	return html
+end
+
+o = s:option(DummyValue, "_learn_domains", translate("已学域名"))
+o.rawhtml = true
+function o.cfgvalue()
+	local rows = ds.learn_domains()
+	if #rows == 0 then
+		return '<div class="dc-hint">' ..
+			translate("还没有学到任何域名。点「立即学习」开始，" ..
+				"或等一个学习周期后自动运行。") .. '</div>'
+	end
+
+	local SIDE = {
+		domestic = translate("直连（国内）"),
+		foreign  = translate("代理（国外）"),
+	}
+
+	local trs = {}
+	for _, r in ipairs(rows) do
+		-- 操作列：两个链接
+		--
+		-- ⚠️ 用 <a href> 而不是按钮：CBI 已把整页包在一个 <form> 里，
+		--    嵌套表单会被浏览器丢弃。链接走 GET + 独立 action，
+		--    由 controller 处理（见 dnschain.lua 的 learn 路由）。
+		--    这里只渲染链接，动作在服务端执行后 302 回本页。
+		local act = string.format(
+			'<a class="dc-btn dc-btn--sm" href="%s">%s</a> ' ..
+			'<a class="dc-btn dc-btn--sm" href="%s">%s</a>',
+			dg.esc(ds.learn_action_url("pin", r.domain, r.side)),
+			translate("钉住"),
+			dg.esc(ds.learn_action_url("remove", r.domain, "")),
+			translate("移除"))
+
+		trs[#trs + 1] = string.format(
+			'<tr>' ..
+			'<td><code>%s</code></td>' ..
+			'<td><span class="dc-badge dc-badge--%s">%s</span></td>' ..
+			'<td>%s</td>' ..
+			'<td>%s</td>' ..
+			'<td>%s</td>' ..
+			'<td>%s</td>' ..
+			'</tr>',
+			dg.esc(r.domain),
+			r.side == "domestic" and "ok" or "info",
+			dg.esc(SIDE[r.side] or r.side),
+			dg.esc(r.count or "—"),
+			dg.esc(r.hosts or "—"),
+			dg.esc(r.source or "—"),
+			act)
+	end
+
+	return '<div class="dc-table-wrap"><table class="dc-table">' ..
+		'<thead><tr>' ..
+		'<th>' .. translate("域名") .. '</th>' ..
+		'<th>' .. translate("归属") .. '</th>' ..
+		'<th>' .. translate("次数") .. '</th>' ..
+		'<th>' .. translate("客户机数") .. '</th>' ..
+		'<th>' .. translate("来源") .. '</th>' ..
+		'<th>' .. translate("操作") .. '</th>' ..
+		'</tr></thead><tbody>' .. table.concat(trs) .. '</tbody></table></div>'
+end
+
+o = s:option(DummyValue, "_learn_cidr", translate("已学 IP 段"))
+o.rawhtml = true
+function o.cfgvalue()
+	local rows = ds.learn_cidr()
+	if #rows == 0 then
+		return '<div class="dc-hint">' ..
+			translate("还没有学到 IP 段。学到国内域名后会自动派生" ..
+				"（IPv4 取 /24、IPv6 取 /64）。") .. '</div>'
+	end
+
+	local trs = {}
+	for _, r in ipairs(rows) do
+		local act = string.format(
+			'<a class="dc-btn dc-btn--sm" href="%s">%s</a>',
+			dg.esc(ds.learn_action_url("remove_cidr", r.cidr, "")),
+			translate("移除"))
+
+		trs[#trs + 1] = string.format(
+			'<tr>' ..
+			'<td><code>%s</code></td>' ..
+			'<td>%s</td>' ..
+			'<td>%s</td>' ..
+			'</tr>',
+			dg.esc(r.cidr),
+			dg.esc(r.domain or "—"),
+			act)
+	end
+
+	return '<div class="dc-table-wrap"><table class="dc-table">' ..
+		'<thead><tr>' ..
+		'<th>' .. translate("CIDR") .. '</th>' ..
+		'<th>' .. translate("来源域名") .. '</th>' ..
+		'<th>' .. translate("操作") .. '</th>' ..
 		'</tr></thead><tbody>' .. table.concat(trs) .. '</tbody></table></div>'
 end
 

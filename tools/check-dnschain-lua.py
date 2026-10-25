@@ -111,6 +111,9 @@ _G.entry = function(path, target, title, order)
 	return e
 end
 _G.cbi = function(p) return { kind = "cbi", path = p } end
+-- v0.24.0：controller 里新增了 `call("action_learn")` 路由，
+-- 桩必须提供 call，否则 index() 直接抛 attempt to call a nil value。
+_G.call = function(fn) return { kind = "call", fn = fn } end
 _G._ = function(s) return s end
 _G.translate = function(s) return s end
 
@@ -196,7 +199,13 @@ def test_controller():
     L.execute("_G.__fs_access = { ['/etc/config/dnschain'] = true }")
     L.execute("_G.__entries = {}")
     L.execute("index()")
-    check_eq("有配置时注册 1 个菜单", L.eval("#_G.__entries"), 1)
+    # v0.24.0：index() 现在注册**两个**路由 ——
+    #   ① 页面本体 admin/services/dns_chain
+    #   ② 自动补全的行内操作 admin/services/dns_chain/learn
+    # 后者是 <a href> 的目标（CBI 的 Button 无法按行区分），
+    # 故条目数从 1 变 2 是有意的，不是重复注册。
+    check_eq("有配置时注册 2 个路由（页面 + 行内操作）",
+             L.eval("#_G.__entries"), 2)
     check_eq("菜单位置", L.eval("table.concat(_G.__entries[1].path, '/')"),
              "admin/services/dns_chain")
     check_eq("菜单排序 20", L.eval("_G.__entries[1].order"), 20)
@@ -204,6 +213,16 @@ def test_controller():
     check_eq("标题为「DNS 分流」", L.eval("_G.__entries[1].title"), "DNS 分流")
     # leaf 会让侧边栏该项消失（v0.12.0 实测），必须没有
     check_eq("不设 page.leaf", L.eval("_G.__entries[1].leaf"), None)
+
+    # 行内操作路由：路径在页面之下，且必须是 leaf
+    # （leaf 会让它在侧边栏消失，这正是想要的 —— 它是动作不是菜单）
+    check_eq("行内操作路由路径",
+             L.eval("table.concat(_G.__entries[2].path, '/')"),
+             "admin/services/dns_chain/learn")
+    check_eq("行内操作路由是 leaf",
+             L.eval("_G.__entries[2].leaf"), True)
+    check_eq("行内操作路由目标是 call",
+             L.eval("_G.__entries[2].target.kind"), "call")
 
 
 def test_model():

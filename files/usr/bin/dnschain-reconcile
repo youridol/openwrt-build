@@ -426,6 +426,25 @@ main() {
 	#    太早处理会被它的重建覆盖掉。
 	dc_fix_wan_ac_fallback >/dev/null 2>&1
 
+	# ── 自动补全的学习层（v0.24.0，ADR-0010）────────────────────
+	#
+	# 两件事，顺序不能反：
+	#   ① dc_learn_hook      建集合 + 在 ss_spec 入站链最前面插 return
+	#   ② dc_learn_apply_cidr 把 learn-cidr.txt 灌进集合（单事务）
+	#
+	# 为什么每轮都要跑（而不是只在学习后跑）：
+	#   ssr-rules:1174 的 `nft delete table inet ss_spec` 会把集合与
+	#   挂钩一起删掉 —— 用户在 SSR-Plus 页面点一次「保存并应用」、
+	#   或 SSR-Plus 自身重启，学习层就整体消失。
+	#   每轮收敛重插是清单风险表里已写明的处置方式。
+	#
+	# 为什么必须放在 dc_fix_wan_ac_fallback **之后**：
+	#   两者都改 ss_spec_wan_ac。挂钩用 insert（插首位），兜底用
+	#   delete+add（改末位），互不覆盖；但兜底的判断依据是「最后一条
+	#   是否无条件 jump」，先跑兜底能保证它的判据不受挂钩影响。
+	dc_learn_hook >/dev/null 2>&1 || rc=1
+	dc_learn_apply_cidr >/dev/null 2>&1 || rc=1
+
 	if [ "$rc" -ne 0 ]; then
 		dnschain_log "收敛完成，但有错误（见上方日志）"
 		return 1

@@ -907,10 +907,20 @@ end
 local CLIENT_DIAG = "/usr/bin/dnschain-client-diag"
 
 --- 解析 key=value 形式的状态输出
+--
+-- ⚠️ 键名必须允许**数字**（v0.24.0 实测踩过）。
+--
+--   原正则 `^([A-Z_]+)=(.*)$` 只认大写字母与下划线，于是
+--   `CIDR_V4=123`、`V4_COUNT=123`、`HOOK_HITS=0` 这类含数字的键
+--   **整个被丢弃** —— kv.CIDR_V4 恒为 nil，页面显示「v4 0 / v6 0」
+--   而实际文件里有 221 行、集合里有 123 条元素。
+--
+--   症状是「有数据但页面显示 0」，且只影响含数字的键，
+--   既有键（TABLE / HOOKED / ENABLED）全部正常，故极易漏看。
 local function parse_kv(out)
 	local t = {}
 	for line in (out or ""):gmatch("[^\n]+") do
-		local k, v = line:match("^([A-Z_]+)=(.*)$")
+		local k, v = line:match("^([A-Z0-9_]+)=(.*)$")
 		if k then t[k] = v end
 	end
 	return t
@@ -1141,6 +1151,367 @@ function M.client_diag_undo(id)
 	end
 	local err = out:match("ERROR=([^\n]*)")
 	return false, err or "撤销失败"
+end
+
+-- ============================================================
+-- 自动补全（v0.24.0，ADR-0010）
+-- ------------------------------------------------------------
+-- 页面要三样东西：
+--   ① 状态（学习集合 / 元素数 / 挂钩三态）→ learn_status
+--   ② 已学域名表与 IP 段表（带操作链接）  → learn_domains / learn_cidr
+--   ③ 四个动作（学习 / 演练 / 清计数器 / 清规则）→ learn_run / learn_clear
+--   ④ 表格里每行的「钉住 / 移除」→ learn_pin / learn_remove
+--
+-- ⚠️ 所有域名参数都必须经 M.shell_quote，side 只允许白名单值。
+--    这不是防御性编程而是必要：域名来自 dnsmasq 日志（客户机可控），
+--    而日志内容会被写进 shell 命令行。不转义就是命令注入。
+-- ============================================================
+
+--- 学习层状态
+--
+-- 输出 KEY=VALUE，字段名在脚本里是 TABLE / V4_COUNT / V6_COUNT /
+-- HOOKED / CIDR_V4 / CIDR_V6 / ENABLED / AUTO_DOMESTIC / AUTO_FOREIGN。
+function M.learn_status()
+	local out = sys.exec(CLIENT_DIAG .. " learn-status 2>&1") or ""
+	local kv = parse_kv(out)
+	return {
+		table          = kv.TABLE or "0",
+		v4_count       = kv.V4_COUNT or "0",
+		v6_count       = kv.V6_COUNT or "0",
+		hooked         = kv.HOOKED or "0",
+		hook_hits      = kv.HOOK_HITS or "0",
+		cidr_v4        = kv.CIDR_V4 or "0",
+		cidr_v6        = kv.CIDR_V6 or "0",
+		enabled        = kv.ENABLED or "1",
+		interval       = kv.INTERVAL or "1800",
+		threshold      = kv.THRESHOLD or "3",
+		batch          = kv.BATCH or "0",
+		retain_days    = kv.RETAIN_DAYS or "30",
+		timeout        = kv.TIMEOUT or "3",
+		retries        = kv.RETRIES or "3",
+		max_domains    = kv.MAX_DOMAINS or "0",
+		max_cidr       = kv.MAX_CIDR or "0",
+		autofix_thresh = kv.AUTOFIX_THRESHOLD or "5",
+		autofix_intv   = kv.AUTOFIX_INTERVAL or "3600",
+		auto_domestic  = kv.AUTO_DOMESTIC or "0",
+		auto_foreign   = kv.AUTO_FOREIGN or "0",
+		retry_pending  = kv.RETRY_PENDING or "0",
+	}
+end
+
+--- 跑一轮学习（**后台启动，立即返回**）
+--
+-- 为什么不再同步等结果（v0.24.0 实测踩过）：
+--   一轮学习实测 68~152 秒（43~92 个候选 × 每条最多 24 秒）。
+--   页面按钮走 CGI，LuCI 的 uhttpd 超时后浏览器直接报
+--   **502 Bad Gateway**，而进程还在跑 —— 用户以为失败又点一次，
+--   实测出现 6 个并发 learn 进程，把路由器与上游一起打满。
+--
+--   现在改成 fork 到后台 + 立即返回「已启动」，页面显示进行中，
+--   用户再点「立即刷新」或等自动刷新看结果。
+--
+-- dry = true 时后台跑 --dry-run（完全不落盘）。
+function M.learn_run(dry)
+	local cmd = CLIENT_DIAG .. " learn-start"
+	if dry then cmd = cmd .. " --dry-run" end
+
+	local out = sys.exec(cmd .. " 2>&1") or ""
+	M.invalidate()
+
+	local kv = parse_kv(out)
+
+	if kv.BUSY == "1" then
+		return "⏳ 已有一轮学习在跑（" .. (kv.AGE or "?") .. " 秒前开始），请等它结束"
+	end
+	if kv.STARTED == "1" then
+		if dry then
+			return "已启动演练（不落盘），稍后点「立即刷新」看结果"
+		end
+		return "已启动学习，稍后点「立即刷新」看结果"
+	end
+	-- 启动失败：把脚本给的原因带出来（可能是总开关关闭 / 锁冲突）
+	local reason = kv.REASON or out:gsub("%s+$", "")
+	return "✗ 启动失败：" .. reason
+end
+
+--- 学习是否进行中 + 上一轮结果
+function M.learn_state()
+	local out = sys.exec(CLIENT_DIAG .. " learn-state 2>&1") or ""
+	local kv = parse_kv(out)
+
+	local last = kv.LAST or ""
+	local n_cand = last:match("CANDIDATES=(%d+)") or "0"
+	local n_dom  = last:match("LEARNED_DOMESTIC=(%d+)") or "0"
+	local n_for  = last:match("LEARNED_FOREIGN=(%d+)") or "0"
+	local n_done = last:match("DONE=(%d+)") or "0"
+	local err    = last:match("ERROR=([^%s]*)")
+
+	-- 进度文件里的 DONE 更准（日志可能来自更早的一轮）
+	local prog_done = kv.PROGRESS_DONE or ""
+	if prog_done:match("^%d+$") then n_done = prog_done end
+
+	return {
+		running = kv.RUNNING or "0",
+		start   = kv.START or "0",
+		dry     = kv.DRY or "0",
+		finish  = kv.END or "0",
+		last_candidates = n_cand,
+		last_domestic   = n_dom,
+		last_foreign    = n_for,
+		last_done       = n_done,
+		progress_total  = kv.PROGRESS_TOTAL or "0",
+		progress_done   = prog_done ~= "" and prog_done or "0",
+		progress_current = kv.PROGRESS_CURRENT or "",
+		last_error      = err,
+	}
+end
+
+--- 清空学习层
+--
+-- what = "counter"（只清计数器）| "all"（彻底重置）
+function M.learn_clear(what)
+	what = tostring(what or "all")
+	if what ~= "counter" and what ~= "rules" and what ~= "all" then
+		return false, "参数必须是 counter / rules / all"
+	end
+
+	local out = sys.exec(CLIENT_DIAG .. " learn-clear " .. what .. " 2>&1") or ""
+	M.invalidate()
+
+	if out:find("OK=") then
+		return true, out:gsub("^%s*OK=", ""):gsub("%s+$", "")
+	end
+	local err = out:match("ERROR=([^\n]*)")
+	return false, err or "清空失败"
+end
+
+--- 已学域名表
+--
+-- 数据来源两处合并：
+--   dom_auto_domestic / dom_auto_foreign（UCI，权威）
+--   learn-counters.txt（计数器，提供「次数 / 客户机数」两列）
+--
+-- 为什么次数从计数器取而不是自己维护：计数器是学习的判据来源，
+-- 页面显示它才能解释「为什么这个域名被学到了」。
+function M.learn_domains()
+	local rows = {}
+
+	-- 计数器聚合：域名 → 最大次数、客户机台数、最近时刻
+	local cnt = {}
+	local f = io.open(M.state_dir .. "/learn-counters.txt", "r")
+	if f then
+		for raw in f:lines() do
+			local dom, ip, n, first, last =
+				raw:match("^([^|]+)|([^|]+)|([^|]*)|([^|]*)|([^|]*)$")
+			if dom and dom ~= "" and ip and ip ~= "" then
+				local c = tonumber(n) or 0
+				local e = cnt[dom]
+				if not e then
+					e = { max = 0, hosts = 0, last = 0 }
+					cnt[dom] = e
+				end
+				if c > e.max then e.max = c end
+				e.hosts = e.hosts + 1
+				local l = tonumber(last) or 0
+				if l > e.last then e.last = l end
+			end
+		end
+		f:close()
+	end
+
+	-- 审计表：域名 → 最近一次判定的来源（manual / auto / L4）
+	local src = {}
+	local fa = io.open(M.state_dir .. "/learn-audit.log", "r")
+	if fa then
+		for raw in fa:lines() do
+			local _, dom, _, s = raw:match("^([^|]*)|([^|]*)|([^|]*)|([^|]*)|")
+			if dom and dom ~= "" and s and s ~= "" then
+				src[dom] = s
+			end
+		end
+		fa:close()
+	end
+
+	local function add(side)
+		for _, dom in ipairs(M.uci_list("dom_auto_" .. side, "domain")) do
+			local e = cnt[dom]
+			rows[#rows + 1] = {
+				domain = dom,
+				side   = side,
+				count  = e and tostring(e.max) or "—",
+				hosts  = e and tostring(e.hosts) or "—",
+				source = src[dom] or "—",
+			}
+		end
+	end
+
+	add("domestic")
+	add("foreign")
+
+	-- 按归属再按域名排序，页面顺序稳定
+	table.sort(rows, function(a, b)
+		if a.side ~= b.side then return a.side < b.side end
+		return a.domain < b.domain
+	end)
+
+	return rows
+end
+
+--- 已学 IP 段表
+--
+-- 来源是 learn-cidr.txt（`4 <cidr>` / `6 <cidr>` 两列）。
+-- 「来源域名」这一列**没有**逐段记录 —— 一个域名常解析出多个 /24，
+-- 反向映射需要每轮重新解析，代价太高。故这里只显示地址族与段本身，
+-- 「来源域名」列留给用户在「已学域名」表里对照。
+function M.learn_cidr()
+	local rows = {}
+	local f = io.open(M.run_dir .. "/learn-cidr.txt", "r")
+	if not f then return rows end
+
+	for raw in f:lines() do
+		local fam, cidr = raw:match("^(%d)%s+([^%s]+)$")
+		if fam and cidr then
+			rows[#rows + 1] = {
+				cidr = cidr,
+				family = fam == "6" and "IPv6" or "IPv4",
+				domain = nil,
+			}
+		end
+	end
+	f:close()
+
+	table.sort(rows, function(a, b) return a.cidr < b.cidr end)
+	return rows
+end
+
+--- 表格里「钉住 / 移除」的操作 URL
+--
+-- 为什么用 URL 而不是 Button：
+--   CBI 把整页包在一个 <form> 里，嵌套 form 会被浏览器丢弃；
+--   而 Button 的 write() 只能挂在 section 上，无法按行区分。
+--   故走 GET + controller 里的独立 action（见 controller/dnschain.lua）。
+--
+-- act = pin | remove | remove_cidr
+function M.learn_action_url(act, value, side)
+	local base = disco.build_url("admin", "services", "dns_chain", "learn")
+
+	-- 参数值必须 URL 编码：域名里有 `-` `.` 是安全的，但
+	-- CIDR 里的 `/` 会破坏 query 解析，必须编码成 %2F。
+	local function enc(s)
+		return (tostring(s or ""):gsub("[^%w%._%-]", function(c)
+			return string.format("%%%02X", c:byte())
+		end))
+	end
+
+	local url = base .. "?act=" .. enc(act) .. "&v=" .. enc(value)
+	if side and side ~= "" then
+		url = url .. "&side=" .. enc(side)
+	end
+	return url
+end
+
+--- 钉住：把自动学到的域名写进手写列表（学习永不覆盖）
+--
+-- 语义（清单要求）：钉住 = 用户认可这条归属，转成手写。
+-- 手写优先于自动，故之后学习不会再改它。
+function M.learn_pin(domain, side)
+	domain = tostring(domain or "")
+	side = tostring(side or "")
+
+	-- side 白名单：只有两个合法值，其它一律拒绝
+	if side ~= "domestic" and side ~= "foreign" then
+		return false, "side 必须是 domestic / foreign"
+	end
+
+	-- 域名合法性：与页面校验同一条规则（只允许字母数字点横线）
+	if not domain:match("^[%w][%w%.%-]*%.[%a][%w%.%-]*$") then
+		return false, "域名格式非法"
+	end
+
+	local q = M.shell_quote(domain)
+	local other = (side == "domestic") and "foreign" or "domestic"
+
+	-- 先写手写侧，再从自动两侧删掉（避免同域名两处都有）
+	local ok = os.execute(
+		"uci -q add_list dnschain.dom_" .. side .. ".domain=" .. q .. " && " ..
+		"uci -q del_list dnschain.dom_auto_" .. side .. ".domain=" .. q .. " ; " ..
+		"uci -q del_list dnschain.dom_auto_" .. other .. ".domain=" .. q .. " ; " ..
+		"uci -q del_list dnschain.dom_" .. other .. ".domain=" .. q .. " ; " ..
+		"uci -q commit dnschain")
+
+	M.invalidate()
+
+	if ok ~= 0 and ok ~= true then
+		return false, "写入失败"
+	end
+
+	-- 重建分流片段，让钉住立即生效
+	sys.exec("/usr/bin/dnschain-selftest apply 2>&1")
+	M.invalidate()
+	return true, "已钉住 " .. domain .. " → 手写" .. side
+end
+
+--- 移除一条已学域名（两侧自动列表都删）
+function M.learn_remove(domain)
+	domain = tostring(domain or "")
+	if not domain:match("^[%w][%w%.%-]*%.[%a][%w%.%-]*$") then
+		return false, "域名格式非法"
+	end
+
+	local q = M.shell_quote(domain)
+	local ok = os.execute(
+		"uci -q del_list dnschain.dom_auto_domestic.domain=" .. q .. " ; " ..
+		"uci -q del_list dnschain.dom_auto_foreign.domain=" .. q .. " ; " ..
+		"uci -q commit dnschain")
+
+	M.invalidate()
+
+	if ok ~= 0 and ok ~= true then
+		return false, "删除失败"
+	end
+
+	sys.exec("/usr/bin/dnschain-selftest apply 2>&1")
+	M.invalidate()
+	return true, "已移除 " .. domain
+end
+
+--- 移除一条已学 IP 段（从 learn-cidr.txt 删掉，下一轮不再灌入）
+function M.learn_remove_cidr(cidr)
+	cidr = tostring(cidr or "")
+	-- CIDR 只允许十六进制/数字/点/冒号/斜杠
+	if not cidr:match("^[%x%d%.:%/]+$") then
+		return false, "CIDR 格式非法"
+	end
+
+	local path = M.run_dir .. "/learn-cidr.txt"
+	local f = io.open(path, "r")
+	if not f then return false, "learn-cidr.txt 不存在" end
+
+	local keep = {}
+	local hit = false
+	for raw in f:lines() do
+		local fam, c = raw:match("^(%d)%s+([^%s]+)$")
+		if fam and c == cidr then
+			hit = true
+		else
+			keep[#keep + 1] = raw
+		end
+	end
+	f:close()
+
+	if not hit then return false, "该 IP 段不在文件里" end
+
+	local out = io.open(path, "w")
+	if not out then return false, "写入失败" end
+	for _, line in ipairs(keep) do
+		out:write(line, "\n")
+	end
+	out:close()
+
+	-- 立即重建集合，否则要等下一轮收敛才生效
+	sys.exec("/usr/bin/dnschain-reconcile 2>&1")
+	M.invalidate()
+	return true, "已移除 IP 段 " .. cidr
 end
 
 

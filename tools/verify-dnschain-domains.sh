@@ -1472,6 +1472,219 @@ else
 	fail "兜底修正在收敛早期执行（会被 SSR-Plus 重建覆盖）"
 fi
 
+# ════════════════════════════════════════════════════════════
+# 自动补全（v0.24.0，ADR-0010）
+# ------------------------------------------------------------
+# 这些约束的共同点：违反后**页面照常打开、链路照常工作**，
+# 只是某个功能悄悄失效。每一条都对应一次实测踩过的坑。
+# ════════════════════════════════════════════════════════════
+echo "── 15. 自动补全（ADR-0010）──────────────────────────────"
+
+# ㉟ learn 子命令存在且支持 --dry-run
+#
+#    防「演练模式被删」：--dry-run 是用户敢在页面上点的前提
+#    （不落盘、不动 nft）。删掉它用户就只能盲跑。
+if body_of "$DIAG" | grep -qE '^\s*learn\)' && \
+   body_of "$DIAG" | sed -n '/^cmd_learn()/,/^}/p' | grep -qF -- '--dry-run'; then
+	pass "learn 子命令存在且支持 --dry-run"
+else
+	fail "learn 子命令缺 --dry-run（用户无法先演练再落盘）"
+fi
+
+# ㊱ 候选筛选必须读 db-domains.txt（判据失效会导致重复学）
+#
+#    实测踩过：原实现用 shell 循环逐行 grep，647 个候选 109 秒。
+#    改成单遍 awk 后必须仍然读这三个文件 —— 少读一个就会把
+#    数据库已覆盖的域名重新学一遍，UCI 无限膨胀。
+if body_of "$DIAG" | sed -n '/^_learn_candidates()/,/^}/p' | grep -qF 'db' && \
+   body_of "$DIAG" | sed -n '/^_learn_candidates()/,/^}/p' | grep -qF 'DNSCHAIN_DB_DOMAINS'; then
+	pass "_learn_candidates 读 db-domains.txt（判据不失效）"
+else
+	fail "_learn_candidates 没读 db-domains.txt（已覆盖的域名会被重复学）"
+fi
+
+# ㊲ 写入前必须 del_list 另一侧（防两侧同时有条目）
+#
+#    同一域名在 dom_auto_domestic 与 dom_auto_foreign 各有一条时，
+#    dnsmasq 把两条 server= 当**候选**而非覆盖，取哪条不确定 ——
+#    这正是 v0.22.0 删掉自动改道的根因。
+if body_of "$DIAG" | sed -n '/^_learn_write()/,/^}/p' | grep -qF 'del_list'; then
+	pass "写入自动归属前先 del_list 另一侧"
+else
+	fail "写入前没删另一侧（两侧同时有条目 → dnsmasq 当候选）"
+fi
+
+# ㊳ dc_learn_hook 必须有幂等标记
+#
+#    每轮收敛都调它，无标记会重复插规则 → 链无限增长。
+if body_of "$DNSCHAIN_SH" | sed -n '/^dc_learn_hook()/,/^}/p' | grep -qF '_DC_LEARN_HOOK_'; then
+	pass "dc_learn_hook 有幂等标记 _DC_LEARN_HOOK_"
+else
+	fail "dc_learn_hook 无幂等标记（每轮重复插规则）"
+fi
+
+# ㊴ 学习集合必须建在 ss_spec 内，不能建独立表
+#
+#    实测 nft 1.1.6 不支持跨表引用集合：@dctest.s4 / @inet.dctest.s4 /
+#    @dctest/s4 / dctest@s4 四种写法全部报错，跨表 jump 也失败。
+#    故 DNSCHAIN_LEARN_TABLE 必须是 ss_spec。
+if body_of "$DNSCHAIN_SH" | grep -qF 'DNSCHAIN_LEARN_TABLE="ss_spec"'; then
+	pass "学习集合建在 ss_spec 内（nft 不支持跨表引用）"
+else
+	fail "学习集合不在 ss_spec 内（跨表引用集合会失败，挂钩永远不生效）"
+fi
+
+# ㊵ 挂钩必须用 insert（插首位），不能用 add（追加末尾）
+#
+#    ss_spec_wan_ac 里前面的规则会 jump ss_spec_wan_fw 直接 redirect，
+#    追加到末尾的 return 永远轮不到执行。
+if body_of "$DNSCHAIN_SH" | sed -n '/^dc_learn_hook()/,/^}/p' | grep -qF 'nft insert rule'; then
+	pass "挂钩用 insert 插首位（add 到末尾永不执行）"
+else
+	fail "挂钩没用 insert（追加到链尾的 return 轮不到）"
+fi
+
+# ㊶ 挂钩必须带 counter（否则无法观测是否命中）
+if body_of "$DNSCHAIN_SH" | sed -n '/^dc_learn_hook()/,/^}/p' | grep -qF 'counter return'; then
+	pass "挂钩带 counter（可观测命中数）"
+else
+	fail "挂钩没带 counter（挂钩是否生效无法观测）"
+fi
+
+# ㊷ 灌入集合必须单事务且先校验
+#
+#    先 flush 再逐条 add 会留出「集合是空的」窗口，
+#    那时所有已学 IP 段失去豁免、流量突然绕海外。
+if body_of "$DNSCHAIN_SH" | sed -n '/^dc_learn_apply_cidr()/,/^}/p' | grep -qF 'nft -c -f'; then
+	pass "灌入集合前先 nft -c 校验（失败保持原状）"
+else
+	fail "灌入集合前没校验（半灌入会留下空集合窗口）"
+fi
+
+# ㊸ learn_max_* 必须支持 0 = 不限
+#
+#    语义被改成「0 = 禁用」会让默认值（0）直接关掉功能，
+#    而页面上看不出区别。
+if body_of "$DNSCHAIN_SH" | sed -n '/^dc_learn_apply_cidr()/,/^}/p' | grep -qF 'max_cidr' && \
+   body_of "$DNSCHAIN_SH" | sed -n '/^dc_learn_apply_cidr()/,/^}/p' | grep -qF -- '-gt 0'; then
+	pass "learn_max_cidr 支持 0 = 不限"
+else
+	fail "learn_max_cidr 的 0 = 不限 语义缺失（默认值会禁用功能）"
+fi
+
+# ㊹ UI 必须有「清空已学规则」按钮
+#
+#    没有它用户无法撤销已学规则（关闭开关只停止学习，规则仍生效）。
+if body_of "$GENERAL" | grep -qE 'option\(Button, "_learn_clear_all"'; then
+	pass "UI 有「清空已学规则」按钮"
+else
+	fail "缺「清空已学规则」按钮（用户无法重置）"
+fi
+
+# ㊺ 关开关时页面必须提示「规则仍在生效」
+#
+#    用户关掉开关后如果没有任何提示，会以为规则已撤销，
+#    而实际 IP 段仍在豁免集合里、域名仍在 split.conf 里。
+if body_of "$GENERAL" | grep -qF '已停止学习'; then
+	pass "关开关时页面提示规则仍在生效"
+else
+	fail "关开关时无提示（用户会以为已撤销，排障找错方向）"
+fi
+
+# ㊻ L4 阈值必须与 L1-L3 独立
+#
+#    混用一个值会导致「3 次失败就改归属」或「L1-L3 拖到 5 次才动」。
+if body_of "$DIAG" | grep -qF 'learn_autofix_threshold' && \
+   body_of "$CONF" | grep -qE "option learn_autofix_threshold"; then
+	pass "L4 阈值与 L1-L3 独立（learn_autofix_threshold）"
+else
+	fail "L4 阈值未与 L1-L3 分离（频率限制混用）"
+fi
+
+# ㊼ learn_* 配置项必须齐全（11 项）
+#
+#    少一项的后果：脚本 dc_get 走默认值，页面改了不生效。
+_learn_missing=""
+for _k in learn_enabled learn_interval learn_threshold learn_batch \
+          learn_retain_days learn_timeout learn_retries learn_max_domains \
+          learn_max_cidr learn_autofix_threshold learn_autofix_interval; do
+	if ! grep -qE "option $_k '" "$CONF"; then
+		_learn_missing="$_learn_missing $_k"
+	fi
+done
+if [ -z "$_learn_missing" ]; then
+	pass "11 个 learn_* 配置项齐全"
+else
+	fail "缺 learn_* 配置项:$_learn_missing（脚本会走默认值，页面改了不生效）"
+fi
+
+# ㊽ learn_* 控件必须绑定到 client_diag 段
+#
+#    ⚠️ 实测踩过的**既有缺陷**：该 section 原写成
+#    `TypedSection, "dnschain"`，而配置里类型为 dnschain 的只有 main ——
+#    于是 11 个控件实际写进 main.*，脚本读 client_diag.* 全部读不到，
+#    页面保存后毫无效果。浏览器实测 DOM name 是
+#    `cbid.dnschain.main.fail_threshold` 而非 client_diag。
+if body_of "$GENERAL" | grep -qE 'm:section\(TypedSection, "client_diag"'; then
+	pass "客户机诊断/自动补全 section 绑定 client_diag 段"
+else
+	fail "section 绑定了错误的段名（控件写进 main.*，脚本读不到）"
+fi
+
+# ㊾ 学习必须后台跑 + 互斥锁（否则页面 502 且进程堆叠）
+#
+#    实测：一轮 68~603 秒，LuCI 按钮超时后浏览器报 502 而进程还在跑，
+#    用户重点一次 → 6 个并发 learn 进程。
+if body_of "$DIAG" | grep -qF 'DIAG_LEARN_LOCK' && \
+   body_of "$DIAG" | grep -qF 'cmd_learn_start' && \
+   body_of "$DIAG" | grep -qF 'setsid'; then
+	pass "学习有互斥锁 + setsid 后台启动（防 502 与进程堆叠）"
+else
+	fail "学习缺互斥锁或后台启动（页面会 502，进程会堆叠）"
+fi
+
+# ㊿ 学习进度必须逐条落盘（否则页面只能显示「进行中」）
+if body_of "$DIAG" | grep -qF 'DIAG_LEARN_PROGRESS' && \
+   body_of "$DIAG" | sed -n '/^cmd_learn()/,/^}/p' | grep -qF 'CURRENT=%s'; then
+	pass "学习进度逐条落盘（页面可显示 12/60）"
+else
+	fail "学习进度只在结束时输出（页面整轮只能显示「进行中」）"
+fi
+
+# 51. learn-cidr.txt 必须 chmod 644（否则 LuCI 读不到）
+#
+#    与查询流水同一类坑：mktemp 建的是 0600，rpcd 以受限身份读 →
+#    页面「已学 IP 段」全空而文件里有 221 行。
+if body_of "$DNSCHAIN_SH" | sed -n '/^dc_learn_derive_cidr()/,/^}/p' | grep -qF 'chmod 644'; then
+	pass "learn-cidr.txt 放开读权限（否则页面显示空表）"
+else
+	fail "learn-cidr.txt 没 chmod 644（页面会显示空表而文件有数据）"
+fi
+
+# 52. 行内操作路由必须注册（否则「钉住」「移除」点了 404）
+if grep -qF 'action_learn' package/luci-app-dnschain/luasrc/controller/dnschain.lua; then
+	pass "行内操作路由已注册（钉住/移除可用）"
+else
+	fail "缺行内操作路由（钉住/移除链接会 404）"
+fi
+
+# 53. 行内操作必须做参数白名单校验（域名来自客户机可控的日志）
+if body_of "$MODEL" | sed -n '/^function M.learn_pin/,/^end/p' | grep -qF 'side ~= "domestic"'; then
+	pass "learn_pin 做 side 白名单校验"
+else
+	fail "learn_pin 未校验 side（可写入任意 section）"
+fi
+
+# 54. 候选筛选必须是单遍 awk（不能逐行 fork）
+#
+#    实测：逐行 shell 循环 647 个候选 109 秒，单遍 awk 480 毫秒。
+#    判据：函数体内不得出现 `| while read`。
+if body_of "$DIAG" | sed -n '/^_learn_candidates()/,/^}/p' | grep -qF '| while read'; then
+	fail "_learn_candidates 仍在逐行 fork（实测 109 秒，应为 480 毫秒）"
+else
+	pass "_learn_candidates 单遍 awk（无逐行 fork）"
+fi
+
 echo ""
 if [ "$rc" -ne 0 ]; then
 	echo "!!! 域名分流与改道契约校验失败" >&2

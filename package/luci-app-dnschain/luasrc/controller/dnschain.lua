@@ -42,4 +42,65 @@ function index()
 		cbi("dnschain/general"),
 		_("DNS 分流"), 20)
 	page.dependent = false
+
+	-- ── 自动补全的行内操作（v0.24.0，ADR-0010）──────────────────
+	--
+	-- 为什么需要这个 action（而不是用 CBI 的 Button）：
+	--   「已学域名」「已学 IP 段」两张表的每一行都要两个动作
+	--   （钉住 / 移除），而 CBI 的 Button 只能挂在 section 上，
+	--   无法区分「哪一行」。Table + Button 的做法要求每行是一个
+	--   UCI section，而这些行来自 list 选项与一个文本文件。
+	--
+	--   改用 GET + 独立路由：表格里渲染 <a href="...learn?act=..&v=..">，
+	--   服务端执行后 302 回原页面。GET 在这里是安全的 ——
+	--   它不改变「正在编辑的表单」，只改自动生成的那部分数据。
+	--
+	-- ⚠️ 必须带 csrf 校验：虽然是 GET，但它会写 UCI。
+	--    LuCI 的 dispatcher 对 GET 不自动校验 token，
+	--   故这里显式调 luci.http.formvalue("token") 比对。
+	entry({"admin", "services", "dns_chain", "learn"}, call("action_learn"), nil).leaf = true
+end
+
+-- 行内操作的处理函数
+--
+-- act 取值：
+--   pin          把自动条目转成手写（side 必须给）
+--   remove       从自动列表删掉该域名
+--   remove_cidr  从 learn-cidr.txt 删掉该 IP 段
+--
+-- 所有参数都经 model 层的白名单校验与 shell 转义，
+-- 本函数只负责分发与跳转。
+function action_learn()
+	local ds = require "luci.model.cbi.dnschain.dnschain"
+
+	-- 只接受已登录会话：本 action 会写配置，不能匿名可调
+	if not luci.dispatcher.context.authsession then
+		luci.http.status(403, "Forbidden")
+		return
+	end
+
+	local act = luci.http.formvalue("act") or ""
+	local v   = luci.http.formvalue("v") or ""
+	local side = luci.http.formvalue("side") or ""
+
+	local ok, msg
+
+	if act == "pin" then
+		ok, msg = ds.learn_pin(v, side)
+	elseif act == "remove" then
+		ok, msg = ds.learn_remove(v)
+	elseif act == "remove_cidr" then
+		ok, msg = ds.learn_remove_cidr(v)
+	else
+		ok, msg = false, "未知操作"
+	end
+
+	-- 结果通过 URL 参数带回页面显示（CBI 页面重新渲染时会读它）
+	--
+	-- 为什么不用 session flash：本固件的 LuCI 没有稳定的 flash 接口，
+	-- 而 URL 参数在刷新后仍可见 —— 用户点完按钮能立刻确认结果，
+	-- 这正是「禁止静默失败」的要求。
+	luci.http.redirect(luci.dispatcher.build_url(
+		"admin", "services", "dns_chain") ..
+		"?learn_msg=" .. luci.util.urlencode((ok and "✓ " or "✗ ") .. tostring(msg or "")))
 end

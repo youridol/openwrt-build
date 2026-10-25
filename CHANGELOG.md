@@ -3,6 +3,150 @@
 本仓库所有功能/配置改动均记录于此。版本判型遵循全局规范（PATCH / MINOR / MAJOR）。
 
 
+## [v0.24.0] - 2026-10-26
+
+### 新增 — DNS 分流自动补全（域名 + IP 段两层）
+
+设计依据：[`docs/adr/0010-auto-learn-domain-cidr.md`](docs/adr/0010-auto-learn-domain-cidr.md)。
+
+要解决的问题（实测 2026-10-25）：`china` nft 集合只有 **1333 条区间**，
+抽样的 112 个国内可访问域名里 **79 个**的答案 IP 不在其中，
+APNIC 官方数据对其中 **110 个**也查不到。漏判的国内 IP 被送去海外节点，
+国内 CDN 拒绝海外访问（经代理 0.3 秒即断、直连 200）→ 页面白屏。
+**靠地理库判归属这条路走不通，唯一可靠的证据是「客户机实际访问通了」。**
+
+#### ① 两层结构
+
+| 层 | 数据 | 落点 | 决定什么 |
+|---|---|---|---|
+| 域名层 | `dom_auto_domestic` / `dom_auto_foreign` | `dnschain-split.conf` 的 `server=/域名/` | 解析走哪条链 |
+| IP 层 | `dc_learn4` / `dc_learn6` 集合 | `ss_spec_wan_ac` / `ss_spec6_tcp` 首行 `return` | 出站是否绕代理 |
+
+只做域名层不够：域名学对了、IP 没覆盖，流量照样绕海外。
+只做 IP 层也不够：域名走错链会拿到污染答案，学到的 IP 本身就是错的。
+
+#### ② 新增子命令（`dnschain-client-diag`）
+
+| 子命令 | 作用 |
+|---|---|
+| `learn [--dry-run] [--source manual\|auto]` | 学一轮，输出 `KEY=VALUE` |
+| `learn-start [--dry-run]` | 后台启动一轮，立即返回（页面按钮用这个） |
+| `learn-state` | 是否进行中 + 进度 + 上一轮结果 |
+| `learn-status` | 学习层状态（集合/元素数/挂钩/命中数） |
+| `learn-clear counter\|rules\|all` | 清计数器 / 清已学规则 / 全部清空 |
+
+L4 自愈（`_learn_flip`）：直连实测不通 + 代理实测通 → 从 `dom_auto_domestic`
+删、写 `dom_auto_foreign`。阈值与时间窗**独立**于 L1-L3
+（`learn_autofix_threshold` 默认 5、`learn_autofix_interval` 默认 3600 秒）。
+
+#### ③ 新增配置项（`client_diag` 段 11 项）
+
+`learn_enabled` / `learn_interval` / `learn_threshold` / `learn_batch` /
+`learn_retain_days` / `learn_timeout` / `learn_retries` / `learn_max_domains` /
+`learn_max_cidr` / `learn_autofix_threshold` / `learn_autofix_interval`
+
+**两处默认值按实测调整，与需求原文不同**：
+
+| 键 | 需求原文 | 本实现 | 依据 |
+|---|---|---|---|
+| `learn_threshold` | 3 | **5** | 阈值 3 → 954 个候选（大量一次性 CDN 边缘主机名）；5 → 429；8 → 127。家用常用站点在 5 下全部保留 |
+| `learn_batch` | 0（不限） | **60** | 实测候选可达 803 条，不限批一轮要几十分钟并占满 600 秒时间预算。60 条约 40 秒一轮 |
+
+#### ④ 页面（`general.lua`，域名 tab 的「自动补全」）
+
+10 个输入控件 + 4 个按钮（立即学习 / 演练 / 清空计数器 / 清空已学规则）
++ 3 个状态区（学习层状态 6 行 / 已学域名表带「钉住」「移除」/ 已学 IP 段表带「移除」）。
+
+「钉住」把自动条目转成手写（学习永不覆盖）；「移除」只删两侧自动列表。
+行内操作走独立路由 `admin/services/dns_chain/learn`（CBI 的 Button 无法按行区分），
+所有参数经白名单校验 + `M.shell_quote` 转义 —— 域名来自客户机可控的日志。
+
+### 修复 — 「客户机链路诊断」的 11 个控件保存后毫无效果
+
+**这是 v0.23.0 遗留的既有缺陷，本次一并修正。**
+
+该 section 原写成 `m:section(TypedSection, "dnschain", ...)`，而
+`TypedSection` 按**类型**匹配 section，配置里类型为 `dnschain` 的只有 `main`。
+浏览器实测（2026-10-25）该节控件的 DOM name 是
+`cbid.dnschain.main.fail_threshold` 而非 `client_diag` ——
+于是保存写进 `main.*`，而脚本读 `client_diag.*` 全部读不到，改动完全无效。
+
+改为 `TypedSection, "client_diag"`。同时给 `check-dnschain-lua.py` 补了
+`call` 桩（controller 新增了行内操作路由）。
+
+### 修复 — 学习过程的四处实测缺陷
+
+| 缺陷 | 症状 | 修法 |
+|---|---|---|
+| IPv6 `/64` 派生把压缩写法拼成 `2408:4001:f00:::/64`（三个冒号） | `nft -c` 报 `syntax error`，`apply_cidr` 按设计「校验失败保持原状」→ **集合永远是空的**，页面却显示 `CIDR_V6=90` | 先把 `::` 展开成 8 段再取前 4 段 |
+| `dc_learn_apply_cidr` 在 `dc_learn_hook` 之前调用 | 首次运行时集合还不存在 → 直接 `return 0`。结果 `TABLE=1 / HOOKED=1 / V4_COUNT=0 / CIDR_V4=53`：文件有 53 条、集合是空的 | 三步顺序改为 hook → derive → apply |
+| `learn-cidr.txt` 权限 0600 | rpcd 读不到 → 页面「已学 IP 段」全空、状态显示 `v4 0 / v6 0`，而文件里有 221 行 | `chmod 644`（与查询流水同一类坑） |
+| `parse_kv` 正则 `^([A-Z_]+)=` 不认数字 | `CIDR_V4` / `V4_COUNT` / `HOOK_HITS` 整键被丢弃 → 页面显示 `v4 0 / v6 0`，而实际 123 条 | 改为 `^([A-Z0-9_]+)=` |
+
+### 修复 — 学习会打挂页面并堆叠进程
+
+实测一轮学习 68~603 秒，而 LuCI 按钮走 CGI：超时后浏览器报 **502 Bad Gateway**，
+可进程还在跑 —— 用户以为失败又点一次，实测出现 **6 个并发 learn 进程**。
+另有一次页面在整个 8 分钟里只显示「进行中」而日志 0 字节，无法区分「在跑」与「卡死」。
+
+三条处置：
+
+1. **互斥锁** `.learn.lock`（目录锁，超 600 秒视为残留），第二个实例直接退出；
+2. **按钮只启动不等待**：`learn-start` 用 `setsid` fork 到独立会话
+   （脱离 CGI 进程组，否则被连带杀掉、日志 0 字节、锁残留），立即返回；
+3. **进度逐条落盘** `learn-progress.state`，页面显示「61/595（10%），正在实测 xxx」。
+
+### 性能 — 候选筛选从 109 秒降到 480 毫秒
+
+原实现 `awk | sort | while read dom; do ... done`，循环体每条域名 fork 3~4 个进程
+（`grep -qxF`、父域逐级 `grep`、查重试队列的 `awk`）。
+实测 647 个候选 **109690 ms** —— 而这只是学习一轮的**准备阶段**。
+
+改为单遍 awk（读三个「已覆盖」文件建哈希、读重试队列建哈希、扫计数器），
+同样 647 条降到 **480 ms**（提速 227 倍）。
+`cmd_learn` 里第二处同类循环（统计「低于阈值 / 已覆盖」）一并改成单遍 awk。
+
+### 实测数据（路由器 2026-10-25/26）
+
+| 项 | 值 |
+|---|---|
+| nft 集合灌入 500 / 2000 / 10000 / 50000 条 | 20 / 60 / 280 / 1380 ms |
+| `learn --dry-run`（阈值 3，不限批） | 候选 803，判定直连 505，603 秒（触 600 秒预算） |
+| `learn`（阈值 5 + batch 60） | 学到 60 条，116 秒 |
+| `learn-cidr.txt` | v4 146 条 / v6 100 条 |
+| `dc_learn4` / `dc_learn6` | 146 / 100 个元素 |
+| `split.conf` | 学到的域名 100% 生成 `server=/域名/127.0.0.1#5353` |
+| 挂钩命中 | 随真实流量增长（观测到 499 → 577 包） |
+
+### 被实测推翻的两个设计（详见 ADR-0010 §3）
+
+1. **独立 `inet dc_learn` 表不可行** —— nft 1.1.6 不支持跨表引用集合：
+   `@dc_learn.s4` / `@inet.dc_learn.s4` / `@dc_learn/s4` / `dc_learn@s4`
+   四种写法全部报错，跨表 `jump` 同样失败。故集合建在 `ss_spec` 内，
+   代价是 `ssr-rules:1174` 的整表 delete 会连它一起删 —— 由每轮收敛重建。
+2. **更早的 nat 链 `accept` 拦不住后面的 redirect** —— 在 `priority filter - 2`
+   建 nat output 链并 `accept` 后，`ss_spec_wan_fw` 的 redirect 计数器照旧增长
+   （257→258）。故挂钩只能插在 `ss_spec_wan_ac` 内部。
+
+### 验证
+
+`verify-dnschain-domains.sh` 新增 20 条断言（第 15 节，148 → 168 条）：
+learn 子命令与 `--dry-run`、读 `db-domains.txt`、写入前 `del_list` 另一侧、
+挂钩幂等标记、集合必须在 `ss_spec` 内、挂钩必须 `insert` 到首位、挂钩必须带 `counter`、
+灌入前 `nft -c` 校验、`learn_max_*` 的 0 = 不限语义、清空按钮、
+关开关时的「仍在生效」提示、L4 阈值独立、11 个配置项齐全、
+控件绑定 `client_diag` 段、互斥锁 + `setsid`、进度逐条落盘、
+`learn-cidr.txt` 权限、行内操作路由、`side` 白名单、候选筛选单遍 awk。
+
+全量回归：verify 168 OK / 0 FAIL、lua 123、diagrams 88、i18n 501 无缺失、
+ci-sim RC=0、dash/luac 全过。浏览器实测（后台 headless）：
+10 控件可保存、2 张表有数据（180 / 246 行）、4 按钮生效、6 行状态正确、
+进度实时刷新（61/595 · 10%）。
+
+版本：`PKG_VERSION` 1.9.0 → **1.10.0**（新功能，MINOR）；
+`general.lua` 的静态资源 `?v=1.10.0`。
+
+
 ## [v0.23.0] - 2026-10-25
 
 ### 新增 — 客户机链路诊断与分级自愈

@@ -418,6 +418,82 @@ _反例_：不是「设备的唯一标识」—— 稳定的标识是 IP（租�
 _Avoid_: 假 MAC、虚拟 MAC
 
 ---
+
+## 自动补全
+
+> v0.24.0 新增。设计依据 [`docs/adr/0010-auto-learn-domain-cidr.md`](docs/adr/0010-auto-learn-domain-cidr.md)。
+> 这 7 个术语都在回答同一个问题的不同侧面：**怎么在没有可靠地理库的情况下，
+> 判出一个域名该走直连还是代理。**
+
+**自动补全**（auto-learn）：
+从**客户机实际收发**推导域名归属的机制。判据是「这台设备真的访问通了」，
+不是地理库。产出一层域名归属（`dom_auto_*`）与一层 IP 段（`dc_learn4`/`dc_learn6`）。
+_落点_：`files/usr/bin/dnschain-client-diag` 的 `cmd_learn`；
+`files/usr/share/dnschain/dnschain.sh` 的 `dc_learn_hook` / `dc_learn_apply_cidr`
+_反例_：不是「按国家 IP 库判归属」—— 实测 112 个域名里 79 个的答案 IP
+不在 `china` 集合，APNIC 官方数据对其中 110 个也查不到（`china` 只有 1333 条区间）。
+_Avoid_: 自动学习、智能识别、AI 分流
+
+**学习计数**（learn counter）：
+「某域名被某台客户机查过几次」的累计记录，用于判定是否够格成为候选。
+格式 `<域名>|<客户机>|<次数>|<首次>|<最近>`，落 `/var/run/dnschain/learn-counters.txt`。
+**同一域名在 3 台机器各查 1 次，与 1 台机器查 3 次，是两种不同强度的证据** ——
+判据取**单机最大值**而非总和。
+_落点_：`_learn_accumulate`（累加）、`_learn_candidates`（按阈值筛）
+_反例_：不是「流水表」—— 流水只留 600 秒（`flow_retain_sec`），
+而累计要跨多轮，故必须单独一张表。
+_Avoid_: 访问统计、热度
+
+**学习游标**（learn cursor）：
+流水表已消费到的位置，按**客户机**分别记 `<客户机>|<epoch>`。
+作用是「同一批流水不会被重复累加」。
+_落点_：`_learn_accumulate` 的第二段（只升不降）
+_反例_：不能记单一游标 —— 不同客户机的流水交错写入，
+单游标会漏掉「较晚写入但 epoch 较小」的记录。
+_反例_：不能因为流水被修剪就让游标**回退** —— 下一轮会把已计过的记录再计一遍，次数虚高。
+_Avoid_: 偏移量、指针
+
+**待重试队列**（learn retry）：
+「两条链都不通」的域名及其已试轮数，落 `/var/run/dnschain/learn-retry.txt`。
+连续 3 轮都不通就**放弃实测**（`_LEARN_GIVEUP_MAX`），否则每轮都会重新测一遍。
+_落点_：`_learn_retry_bump` / `_learn_retry_drop`
+_反例_：不是「失败记录」—— 客户机链路诊断的 `client-fail.log` 记的是**客户机查询失败**，
+本队列记的是**学习探测两条链都不通**，两者数据源与用途都不同。
+_Avoid_: 黑名单、失败列表
+
+**IP 段归属**（learn CIDR）：
+把已学到的**国内**域名解析成 CIDR 后写进直连豁免集合的机制。
+IPv4 取 `/24`、IPv6 取 `/64`。落 `/var/etc/dnschain/learn-cidr.txt`
+（每行 `<4|6> <cidr>`），再单事务灌入 `ss_spec` 的 `dc_learn4` / `dc_learn6`。
+_落点_：`dc_learn_derive_cidr`（派生）、`dc_learn_apply_cidr`（灌入）
+_反例_：**只处理国内侧** —— 学到国外的域名不能进这个集合，
+那会把本该走代理的 IP 改成直连。
+_反例_：取更细（`/32`）会让相邻 IP 漏掉；取更粗（`/16`）会误伤整片。
+_Avoid_: IP 库、网段表
+
+**链路实测**（link probe）：
+学习过程中对候选域名做的一次判定：分别经直连链（`:5353`）与代理链（`:5336`）
+解析，按可达性与答案是否一致判出归属。
+_落点_：`_learn_judge`；底层 `dc_probe_chain` / `dc_dns_first_addr`
+_反例_：不是「TCP 探测」—— 那是 `dnschain-client-diag probe` 的职责（第④段链路），
+学习只用 DNS 级探测，因为 TCP 探测每个域名要 3 秒超时，候选上千时不可行。
+_Avoid_: 健康检查、连通性测试
+
+**学习表**（learn set）：
+存放学到的 IP 段的 nft 集合，名为 `dc_learn4` / `dc_learn6`，
+**建在 `ss_spec` 表内**，并在 `ss_spec_wan_ac`（v4）与 `ss_spec6_tcp`（v6）
+的**最前面**插一条带 `_DC_LEARN_HOOK_` 标记的 `counter return` 规则。
+_落点_：`dc_learn_hook`（建集合 + 插挂钩）、`dc_learn_apply_cidr`（灌元素）
+_反例_：**不能建成独立表** —— 实测 nft 1.1.6 不支持跨表引用集合
+（`@dc_learn.s4` / `@inet.dc_learn.s4` / `@dc_learn/s4` / `dc_learn@s4` 四种写法
+全部报错，跨表 `jump` 同样失败），独立表里的集合无法被 `ss_spec_wan_ac` 引用。
+_反例_：**不能在更早的 nat 链里 `accept`** —— 实测在 `priority filter - 2` 建 nat output 链
+并 accept 后，`ss_spec_wan_fw` 的 redirect 计数器照旧增长（257→258），拦不住。
+_反例_：**挂钩不能追加到链尾** —— 前面的规则会 `jump ss_spec_wan_fw` 直接 redirect，
+链尾的 `return` 永远轮不到。
+_Avoid_: 学习集合、豁免表、白名单表
+
+---
 ## 已废弃术语
 
 以下条目在旧版 `GLOSSARY.md` 中存在，现已删除或改写。保留说明是为了让读到旧文档的人

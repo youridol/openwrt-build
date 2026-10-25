@@ -627,6 +627,388 @@ dc_fix_wan_ac_fallback() {
 	return 0
 }
 
+# ============================================================
+# 自动补全：学到的 IP 段 → 直连兜底集合（v0.24.0，ADR-0010）
+# ------------------------------------------------------------
+# 要解决的问题（实测 2026-10-25）：
+#   客户机实际访问通的国内站点，有 70% 的答案 IP 判不出归属 ——
+#   112 个实测域名里 79 个的 IP 不在 china 集合，APNIC 官方数据
+#   对其中 110 个也查不到（china 集合只有 1333 条区间）。
+#   漏判的国内 IP 被送去海外节点，国内 CDN 拒绝海外访问 → 白屏。
+#
+# 分两层：
+#   域名层  dom_auto_domestic / dom_auto_foreign（由 client-diag learn 写入）
+#           → 走 split.conf 的 server= 规则，决定「问哪条链」
+#   IP 层   本文件的 learn-cidr.txt → dc_learn4 / dc_learn6 集合
+#           → 在 ss_spec_wan_ac / ss_spec6_tcp **最前面** return，
+#             让「已证实可直连」的 IP 段不再被 redirect 到 :1234
+#
+# 为什么 IP 层要单独一层：域名层只管解析走哪条链，出站仍由
+#   ss_spec 的 IP 集合决定。域名学对了、IP 没覆盖，流量照样绕海外。
+#
+# ⚠️ 集合建在 ss_spec 表内而不是独立表，原因见上方 DNSCHAIN_LEARN_SET4
+#    常量处的实测记录（nft 不支持跨表引用）。
+# ============================================================
+
+# 学习集合是否存在
+# 用法: dc_learn_set_exists 4|6
+dc_learn_set_exists() {
+	case "$1" in
+		6) nft list set inet "$DNSCHAIN_LEARN_TABLE" "$DNSCHAIN_LEARN_SET6" >/dev/null 2>&1 ;;
+		*) nft list set inet "$DNSCHAIN_LEARN_TABLE" "$DNSCHAIN_LEARN_SET4" >/dev/null 2>&1 ;;
+	esac
+}
+
+# 集合里的元素条数（0 = 空集或不存在，恒输出一个整数）
+#
+# ⚠️ 不能用 `nft list set | grep -c '/24'`：auto-merge 会把相邻段
+#    合并成 `a-b` 区间，行数与元素数不再一致。实测
+#    `{ 203.0.113.0/24, 203.0.114.0/24 }` 会显示成 `203.0.113.0-203.0.114.255`
+#    （一行、一个元素）。故先剥出 elements={...} 再按逗号切。
+dc_learn_set_count() {
+	local raw n
+	if ! dc_learn_set_exists "$1"; then
+		echo 0
+		return 0
+	fi
+	case "$1" in
+		6) raw=$(nft list set inet "$DNSCHAIN_LEARN_TABLE" "$DNSCHAIN_LEARN_SET6" 2>/dev/null) ;;
+		*) raw=$(nft list set inet "$DNSCHAIN_LEARN_TABLE" "$DNSCHAIN_LEARN_SET4" 2>/dev/null) ;;
+	esac
+	n=$(printf '%s\n' "$raw" \
+		| tr -d ' \t\n' \
+		| sed -n 's/.*elements={//p' \
+		| sed 's/}.*//' \
+		| tr ',' '\n' \
+		| awk 'NF { c++ } END { print c + 0 }')
+	case "$n" in ''|*[!0-9]*) echo 0 ;; *) echo "$n" ;; esac
+}
+
+# 建学习集合 + 在 ss_spec 的入站链最前面插 return 挂钩
+#
+# 幂等：集合已存在就跳过创建；挂钩规则带 `_DC_LEARN_HOOK_` 标记，
+# 已在就不重复插。**每轮收敛都会调用**，因为 ssr-rules:1174 的
+# `nft delete table inet ss_spec` 会把集合与挂钩一起删掉。
+#
+# 返回 0 = 无需处理或已就绪；1 = 建失败（调用方据此报错）
+dc_learn_hook() {
+	local created
+
+	# SSR-Plus 未接管时整张 ss_spec 都不存在，没有可挂钩的链
+	dc_ss_spec_present || return 0
+	nft list chain inet "$DNSCHAIN_LEARN_TABLE" ss_spec_wan_ac >/dev/null 2>&1 || return 0
+
+	# ── IPv4 集合 ────────────────────────────────────────────
+	if ! dc_learn_set_exists 4; then
+		nft add set inet "$DNSCHAIN_LEARN_TABLE" "$DNSCHAIN_LEARN_SET4" \
+			'{ type ipv4_addr; flags interval; }' 2>/dev/null || return 1
+		created=1
+	fi
+
+	# ── IPv6 集合（只在 IPv6 代理链存在时建）────────────────
+	#
+	# 不能无条件建：IPv6 未启用时 ss_spec6_tcp 不存在，
+	# 建了集合也没有链引用它，只是白占内存并让状态显示「有表无挂钩」。
+	if nft list chain inet "$DNSCHAIN_LEARN_TABLE" ss_spec6_tcp >/dev/null 2>&1; then
+		if ! dc_learn_set_exists 6; then
+			nft add set inet "$DNSCHAIN_LEARN_TABLE" "$DNSCHAIN_LEARN_SET6" \
+				'{ type ipv6_addr; flags interval; }' 2>/dev/null || return 1
+			created=1
+		fi
+	fi
+
+	# ── IPv4 挂钩：插在 ss_spec_wan_ac **最前面** ───────────
+	#
+	# 为什么必须在最前面（而不是追加到末尾）：
+	#   链里前面的规则会 `jump ss_spec_wan_fw` 直接 redirect 到 :1234，
+	#   追加到末尾的 return 永远轮不到执行。
+	#   实测（2026-10-25）：插在首位后，1.1.1.1（在集合内）的
+	#   hook 计数器 +2 packets，而 ss_spec_wan_fw 的 redirect 计数不变；
+	#   集合外的 example.com 照旧被 redirect。
+	#
+	# ⚠️ 必须带 `counter`（v0.24.0 实测）：
+	#   不带 counter 时 `nft list chain` 的输出里没有 packets/bytes，
+	#   于是「挂钩到底有没有命中」无法观测 —— 实测一度以为挂钩失效，
+	#   实际是规则生效了但没有计数器可看。带 counter 后能直接读到
+	#   「豁免命中 N 次」，这也是页面显示挂钩是否真正起作用的依据。
+	if ! nft -a list chain inet "$DNSCHAIN_LEARN_TABLE" ss_spec_wan_ac 2>/dev/null \
+		| grep -q '_DC_LEARN_HOOK_'; then
+		nft insert rule inet "$DNSCHAIN_LEARN_TABLE" ss_spec_wan_ac \
+			ip daddr "@${DNSCHAIN_LEARN_SET4}" counter return \
+			comment "_DC_LEARN_HOOK_" 2>/dev/null || return 1
+		created=1
+	fi
+
+	# ── IPv6 挂钩：插在 ss_spec6_tcp 最前面 ─────────────────
+	#
+	# ss_spec6_tcp 里同样先有 `goto ss_spec6_redirect` 的兜底，
+	# 且它在最后一行 —— 但前面已有 `ip6 daddr @blacklist6 goto ...`，
+	# 所以 return 必须在首位才能优先于 blacklist6。
+	# 实测：插首位后 hook 计数器 +2、ss_spec6_redirect 计数不变。
+	if nft list chain inet "$DNSCHAIN_LEARN_TABLE" ss_spec6_tcp >/dev/null 2>&1; then
+		if ! nft -a list chain inet "$DNSCHAIN_LEARN_TABLE" ss_spec6_tcp 2>/dev/null \
+			| grep -q '_DC_LEARN_HOOK6_'; then
+			nft insert rule inet "$DNSCHAIN_LEARN_TABLE" ss_spec6_tcp \
+				ip6 daddr "@${DNSCHAIN_LEARN_SET6}" counter return \
+				comment "_DC_LEARN_HOOK6_" 2>/dev/null || return 1
+			created=1
+		fi
+	fi
+
+	[ -n "$created" ] && dnschain_log "自动补全：学习集合/挂钩已建立"
+	return 0
+}
+
+# 从 learn-cidr.txt 重建两个学习集合（单事务 nft -f）
+#
+# 单事务是硬要求（AGENTS 红线 8）：先 flush 再逐条 add 会在两条命令之间
+# 留出「集合是空的」窗口 —— 那时所有已学 IP 段失去直连豁免，
+# 流量突然绕海外，而下一毫秒又恢复。前端轮询与收敛器并发时必现。
+#
+# 文件格式：每行 `<4|6> <cidr>`。文件不存在时**什么都不做**
+# （不代表「学习结果为空」，而是「还没学过」）。
+dc_learn_apply_cidr() {
+	local f tmp n4 n6 max_cidr
+
+	f="$DNSCHAIN_LEARN_CIDR"
+	[ -f "$f" ] || return 0
+	dc_ss_spec_present || return 0
+	dc_learn_set_exists 4 || return 0
+
+	# 上限：0 = 不限（learn_max_cidr）
+	max_cidr=$(dc_get client_diag learn_max_cidr 0)
+	case "$max_cidr" in ''|*[!0-9]*) max_cidr=0 ;; esac
+
+	n4=$(awk '$1 == "4" && $2 != "" { print $2 }' "$f" | awk '!seen[$0]++' \
+		| { if [ "$max_cidr" -gt 0 ]; then head -n "$max_cidr"; else cat; fi; })
+	n6=$(awk '$1 == "6" && $2 != "" { print $2 }' "$f" | awk '!seen[$0]++' \
+		| { if [ "$max_cidr" -gt 0 ]; then head -n "$max_cidr"; else cat; fi; })
+
+	tmp=$(mktemp) || return 1
+	{
+		printf 'flush set inet %s %s\n' "$DNSCHAIN_LEARN_TABLE" "$DNSCHAIN_LEARN_SET4"
+		if [ -n "$n4" ]; then
+			printf 'add element inet %s %s { ' "$DNSCHAIN_LEARN_TABLE" "$DNSCHAIN_LEARN_SET4"
+			printf '%s' "$n4" | awk 'BEGIN{ ORS="" } { if (NR > 1) printf ", "; printf "%s", $0 }'
+			printf ' }\n'
+		fi
+		if dc_learn_set_exists 6; then
+			printf 'flush set inet %s %s\n' "$DNSCHAIN_LEARN_TABLE" "$DNSCHAIN_LEARN_SET6"
+			if [ -n "$n6" ]; then
+				printf 'add element inet %s %s { ' "$DNSCHAIN_LEARN_TABLE" "$DNSCHAIN_LEARN_SET6"
+				printf '%s' "$n6" | awk 'BEGIN{ ORS="" } { if (NR > 1) printf ", "; printf "%s", $0 }'
+				printf ' }\n'
+			fi
+		fi
+	} > "$tmp"
+
+	# 先校验再提交：nft -c 失败时集合保持原样，不会半灌入
+	if ! nft -c -f "$tmp" >/dev/null 2>&1; then
+		dnschain_log "ERROR: 学习集合的 nft 片段校验失败，保持原状（$(wc -l < "$f") 行来源）"
+		rm -f "$tmp"
+		return 1
+	fi
+	if ! nft -f "$tmp" 2>/dev/null; then
+		dnschain_log "ERROR: 灌入学习集合失败"
+		rm -f "$tmp"
+		return 1
+	fi
+	rm -f "$tmp"
+	return 0
+}
+
+# 把「已学到的国内域名」解析成 CIDR，写 learn-cidr.txt
+#
+# 只处理 dom_auto_domestic（自动学到的国内侧）：
+#   · 学到国内 = 客户机实际访问通了 = 这些 IP 可以直连 → 进豁免集合
+#   · 学到国外**不能**进这个集合，那会把本该走代理的 IP 改成直连
+#   · 手写 dom_domestic 不参与：用户手写的是「归属」，不是「实测证据」，
+#     而且手写列表可能很大，每轮全量解析会拖垮路由器
+#
+# IPv4 取 /24、IPv6 取 /64：与清单一致，也是「同一站点同一机房」的
+# 合理聚合粒度。取更细（/32）会让相邻 IP 漏掉，取更粗（/16）会误伤。
+dc_learn_derive_cidr() {
+	local doms tmo retries max_dom f4 f6 n i d ips ip prefix
+	local tmp
+
+	f4=$(mktemp) || return 1
+	f6=$(mktemp) || return 1
+
+	doms=$(dc_get_list dom_auto_domestic domain)
+	max_dom=$(dc_get client_diag learn_max_domains 0)
+	case "$max_dom" in ''|*[!0-9]*) max_dom=0 ;; esac
+	tmo=$(dc_get client_diag learn_timeout 3)
+	retries=$(dc_get client_diag learn_retries 3)
+
+	n=0
+	for d in $doms; do
+		[ -n "$d" ] || continue
+		if [ "$max_dom" -gt 0 ] && [ "$n" -ge "$max_dom" ]; then
+			break
+		fi
+		n=$((n + 1))
+
+		# A 记录 → /24
+		ips=$(dc_dns_addrs "$d" "127.0.0.1:$(dc_get main entry_port 5353)" a "$tmo" "$retries")
+		for ip in $ips; do
+			prefix=$(printf '%s' "$ip" | awk -F. '
+				NF == 4 && $1 ~ /^[0-9]+$/ && $2 ~ /^[0-9]+$/ &&
+				$3 ~ /^[0-9]+$/ && $4 ~ /^[0-9]+$/ &&
+				$1 <= 255 && $2 <= 255 && $3 <= 255 && $4 <= 255 {
+					print $1"."$2"."$3".0/24"
+				}')
+			[ -n "$prefix" ] && printf '4 %s\n' "$prefix" >> "$f4"
+		done
+
+		# AAAA 记录 → /64
+		#
+		# ⚠️ 必须先把 `::` 展开成 8 段再取前 4 段（v0.24.0 实测踩过）。
+		#
+		#   原实现是 `awk -F: 'NF >= 4 { print $1":"$2":"$3":"$4"::/64" }'`，
+		#   对 `2408:4001:f00::`（压缩写法）会得到
+		#       2408:4001:f00:::/64        ← 三个冒号
+		#   因为按 `:` 切分后第 4 段是**空串**，拼接时又多补了一个 `:`。
+		#   nft -c 直接报 `syntax error, unexpected /`，而
+		#   dc_learn_apply_cidr 的设计是「校验失败就保持原状」→
+		#   **集合永远是空的**，页面却显示 CIDR_V6=90 条有值。
+		#   这是「有数据但不生效」的典型形态，必须靠展开来根治。
+		ips=$(dc_dns_addrs "$d" "127.0.0.1:$(dc_get main entry_port 5353)" aaaa "$tmo" "$retries")
+		for ip in $ips; do
+			prefix=$(printf '%s\n' "$ip" | awk '
+				function derive64(a,    n, i, seg, lc, rc, cnt, L, R, full, out) {
+					if (a !~ /^[0-9a-fA-F:]+$/ || a !~ /:/) return ""
+
+					if (index(a, "::") > 0) {
+						sub(/::/, "\001", a)
+						n = split(a, seg, "\001")
+						lc = (seg[1] == "") ? 0 : split(seg[1], L, ":")
+						rc = (n > 1 && seg[2] != "") ? split(seg[2], R, ":") : 0
+						# `::` 至少代表一个全零段
+						if (lc + rc > 7) return ""
+						cnt = 0
+						for (i = 1; i <= lc; i++) full[++cnt] = L[i]
+						for (i = 1; i <= 8 - lc - rc; i++) full[++cnt] = "0"
+						for (i = 1; i <= rc; i++) full[++cnt] = R[i]
+					} else {
+						cnt = split(a, full, ":")
+						if (cnt != 8) return ""
+					}
+
+					out = ""
+					for (i = 1; i <= 4; i++) {
+						if (full[i] !~ /^[0-9a-fA-F]{1,4}$/) return ""
+						out = out (i > 1 ? ":" : "") full[i]
+					}
+					return out "::/64"
+				}
+				{ p = derive64($0); if (p != "") print p }')
+			[ -n "$prefix" ] && printf '6 %s\n' "$prefix" >> "$f6"
+		done
+	done
+
+	tmp=$(mktemp) || { rm -f "$f4" "$f6"; return 1; }
+	{
+		awk '!seen[$0]++' "$f4"
+		awk '!seen[$0]++' "$f6"
+	} | sort -u > "$tmp"
+	rm -f "$f4" "$f6"
+
+	mkdir -p "$DNSCHAIN_RUN_DIR" 2>/dev/null
+	mv -f "$tmp" "$DNSCHAIN_LEARN_CIDR" || return 1
+
+	# ⚠️ 必须 chmod 644（v0.24.0 实测踩过）。
+	#
+	#   mktemp 建的文件是 **0600 root:root**，而 LuCI 的 rpcd 以受限身份
+	#   读文件 → 页面「已学 IP 段」表全空、状态显示「v4 0 / v6 0」，
+	#   而实际文件里有 221 行。这是与查询流水完全相同的坑
+	#   （见本仓库 _diag_record_flow 的注释），凡是被页面读取的
+	#   运行时文件都必须放开读权限。
+	chmod 644 "$DNSCHAIN_LEARN_CIDR" 2>/dev/null
+	return 0
+}
+
+# 学习层的实际运行状态（直接查 nft，不用状态文件）
+#
+# 输出 KEY=VALUE，供页面与 learn-status 子命令解析：
+#   TABLE=0/1      学习集合是否已建立
+#   V4_COUNT=N     IPv4 元素条数
+#   V6_COUNT=N     IPv6 元素条数
+#   HOOKED=0/1     ss_spec_wan_ac 是否已挂 return 挂钩
+#   HOOK_HITS=N    挂钩命中次数（0 = 挂了但一次都没命中，说明集合与实际流量不符）
+#   CIDR_V4=N      learn-cidr.txt 里的 v4 段数（来源侧，与 nft 侧对照）
+#   CIDR_V6=N      learn-cidr.txt 里的 v6 段数
+#
+# ⚠️ HOOK_HITS 是判断「挂钩是否真的起作用」的唯一依据：
+#    HOOKED=1 只说明规则在，不代表它命中过。实测一度出现
+#    「HOOKED=1、集合有 123 条、但客户机流量一次都没豁免」的情形 ——
+#    原因是集合里是 /24 而客户机访问的是同段其它 IP，或挂钩被插到了
+#    永不执行的位置。有 HOOK_HITS 才能把这两种情况分开。
+dc_learn_status() {
+	local hooked=0 hits=0
+
+	if dc_learn_set_exists 4; then
+		printf 'TABLE=1\n'
+	else
+		printf 'TABLE=0\n'
+	fi
+
+	printf 'V4_COUNT=%s\n' "$(dc_learn_set_count 4)"
+	printf 'V6_COUNT=%s\n' "$(dc_learn_set_count 6)"
+
+	if dc_ss_spec_present; then
+		local chain
+		chain=$(nft -a list chain inet "$DNSCHAIN_LEARN_TABLE" ss_spec_wan_ac 2>/dev/null \
+			| grep '_DC_LEARN_HOOK_')
+		if [ -n "$chain" ]; then
+			hooked=1
+			hits=$(printf '%s\n' "$chain" \
+				| sed -n 's/.*counter packets \([0-9]*\).*/\1/p' | head -1)
+			case "$hits" in ''|*[!0-9]*) hits=0 ;; esac
+		fi
+	fi
+	printf 'HOOKED=%s\n' "$hooked"
+	printf 'HOOK_HITS=%s\n' "$hits"
+
+	printf 'CIDR_V4=%s\n' "$(dc_count_lines '^4 ' "$DNSCHAIN_LEARN_CIDR")"
+	printf 'CIDR_V6=%s\n' "$(dc_count_lines '^6 ' "$DNSCHAIN_LEARN_CIDR")"
+}
+
+# 清空学习层
+#
+# 用法: dc_learn_clear rules|counter
+#   rules    清 dom_auto_* + learn-cidr.txt + 两个集合（彻底重置）
+#   counter  只清计数器与游标（client-diag 侧的文件，见该脚本）
+dc_learn_clear() {
+	local what
+	what="$1"
+
+	case "$what" in
+		rules) ;;
+		counter) return 0 ;;   # 计数器不归本库管，由调用方处理
+		*) return 1 ;;
+	esac
+
+	uci -q delete "dnschain.dom_auto_domestic.domain" 2>/dev/null
+	uci -q delete "dnschain.dom_auto_foreign.domain" 2>/dev/null
+	uci -q commit dnschain 2>/dev/null
+
+	rm -f "$DNSCHAIN_LEARN_CIDR" 2>/dev/null
+
+	# 集合清空（表/集合不存在时视为已清）
+	if dc_learn_set_exists 4; then
+		nft flush set inet "$DNSCHAIN_LEARN_TABLE" "$DNSCHAIN_LEARN_SET4" 2>/dev/null
+	fi
+	if dc_learn_set_exists 6; then
+		nft flush set inet "$DNSCHAIN_LEARN_TABLE" "$DNSCHAIN_LEARN_SET6" 2>/dev/null
+	fi
+
+	# 让手写/自动列表的派生物立即跟上
+	dc_gen_custom_lists >/dev/null 2>&1
+	dc_gen_dnsmasq_split >/dev/null 2>&1
+	dnschain_log "自动补全：已清空全部已学规则"
+	return 0
+}
+
 # ------------------------------------------------------------
 # 读取运行时 ss_spec_output 的 TCP 端口集（用于上游端口校验）
 # 输出形如 "22 80 143 443 465 587 853 993 995 9418"
@@ -734,6 +1116,35 @@ DNSCHAIN_DB_DOMAINS="${DNSCHAIN_RUN_DIR}/db-domains.txt"
 DNSCHAIN_CUSTOM_DOM="${DNSCHAIN_RUN_DIR}/custom-domestic.txt"
 DNSCHAIN_CUSTOM_FOR="${DNSCHAIN_RUN_DIR}/custom-foreign.txt"
 DNSCHAIN_HEALTH_STATE="${DNSCHAIN_STATE_DIR}/health.state"
+
+# ── 自动补全（v0.24.0，ADR-0010）──────────────────────────────
+#
+# 学到的 CIDR，每轮重建。一行一条，`4 <cidr>` / `6 <cidr>`，
+# 前缀用来区分地址族 —— 混在一列里会让 IPv6 段被当成 IPv4 灌进 v4 集合，
+# 而 nft 对类型不符的元素是**静默跳过**（不报错），
+# 于是「学到了一堆 IP 段但一条都不生效」，页面还显示有值。
+DNSCHAIN_LEARN_CIDR="${DNSCHAIN_RUN_DIR}/learn-cidr.txt"
+
+# ⚠️ 集合**必须**建在 ss_spec 表内，不能建独立表（2026-10-25 路由器实测）。
+#
+#   清单原设计是「独立 inet dc_learn 表 + 在 ss_spec_wan_ac 里引用」。
+#   实测 nft 1.1.6 **不支持跨表引用集合**，四种写法全部失败：
+#     @dc_learn.s4      → Error: No such file or directory
+#     @inet.dc_learn.s4 → Error: No such file or directory
+#     @dc_learn/s4      → Error: No such file or directory
+#     dc_learn@s4       → Error: unknown raw payload base
+#   跨表 jump 链同样失败（add rule ... jump dctest.c1 → No such file or directory）。
+#
+#   也验证过「在更早的 nat 链 accept 能否阻止后面的 redirect」——**不能**：
+#   在 priority filter - 2 建 nat output 链并 accept 1.1.1.1 之后，
+#   ss_spec_wan_fw 的 redirect 计数器仍从 257 涨到 258（照旧被代理）。
+#   所以挂钩只能插在 ss_spec_wan_ac **内部**，集合也就只能在 ss_spec 里。
+#
+#   代价：ssr-rules:1174 的 `nft delete table inet ss_spec` 会把集合一起删掉。
+#   处置：每轮收敛重建（dc_learn_hook 幂等），页面显示挂钩状态。
+DNSCHAIN_LEARN_SET4="dc_learn4"
+DNSCHAIN_LEARN_SET6="dc_learn6"
+DNSCHAIN_LEARN_TABLE="ss_spec"
 
 # ------------------------------------------------------------
 # 域名规范化：去首尾空白、去尾部点、转小写
@@ -1821,6 +2232,68 @@ dc_dns_first_addr() {
 	rm -f "$ofile"
 
 	printf '%s\n' "$out" | sed -n 's/^Address: \([0-9a-fA-F.:]*\)$/\1/p' | head -1
+}
+
+# 取**全部**解析出的地址，每行一个（v0.24.0，自动补全用）
+#
+# 与 dc_dns_first_addr 的区别：那个只取第一条，用于「两条链答案是否一致」；
+# 本函数要全部，因为一个域名常同时解析到多个 /24（CDN），
+# 只取第一条会让其余网段漏进豁免集合 → 同一站点的部分请求仍绕海外。
+#
+# 带重试：跨境链路的单次 UDP 丢包很常见，一次失败就当「没有地址」
+# 会让学习结果随网络抖动漂移。
+#
+# 解析要点（BusyBox nslookup 的实际输出形态，实测）：
+#   Server:		127.0.0.1
+#   Address:	127.0.0.1:5353      ← 服务器行，带端口，必须排除
+#   Non-authoritative answer:
+#   Name:	example.com
+#   Address: 93.184.216.34      ← 答案行，不带端口
+# 故判据是「带 `:端口` 后缀的排除」，不是「按行号跳过前两行」——
+# 输出里 Name: 行的数量随 CNAME 链变化，行号不可靠。
+#
+# 用法: dc_dns_addrs <域名> <服务器[:端口]> [qtype] [超时秒] [重试次数]
+dc_dns_addrs() {
+	local name server qtype tmo retries i ofile out n
+
+	name="$1"; server="$2"; qtype="${3:-a}"; tmo="${4:-2}"; retries="${5:-0}"
+
+	case "$retries" in ''|*[!0-9]*) retries=0 ;; esac
+
+	i=0
+	while [ "$i" -le "$retries" ]; do
+		ofile=$(mktemp) || return 0
+		if [ "$qtype" = "a" ]; then
+			dc_run_timeout "$tmo" "$ofile" nslookup "$name" "$server" >/dev/null
+		else
+			dc_run_timeout "$tmo" "$ofile" nslookup "-type=${qtype}" "$name" "$server" >/dev/null
+		fi
+		out=$(cat "$ofile" 2>/dev/null)
+		rm -f "$ofile"
+
+		n=$(printf '%s\n' "$out" | awk -v fam="$qtype" '
+			/^Address:/ {
+				a = $0
+				sub(/^Address:[ \t]*/, "", a)
+				sub(/[ \t]+$/, "", a)
+				# 服务器行：<ip>:<port> 或 [<v6>]:<port>
+				if (a ~ /^([0-9]{1,3}\.){3}[0-9]{1,3}:[0-9]+$/) next
+				if (a ~ /^\[.*\]:[0-9]+$/) next
+				if (a == "") next
+				is6 = (a ~ /:/)
+				if (fam == "aaaa") { if (!is6) next }
+				else { if (is6) next }
+				if (seen[a]++) next
+				print a
+			}')
+
+		if [ -n "$n" ]; then
+			printf '%s\n' "$n"
+			return 0
+		fi
+		i=$((i + 1))
+	done
+	return 0
 }
 
 # ------------------------------------------------------------

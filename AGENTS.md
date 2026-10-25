@@ -20,7 +20,7 @@
 | `patches/luci-app-trafficctl/*.patch` | trafficctl 相对上游的差分记录（**不参与构建**，供跟进上游 + CI 一致性校验） | 由 `tools/regen-trafficctl-patches.py` 生成，勿手改 |
 | `tools/sync-trafficctl.sh` | 升级 trafficctl 到指定上游 tag（覆盖包目录 + 重算 patch + 回放校验） | 直接用 |
 | `tools/check-trafficctl-i18n.py` | 校验中文翻译覆盖率；`--write-pot` 重生成 pot 模板 | 直接用 |
-| `tools/verify-dnschain-domains.sh` | 域名归属与分流规则的 148 条契约断言（CI 与本地同一份；§12 是性能不变量） | 直接用 |
+| `tools/verify-dnschain-domains.sh` | 域名归属与分流规则的 204 条契约断言（CI 与本地同一份；§12 是性能不变量，§15 是自动补全） | 直接用 |
 | `tools/check-dnschain-lua.py` | 用 lupa（真实 Lua）跑语法 + 模型 + **真实渲染页面每个 `cfgvalue()`** | 直接用 |
 | `tools/render-dnschain-diagrams.py` | 两张思维导图的纯几何校验 + 输出可打开的 HTML 预览 | 直接用 |
 | `tools/extract-dnschain-i18n.py` | 提取 `translate()` 中文并比对 PO（`--write` 追加缺失） | 直接用 |
@@ -214,7 +214,7 @@ LAN 客户端
 
 ### 4.0 ⚠️ `dnschain` 框架的硬约束
 
-> **全表 52 条在 [`docs/runtime/constraints.md`](docs/runtime/constraints.md) —— 改这一块之前必读，本文件不再重复。**
+> **全表 64 条在 [`docs/runtime/constraints.md`](docs/runtime/constraints.md) —— 改这一块之前必读，本文件不再重复。**
 
 v0.10.0 起 `chinadns-ng` 已移除（`docs/adr/0005-remove-chinadns-ng.md`），改为
 「双 dnsproxy 实例 + dnsmasq 分流」：
@@ -226,7 +226,7 @@ dnsmasq:53（唯一缓存 + 唯一分流层）
   └─ nftset=/国外域名/4#inet#ss_spec#blacklist   解析结果写入代理 IP 集
 ```
 
-**最容易踩的 8 条**（完整 52 条见 `docs/runtime/constraints.md`）：
+**最容易踩的 8 条**（完整 64 条见 `docs/runtime/constraints.md`）：
 
 | # | 约束 | 违反的后果 |
 |---|---|---|
@@ -255,9 +255,9 @@ dnsmasq:53（唯一缓存 + 唯一分流层）
 **改这一块之后必须跑**：
 
 ```sh
-sh tools/verify-dnschain-domains.sh          # 148 条契约断言（CI 也跑）
-python3 tools/check-dnschain-lua.py          # 108 条（需 PYTHONIOENCODING=utf-8）
-python3 tools/render-dnschain-diagrams.py    # 54 条
+sh tools/verify-dnschain-domains.sh          # 204 条契约断言（CI 也跑）
+python3 tools/check-dnschain-lua.py          # 123 条（需 PYTHONIOENCODING=utf-8）
+python3 tools/render-dnschain-diagrams.py --check   # 88 条
 python3 tools/extract-dnschain-i18n.py       # 中文文案完整性
 sh tools/verify-dnschain-ci-sim.sh           # 复现 CI 的目录场景
 ```
