@@ -566,12 +566,19 @@ if [ -f "$SSR_INIT" ] && ! grep -q '修复 v0.8.4' "$SSR_INIT"; then
 		  printf '\t\t\t# 保留 53 时 v2ray 会为每个被 tproxy 的 DNS 打开一个 UDP socket 且\n'
 		  printf '\t\t\t# 不释放，实测 50 秒内从 1 个涨到 246 个并全部绑定 192.168.3.254:53，\n'
 		  printf '\t\t\t# 抢走 dnsmasq 的 DNS 包 → 客户机连 baidu 都无法解析。\n'
-		  printf '\t\t\tproxyport="-m multiport --dports 22,587,465,995,993,143,80,443,853,9418"\n'
+		  printf '\t\t\t#\n'
+		  printf '\t\t\t# [修复 v0.23.1] 加入 65533。\n'
+		  printf '\t\t\t# 实测案例：cc.sefan.pw 主域名正常，但页面内容全在\n'
+		  printf '\t\t\t# cdn.sofan.one:65533 的 iframe 里。该端口不在列表 →\n'
+		  printf '\t\t\t# 客户机流量直连出网 → 被墙超时 → 白屏。\n'
+		  printf '\t\t\t# 从路由器本机测能通（走 OUTPUT 链），所以只看路由器\n'
+		  printf '\t\t\t# 永远发现不了 —— 必须从客户机侧验证。\n'
+		  printf '\t\t\tproxyport="-m multiport --dports 22,587,465,995,993,143,80,443,853,9418,65533"\n'
 		  tail -n +$((_pl + 1)) "$SSR_INIT"
 		} > "${SSR_INIT}.tmp"
 		mv "${SSR_INIT}.tmp" "$SSR_INIT"
 		chmod +x "$SSR_INIT"
-		log "init.d/shadowsocksr: 已从 tproxy 端口列表移除 53"
+		log "init.d/shadowsocksr: 已从 tproxy 端口列表移除 53，并加入 65533"
 	else
 		log "init.d/shadowsocksr: 未找到含 53 的 proxyport 行（可能已修）"
 	fi

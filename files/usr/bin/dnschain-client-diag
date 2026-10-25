@@ -797,6 +797,116 @@ cmd_flow() {
 }
 
 # ------------------------------------------------------------
+# probe：主动探测「DNS 通了但 TCP 不通」的域名（第 ④ 段）
+#
+# 这是 ADR-0009 二期才计划的能力，但用户实测遇到了具体案例：
+#   cc.sefan.pw        DNS 正常 → 主域名能开
+#   cdn.sofan.one:65533  DNS 正常 → TCP 被墙 → 页面白屏
+#
+# 光看 DNS 日志永远发现不了这类问题：所有查询都返回 ok。
+# 必须**主动连一次**目标 IP 的端口才能区分「通」和「被墙」。
+#
+# 输出：<域名>|<IP>|<端口>|<状态>|<耗时ms>
+#   状态：ok / timeout / refused / dnsfail
+# ------------------------------------------------------------
+cmd_probe() {
+	local dom port tmo ips ip st t0 t1 ms
+	dom="$1"
+	port="${2:-443}"
+	tmo="${3:-3}"
+
+	case "$port" in ''|*[!0-9]*) port=443 ;; esac
+	case "$tmo" in ''|*[!0-9]*) tmo=3 ;; esac
+
+	[ -n "$dom" ] || return 1
+
+	# 解析（经本机 dnsmasq，走真实分流路径）
+	ips=$(nslookup "$dom" 127.0.0.1 2>/dev/null | \
+		awk '/^Address: / { print $2 }' | grep -v '^127\.' | head -4)
+
+	if [ -z "$ips" ]; then
+		printf '%s|-|%s|dnsfail|0\n' "$dom" "$port"
+		return 1
+	fi
+
+	# 逐个 IP 试连（任一通即算通）
+	#
+	# ⚠️ 探测方式经过实测筛选，三种「看起来能用」的都不行：
+	#
+	#   nc -z -w N <ip> <port>   本机 BusyBox nc 只支持 `nc [IPADDR PORT]`，
+	#                            没有 -z/-w，传了参数直接报 Usage 并返回 1
+	#                            → 所有域名都被误判成 timeout（实测踩过：
+	#                            cc.sefan.pw 明明 200，却报 timeout）
+	#   /dev/tcp/<ip>/<port>     ash 未编译该特性，重定向失败 rc=1
+	#   wget --spider            需要 Host/SNI，裸 IP 探测失败 rc=4
+	#
+	#   唯一可靠：`nc <ip> <port> </dev/null` 裸连，外面套 `timeout`。
+	#   rc=0 说明 TCP 握手成功（不看应用层）。
+	for ip in $ips; do
+		t0=$(date +%s)
+		if timeout "$tmo" sh -c "nc $ip $port </dev/null >/dev/null 2>&1"; then
+			st="ok"
+		else
+			# 区分不了 refused 与 timeout（BusyBox nc 不返回细因），
+			# 但对诊断够用：两者都意味着「这个 CDN 用不了」。
+			st="timeout"
+		fi
+		t1=$(date +%s)
+		ms=$(( (t1 - t0) * 1000 ))
+
+		printf '%s|%s|%s|%s|%s\n' "$dom" "$ip" "$port" "$st" "$ms"
+
+		# 一个通就够了
+		[ "$st" = "ok" ] && return 0
+	done
+
+	return 1
+}
+
+# ------------------------------------------------------------
+# cdncheck：扫描某个客户机最近访问过的域名，找出「DNS 通但 TCP 不通」的
+#
+# 输出：<域名>|<IP>|<端口>|<状态>
+#
+# 用法：cdncheck [IP] [条数]
+#   不带 IP = 扫全部客户机最近访问的域名
+# ------------------------------------------------------------
+cmd_cdncheck() {
+	local ip limit win now cutoff doms
+	ip="$1"
+	limit="${2:-30}"
+
+	case "$limit" in ''|*[!0-9]*) limit=30 ;; esac
+	[ "$limit" -gt 100 ] 2>/dev/null && limit=100
+
+	win=$(dc_get client_diag flow_retain_sec 600)
+	now=$(date +%s)
+	cutoff=$((now - win))
+
+	[ -f "$DIAG_FLOW_LOG" ] || return 0
+
+	# 取最近访问过的、**解析成功**的域名（ok 或 nodata 都说明 DNS 层通了）
+	# 去重后取前 N 个
+	if [ -n "$ip" ]; then
+		doms=$(awk -F'|' -v i="$ip" -v c="$cutoff" \
+			'$2 == i && $1 >= c && ($5 == "ok" || $5 == "nodata") { print $3 }' \
+			"$DIAG_FLOW_LOG" | awk '!seen[$0]++' | head -n "$limit")
+	else
+		doms=$(awk -F'|' -v c="$cutoff" \
+			'$1 >= c && ($5 == "ok" || $5 == "nodata") { print $3 }' \
+			"$DIAG_FLOW_LOG" | awk '!seen[$0]++' | head -n "$limit")
+	fi
+
+	[ -n "$doms" ] || return 0
+
+	# 逐个探测（限速：每个 2 秒超时，最多 30 个 → 最坏 60 秒）
+	local d
+	for d in $doms; do
+		cmd_probe "$d" 443 2
+	done
+}
+
+# ------------------------------------------------------------
 # hosts：在线主机（第一级）
 #
 # 输出：<IP>|<主机名>|<MAC>|<查询数>|<失败数>|<最近活动>|<最近域名>
@@ -854,13 +964,22 @@ cmd_hosts() {
 		[ -n "$fn" ] || fn=0
 		[ -n "$lt" ] || lt=0
 
+		# ⚠️ 只列在线主机 —— 用户明确要求「表中排除掉离线设备」。
+		#
+		#    判据是 ARP 邻居表里有 lladdr（REACHABLE/STALE/DELAY/PROBE）。
+		#    只有历史查询记录、当前 ARP 里没有的，视为已离线，直接跳过。
+		#
+		#    为什么不用「最近活动时间」判定：DHCP 租约长（12h），
+		#    设备关掉后查询记录还会留很久，按时间判会把关机设备列成在线。
+		[ "$online" = "1" ] || continue
+
 		# 主机名：先查 DHCP 租约，再查 ARP 反解
 		host=$(awk -v i="$ip" '$3 == i { print $4; exit }' /tmp/dhcp.leases 2>/dev/null)
 		[ -n "$host" ] && [ "$host" != "*" ] || host=""
 
 		printf '%s|%s|%s|%s|%s|%s|%s|%s\n' \
 			"$ip" "$host" "$mac" "$qn" "$fn" "$lt" "${dom:--}" "$online"
-	done | sort -t'|' -k8,8r -k4,4rn
+	done | sort -t'|' -k5,5rn -k4,4rn
 
 	rm -f "$qtmp" "$ftmp" "$atmp"
 }
@@ -1136,6 +1255,8 @@ main() {
 		detail)      shift; cmd_detail "$@" ;;
 		flow)        shift; cmd_flow "$@" ;;
 		hosts)       shift; cmd_hosts "$@" ;;
+		probe)       shift; cmd_probe "$@" ;;
+		cdncheck)    shift; cmd_cdncheck "$@" ;;
 		trace)       shift; cmd_trace "$@" ;;
 		search)      shift; cmd_search "$@" ;;
 		autofix-log) shift; cmd_autofix_log "$@" ;;
@@ -1152,6 +1273,8 @@ main() {
   detail <IP>      某客户机的失败时间线（TSV）
   flow [IP] [N]    某客户机的完整查询链路（含成功，默认最近 200 条）
   hosts            当前在线主机（第一级）
+  probe <域名> [端口] [超时]  探测 DNS 通了但 TCP 通不通（第④段）
+  cdncheck [IP] [N]  扫描最近访问的域名，找出 TCP 不通的
   trace <IP> <域名> 单域名的完整链路
   search <关键词> [IP] [N]  按域名搜索
   autofix-log      自愈审计记录（TSV）
