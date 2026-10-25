@@ -1213,10 +1213,43 @@ dc_domain_custom() {
 # ------------------------------------------------------------
 dc_gen_custom_lists() {
 	mkdir -p "$DNSCHAIN_RUN_DIR" || return 1
+
+	# ── 手写列表（用户维护，优先级最高）──────────────────────────
 	dc_list_normalize dom_domestic domain > "${DNSCHAIN_CUSTOM_DOM}.tmp" || return 1
 	mv -f "${DNSCHAIN_CUSTOM_DOM}.tmp" "$DNSCHAIN_CUSTOM_DOM" || return 1
 	dc_list_normalize dom_foreign domain > "${DNSCHAIN_CUSTOM_FOR}.tmp" || return 1
 	mv -f "${DNSCHAIN_CUSTOM_FOR}.tmp" "$DNSCHAIN_CUSTOM_FOR" || return 1
+
+	# ── 自动列表（v0.23.0，ADR-0009 §3.6）────────────────────────
+	#
+	# 系统自动写入的归属，**分区隔离**，且必须服从手写优先：
+	#
+	#   手写 dom_*  >  自动 dom_auto_*  >  数据库  >  未覆盖
+	#
+	# 所以合并时要从自动列表里剔掉手写已声明的域名 —— 否则同一域名
+	# 在 custom-domestic.txt 与 custom-foreign.txt 里各出现一次，
+	# dc_gen_dnsmasq_split 会写出两条 server=，dnsmasq 把它们当
+	# **候选**而非覆盖，取哪条不确定（这正是 v0.22.0 删改道的原因：
+	# watch.servers 与 split.conf 冲突，www.wikipedia.org 拿到污染 IP）。
+	#
+	# ⚠️ 剔除必须走 dc_exclude（空文件安全），不能用 grep -Fvxf：
+	#    BusyBox 的 grep -Fvxf 在 pattern 文件为空时会吞掉全部输入。
+	local auto_dom auto_for
+	auto_dom=$(mktemp) || return 1
+	auto_for=$(mktemp) || return 1
+
+	dc_list_normalize dom_auto_domestic domain \
+		| dc_exclude "$DNSCHAIN_CUSTOM_DOM" \
+		| dc_exclude "$DNSCHAIN_CUSTOM_FOR" > "$auto_dom"
+
+	dc_list_normalize dom_auto_foreign domain \
+		| dc_exclude "$DNSCHAIN_CUSTOM_DOM" \
+		| dc_exclude "$DNSCHAIN_CUSTOM_FOR" > "$auto_for"
+
+	# 合并进手写列表（手写在前，自动在后；dc_exclude 已保证无重复）
+	cat "$auto_dom" >> "$DNSCHAIN_CUSTOM_DOM"
+	cat "$auto_for" >> "$DNSCHAIN_CUSTOM_FOR"
+	rm -f "$auto_dom" "$auto_for"
 }
 
 # ------------------------------------------------------------

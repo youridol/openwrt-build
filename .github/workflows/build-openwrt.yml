@@ -234,6 +234,7 @@ jobs:
           #   git update-index --chmod=+x <file>
           for f in files/usr/bin/dnschain-reconcile \
                    files/usr/bin/dnschain-selftest \
+                   files/usr/bin/dnschain-client-diag \
                    files/etc/init.d/dnschain \
                    files/etc/uci-defaults/99-zz-dnschain \
                    files/usr/share/dnschain/dnschain.sh ; do
@@ -1011,6 +1012,7 @@ jobs:
           # 脚本一行未执行即 exit 2（本仓库曾因此连续失败三天，AGENTS §6 第 11 条）。
           for f in "$LIB" "$INIT" files/usr/bin/dnschain-reconcile \
                    files/usr/bin/dnschain-selftest \
+                   files/usr/bin/dnschain-client-diag \
                    files/etc/uci-defaults/99-zz-dnschain; do
             [ -f "$f" ] || continue
             if sh -n "$f" 2>/tmp/dnschain-shn.err; then
@@ -1032,6 +1034,7 @@ jobs:
           #   也判成 bash 语法，属误报，已改为「行首就是 ((」才算。
           for f in "$LIB" "$INIT" files/usr/bin/dnschain-reconcile \
                    files/usr/bin/dnschain-selftest \
+                   files/usr/bin/dnschain-client-diag \
                    files/etc/uci-defaults/99-zz-dnschain; do
             [ -f "$f" ] || continue
             body="$(grep -v '^[[:space:]]*#' "$f")"

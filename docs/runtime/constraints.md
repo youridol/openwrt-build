@@ -128,6 +128,33 @@ dnsmasq:53（唯一缓存 + 唯一分流层）
 
 ---
 
+## 3b. 约束 53–56：客户机链路诊断（v0.23.0）
+
+设计依据：`docs/adr/0009-client-link-diagnosis.md`。
+落地校验：`sh tools/test-client-diag-parse.sh`（24 条，**纯本地，CI 不跑**）。
+
+| # | 约束 | 违反的后果 | 断言 |
+|---|---|---|---|
+| 53 | **`cached` 必须与 `reply` 同等处理** | `cached` 是命中缓存直接回复，占日志第二多（实测 182 条 vs reply 439 条）。只认 `reply` 会让所有缓存命中的查询 state 为空 → 判成 `noreply` 失败。实测 28 条「失败」里绝大多数由此引起 | 有（解析测试） |
+| 54 | **CNAME 链的终态以最后一条 reply 为准** | 一个查询 ID 会有多条 reply（CNAME 每跳一行）。只认第一条会把「NODATA 是正常终态」的域名判成失败。实测 `hs.p2p.huya.com` 的 query[HTTPS] 终态是 NODATA（正常），却误判失败并对另一个域名误执行 L1 自愈 | 有（解析测试） |
+| 55 | **daemon 必须用 `logread -f` 持续跟随，不能每轮 `tail` 快照** | 一条查询跨 20+ 行（CNAME 链 + nftset 穿插），快照窗口切在中间就产生「有 forwarded 无 reply」的假象。实测 `www.apple.com`（10 条真实 A 记录）与 `api.deepseek.com`（4 条）因此被判失败，连扫 3 轮记录数 7→38→78 膨胀，并误对 `copilot.tencent.com` 执行 L1 自愈 | 有（解析测试 + 实机 40 秒零误报） |
+| 56 | **自动自愈必须受时间窗约束，手动不受限** | 故障持续时（如上游节点挂了）不限频会反复重启 dnsmasq，每次让**所有客户机**断 3 秒，而问题可能根本不在 dnsmasq。手动路径用户明知可以断网才会点，故不检查时间窗 | 有（契约断言） |
+
+**「不算失败」的七类**（ADR-0009 §3.4，误判会让结论完全相反）：
+
+`ok` / `nodata`（含 `NODATA-IPv6`）/ `nxdomain` / `refused` /
+`duplicate`（`reply query is duplicate`）/ `pending`（CNAME 链未完）/
+`noquery`（只有 query 无 forwarded，dnsmasq 合并了并发查询）。
+
+只有 **`servfail`** 与 **`noreply`**（有 forwarded 但一条 reply 都没有）
+才算失败。
+
+> ⚠️ v0.4.0 时代曾把「空答复」当失败，得出「国内也全挂」的错误结论
+> （`AGENTS.md` §5.1）。同类误判在客户机诊断里会重演，故上面七类
+> 在代码里有显式排除 + 解析测试守着。
+
+---
+
 ## 4. 分流语义的一句话规则（v0.22.0 起）
 
 **所有流量先走直连；直连上游不可用时由 `dnsproxy --fallback` 自动改走代理。**

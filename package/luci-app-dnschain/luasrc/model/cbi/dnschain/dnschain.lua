@@ -893,9 +893,135 @@ function M.apply_domains()
 end
 
 
+-- ============================================================
+-- 客户机链路诊断（v0.23.0，ADR-0009）
+-- ------------------------------------------------------------
+-- 数据来自 /usr/bin/dnschain-client-diag 的 TSV 输出。
+-- 与自检 20 项**视角不同**：自检看路由器自身，这里看客户机实际收发。
+--
+-- ⚠️ 客户机识别用 IP + 主机名，**不用 MAC** ——
+--    实测三台移动设备的 MAC 都是本地管理位（随机 MAC），
+--    用它认设备会失效（ADR-0009 §2.4）。
+-- ============================================================
 
+local CLIENT_DIAG = "/usr/bin/dnschain-client-diag"
 
---- watch.servers 的实际内容（用于「当前改道生效情况」核对）
+--- 解析 key=value 形式的状态输出
+local function parse_kv(out)
+	local t = {}
+	for line in (out or ""):gmatch("[^\n]+") do
+		local k, v = line:match("^([A-Z_]+)=(.*)$")
+		if k then t[k] = v end
+	end
+	return t
+end
+
+--- 诊断功能运行状态
+function M.client_diag_status()
+	local out = sys.exec(CLIENT_DIAG .. " status 2>&1") or ""
+	local kv = parse_kv(out)
+	return {
+		enabled    = kv.ENABLED or "0",
+		autofix    = kv.AUTOFIX or "0",
+		last_scan  = kv.LAST_SCAN or "0",
+		fail_count = kv.FAIL_COUNT or "0",
+		retain_sec = kv.RETAIN_SEC or "3600",
+		retain_max = kv.RETAIN_MAX or "500",
+	}
+end
+
+--- 客户机列表
+--
+-- 输出格式：<IP>|<主机名>|<失败数>|<最近失败时刻>|<最近域名>
+function M.client_diag_list()
+	local out = sys.exec(CLIENT_DIAG .. " list 2>&1") or ""
+	local rows = {}
+	for line in out:gmatch("[^\n]+") do
+		local ip, host, cnt, last, dom = line:match("^([^|]+)|([^|]*)|([^|]*)|([^|]*)|([^|]*)$")
+		if ip then
+			-- 字段名用 last_ts 而非 last：general.lua 里有一条断言禁止
+			-- 出现 r.last（那是已删除的「改道明细」字段），复用同名字段
+			-- 会让该断言误报。
+			rows[#rows + 1] = {
+				ip = ip, host = host or "", count = cnt or "0",
+				last_ts = last or "0", domain = dom or "",
+			}
+		end
+	end
+	return rows
+end
+
+--- 某客户机的失败时间线
+--
+-- 输出格式：<epoch>|<域名>|<上游>|<状态>|<段>|<建议>
+function M.client_diag_detail(ip)
+	if not ip or ip == "" then return {} end
+	-- 只允许 IP 字符，防止拼进 shell
+	if not ip:match("^[0-9a-fA-F:.]+$") then return {} end
+
+	local out = sys.exec(CLIENT_DIAG .. " detail '" .. ip .. "' 2>&1") or ""
+	local rows = {}
+	for line in out:gmatch("[^\n]+") do
+		local ts, dom, up, st, seg = line:match("^([^|]+)|([^|]*)|([^|]*)|([^|]*)|([^|]*)|")
+		if ts then
+			rows[#rows + 1] = {
+				ts = ts, domain = dom or "", upstream = up or "",
+				state = st or "", seg = seg or "",
+			}
+		end
+	end
+	return rows
+end
+
+--- 自愈审计记录
+--
+-- 输出格式：<id>|<epoch>|<级别>|<域名>|<结果>|<备注>
+function M.client_diag_autofix_log()
+	local out = sys.exec(CLIENT_DIAG .. " autofix-log 2>&1") or ""
+	local rows = {}
+	for line in out:gmatch("[^\n]+") do
+		local id, ts, lv, dom, res, note = line:match(
+			"^([^|]+)|([^|]*)|([^|]*)|([^|]*)|([^|]*)|(.*)$")
+		if id then
+			rows[#rows + 1] = {
+				id = id, ts = ts or "0", level = lv or "",
+				domain = dom or "", result = res or "", note = note or "",
+			}
+		end
+	end
+	return rows
+end
+
+--- 手动触发自愈
+--
+-- 手动路径**不受时间窗限制** —— 用户明知可以断网才会点（ADR-0009 §3.5）。
+function M.client_diag_heal(level)
+	level = tostring(level or "")
+	if level ~= "1" and level ~= "2" and level ~= "3" then
+		return false, "级别必须是 1/2/3"
+	end
+	local out = sys.exec(CLIENT_DIAG .. " heal " .. level .. " 2>&1") or ""
+	M.invalidate()
+	if out:find("OK=") then
+		return true, out:gsub("^%s*OK=", ""):gsub("%s+$", "")
+	end
+	local err = out:match("ERROR=([^\n]*)")
+	return false, err or "自愈失败"
+end
+
+--- 撤销一条自动归属调整（L4）
+function M.client_diag_undo(id)
+	if not id or not id:match("^[0-9]+$") then
+		return false, "记录 id 非法"
+	end
+	local out = sys.exec(CLIENT_DIAG .. " undo " .. id .. " 2>&1") or ""
+	M.invalidate()
+	if out:find("OK=") then
+		return true, out:gsub("^%s*OK=", ""):gsub("%s+$", "")
+	end
+	local err = out:match("ERROR=([^\n]*)")
+	return false, err or "撤销失败"
+end
 
 
 return M

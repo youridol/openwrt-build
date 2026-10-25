@@ -3,34 +3,74 @@
 		"description": "Grant access to DNS Chain framework configuration",
 		"read": {
 			"ubus": {
-				"service": [ "list" ],
-				"dnsmasq": [ "metrics" ]
+				"service": [
+					"list"
+				],
+				"dnsmasq": [
+					"metrics"
+				]
 			},
-			"uci": [ "dnschain", "dnsproxy", "dhcp", "shadowsocksr", "network", "firewall" ],
+			"uci": [
+				"dnschain",
+				"dnsproxy",
+				"dhcp",
+				"shadowsocksr",
+				"network",
+				"firewall"
+			],
 			"file": {
-				"/var/etc/dnschain/*": [ "read" ],
-				"/var/run/dnschain/*": [ "read" ],
-				"/etc/ssrplus/gfw_list.conf": [ "read" ],
-				"/etc/ssrplus/gfw_base.conf": [ "read" ],
-				"/etc/ssrplus/black.list": [ "read" ],
-				"/etc/ssrplus/white.list": [ "read" ],
-				"/etc/config/dnschain": [ "read" ],
-				"/proc/*/cmdline": [ "read" ]
-			},
-			"command": [
-				"/usr/bin/dnschain-selftest",
-				"/usr/bin/dnschain-reconcile"
-			]
-		},
-		"write": {
-			"uci": [ "dnschain", "dnsproxy", "dhcp" ],
-			"file": {
-				"/var/etc/dnschain/*": [ "write" ],
-				"/var/run/dnschain/*": [ "write" ]
+				"/var/etc/dnschain/*": [
+					"read"
+				],
+				"/var/run/dnschain/*": [
+					"read"
+				],
+				"/etc/ssrplus/gfw_list.conf": [
+					"read"
+				],
+				"/etc/ssrplus/gfw_base.conf": [
+					"read"
+				],
+				"/etc/ssrplus/black.list": [
+					"read"
+				],
+				"/etc/ssrplus/white.list": [
+					"read"
+				],
+				"/etc/config/dnschain": [
+					"read"
+				],
+				"/proc/*/cmdline": [
+					"read"
+				],
+				"/tmp/dhcp.leases": [
+					"read"
+				]
 			},
 			"command": [
 				"/usr/bin/dnschain-selftest",
 				"/usr/bin/dnschain-reconcile",
+				"/usr/bin/dnschain-client-diag"
+			]
+		},
+		"write": {
+			"uci": [
+				"dnschain",
+				"dnsproxy",
+				"dhcp"
+			],
+			"file": {
+				"/var/etc/dnschain/*": [
+					"write"
+				],
+				"/var/run/dnschain/*": [
+					"write"
+				]
+			},
+			"command": [
+				"/usr/bin/dnschain-selftest",
+				"/usr/bin/dnschain-reconcile",
+				"/usr/bin/dnschain-client-diag",
 				"/etc/init.d/dnschain",
 				"/etc/init.d/dnsmasq"
 			]

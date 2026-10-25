@@ -13,6 +13,7 @@
 用法: python tools/check-dnschain-lua.py
 退出码: 0 = 全部通过
 """
+import re
 import os
 import sys
 
@@ -929,7 +930,11 @@ def test_v0144_fixes():
         bad("selftest 表格转义", "未套 dg.esc")
 
     # ── L3：v0.21.0 起「最近探测时间」列随改道明细一起删除 ──
-    if "r.last" in g:
+    # ⚠️ 判据必须排除 `r.last_ts` —— 纯子串匹配 `"r.last" in g` 会命中
+    #    v0.23.0 新增的客户机诊断字段 `r.last_ts`（「最近失败时刻」），
+    #    导致这条断言永久误报。用正则加右边界：r.last 后面不能紧跟
+    #    标识符字符。
+    if re.search(r"r\.last(?![A-Za-z0-9_])", g):
         bad("改道明细的 r.last 已删除", "仍在渲染 r.last")
     else:
         ok("改道明细的 r.last 已删除")

@@ -177,6 +177,10 @@ local SECTION_TAB = {
 	--    实测（v0.22.0 改造后）：这张图在状态/域名/上游/名单 4 个 tab
 	--    全都渲染，用户要求「仅保留状态 tab 里的这张图」。
 	[translate("DNS 分流去向")]  = "status",
+	-- v0.23.0：客户机链路诊断（ADR-0009）。放状态 tab —— 它是「结果」不是
+	-- 「参数」（ADR-0007 判据），且是排障入口，应靠前。
+	-- ⚠️ 必须登记：漏了会让它在所有 tab 都显示（见上方 v0.22.0 的教训）。
+	[translate("客户机链路诊断")] = "status",
 	[translate("操作")]          = "status",
 	-- 自检是「状态检查」，与断点诊断同类，放状态 tab（用户确认 Q5）
 	[translate("自检")]          = "status",
@@ -263,7 +267,7 @@ local function emit_tab_meta(map)
 		--   （tools/check-dnschain-lua.py）的桩缺失而整个文件加载失败
 		--   （实测 PASS 从 132 掉到 78，报 "general.lua 能加载 FAIL"）。
 		--   包版本是常量、无依赖，且语义正好 —— 「包升级了，资源该重拉」。
-		local ver = "?v=1.8.0"
+		local ver = "?v=1.9.0"
 
 		return string.format(
 			'<link rel="stylesheet" href="%s/dnschain/dnschain.css%s">' ..
@@ -1192,6 +1196,214 @@ function o.cfgvalue()
 	end
 
 	return dg.status_map(rows, {})
+end
+
+-- ── 客户机链路诊断（v0.23.0，ADR-0009）────────────────────────────
+--
+-- 视角与「自检」不同，**不得互相替代**：
+--   自检 20 项  → 路由器自身（进程 / 端口 / 规则 / 配置）
+--   本 section  → 客户机实际收发（谁查了什么、收到什么、哪一段失败）
+--
+-- 「自检全绿但某台客户机打不开 App」正是本 section 要解释的场景。
+--
+-- 数据来源：dnsmasq 日志（logqueries=1）。**不抓包** —— 一期只做日志
+-- 分析，覆盖四段链路的前三段；第 ④ 段（DNS 正常但 TCP 连不上）留二期。
+--
+-- 两层结构：
+--   上层 客户机列表（IP · 主机名 / 失败数 / 最近时刻）
+--   下层 某台设备的失败时间线（点开看）
+--
+-- ⚠️ 客户机识别用 IP + 主机名，**不用 MAC**：
+--    实测三台移动设备的 MAC 都是本地管理位（随机 MAC，第 2 位为 2/6/a/e），
+--    用它认设备会失效。稳定的标识是 IP（租期内固定）与主机名（设备自报）。
+s = m:section(TypedSection, "dnschain", translate("客户机链路诊断"),
+	translate("按<b>客户机视角</b>分析：这台设备查了什么域名、收到什么答案、" ..
+		"哪一段失败。<br/>与上方「自检」互补 —— 自检看路由器自身，" ..
+		"这里看客户机实际收发。「自检全绿但某台设备打不开」正是这里要解释的。"))
+s.anonymous = true
+s.addremove = false
+
+o = s:option(DummyValue, "_client_list", translate("客户机"))
+o.rawhtml = true
+function o.cfgvalue()
+	local st = ds.client_diag_status()
+	local rows = ds.client_diag_list()
+
+	local p = {}
+
+	-- 顶部状态条：一眼看出功能是否在跑、记录多少条
+	p[#p + 1] = string.format(
+		'<div class="dc-metrics">' ..
+		'<span class="dc-badge dc-badge--%s">%s</span> ' ..
+		'<span class="dc-badge dc-badge--%s">%s</span> ' ..
+		'<span class="dc-badge dc-badge--mute">%s</span>' ..
+		'</div>',
+		st.enabled == "1" and "ok" or "mute",
+		st.enabled == "1" and translate("诊断已启用") or translate("诊断已关闭"),
+		st.autofix == "1" and "ok" or "warn",
+		st.autofix == "1" and translate("自动自愈已开") or translate("自动自愈已关"),
+		string.format(translate("失败记录 %d 条 · 保留 %d 秒"),
+			tonumber(st.fail_count) or 0, tonumber(st.retain_sec) or 3600))
+
+	if #rows == 0 then
+		p[#p + 1] = '<div class="dc-alert dc-alert--info">' ..
+			'<span class="dc-alert__icon">i</span><div>' ..
+			translate("保留期内没有客户机失败记录。") ..
+			'</div></div>'
+		return table.concat(p)
+	end
+
+	-- 客户机表格：按失败数降序（有问题的排前面）
+	local trs = {}
+	for _, r in ipairs(rows) do
+		local host = r.host ~= "" and r.host or "—"
+		local when = tonumber(r.last_ts) or 0
+		local tstr = when > 0 and os.date("%H:%M:%S", when) or "—"
+
+		trs[#trs + 1] = string.format(
+			'<tr data-dc-client="%s">' ..
+			'<td><code>%s</code></td>' ..
+			'<td>%s</td>' ..
+			'<td><span class="dc-badge dc-badge--%s">%d</span></td>' ..
+			'<td>%s</td>' ..
+			'<td><code>%s</code></td>' ..
+			'</tr>',
+			esc(r.ip), esc(r.ip), esc(host),
+			(tonumber(r.count) or 0) > 0 and "warn" or "mute",
+			tonumber(r.count) or 0,
+			tstr, esc(r.domain or "—"))
+	end
+
+	p[#p + 1] = '<div class="dc-table-wrap"><table class="dc-table">' ..
+		'<thead><tr>' ..
+		'<th>' .. translate("客户机 IP") .. '</th>' ..
+		'<th>' .. translate("主机名") .. '</th>' ..
+		'<th>' .. translate("失败数") .. '</th>' ..
+		'<th>' .. translate("最近失败") .. '</th>' ..
+		'<th>' .. translate("最近域名") .. '</th>' ..
+		'</tr></thead><tbody>' .. table.concat(trs) .. '</tbody></table></div>'
+
+	p[#p + 1] = '<div class="dc-hint">' ..
+		translate("主机名来自 DHCP 租约，设备自己上报。随机 MAC 的设备同样能识别 —— " ..
+			"因为这里不用 MAC 作身份。") ..
+		'</div>'
+
+	return table.concat(p)
+end
+
+o = s:option(DummyValue, "_client_detail", translate("失败时间线"))
+o.rawhtml = true
+function o.cfgvalue()
+	local ip = luci.http.formvalue("dc_client")
+	if not ip or ip == "" then
+		return '<div class="dc-hint">' ..
+			translate("在上表任一客户机行点「诊断」查看它的失败时间线。") ..
+			'</div>'
+	end
+
+	local rows = ds.client_diag_detail(ip)
+	if #rows == 0 then
+		return '<div class="dc-alert dc-alert--info">' ..
+			'<span class="dc-alert__icon">i</span><div>' ..
+			string.format(translate("客户机 %s 在保留期内没有失败记录。"), esc(ip)) ..
+			'</div></div>'
+	end
+
+	-- 段号 → 人话（ADR-0009 §3.2）
+	local SEG = {
+		["2"] = translate("② dnsmasq 已转发，上游无回应"),
+		["3"] = translate("③ 上游明确失败"),
+	}
+	local ST = {
+		noreply  = translate("无回应"),
+		servfail = translate("上游失败"),
+	}
+
+	local trs = {}
+	for _, r in ipairs(rows) do
+		local when = tonumber(r.ts) or 0
+		trs[#trs + 1] = string.format(
+			'<tr>' ..
+			'<td>%s</td>' ..
+			'<td><code>%s</code></td>' ..
+			'<td>%s</td>' ..
+			'<td><span class="dc-badge dc-badge--bad">%s</span></td>' ..
+			'<td>%s</td>' ..
+			'</tr>',
+			when > 0 and os.date("%H:%M:%S", when) or "—",
+			esc(r.domain or "—"),
+			esc(ST[r.state] or r.state or "—"),
+			esc(r.state or "—"),
+			esc(SEG[r.seg] or "—"))
+	end
+
+	return '<div class="dc-table-wrap"><table class="dc-table">' ..
+		'<thead><tr>' ..
+		'<th>' .. translate("时刻") .. '</th>' ..
+		'<th>' .. translate("域名") .. '</th>' ..
+		'<th>' .. translate("状态") .. '</th>' ..
+		'<th>' .. translate("原始") .. '</th>' ..
+		'<th>' .. translate("失败段") .. '</th>' ..
+		'</tr></thead><tbody>' .. table.concat(trs) .. '</tbody></table></div>'
+end
+
+-- 自愈动作（手动，不受时间窗限制 —— 用户明知可以断网才会点）
+o = s:option(Button, "_heal_l1", translate("立即清缓存"))
+o.inputtitle = translate("执行 L1")
+o.description = translate("SIGHUP dnsmasq，零中断。绝大多数故障这一级就够。")
+function o.write()
+	local ok, out = ds.client_diag_heal("1")
+	setmsg(ok and ("✓ " .. out) or ("✗ " .. out))
+end
+
+o = s:option(Button, "_heal_l3", translate("重启 dnsmasq"))
+o.inputtitle = translate("执行 L3")
+o.description = translate("实测约 3 秒解析中断。仅在 L1/L2 无效时使用。")
+function o.write()
+	local ok, out = ds.client_diag_heal("3")
+	setmsg(ok and ("✓ " .. out) or ("✗ " .. out))
+end
+
+o = s:option(DummyValue, "_autofix_log", translate("自愈记录"))
+o.rawhtml = true
+function o.cfgvalue()
+	local rows = ds.client_diag_autofix_log()
+	if #rows == 0 then
+		return '<div class="dc-hint">' .. translate("还没有自愈记录。") .. '</div>'
+	end
+
+	local LV = { L1 = translate("清缓存"), L2 = translate("重放配置"),
+	             L3 = translate("重启 dnsmasq"), L4 = translate("改归属") }
+	local RES = { ok = translate("成功"), fail = translate("失败"),
+	              undone = translate("已撤销") }
+
+	local trs = {}
+	for _, r in ipairs(rows) do
+		local when = tonumber(r.ts) or 0
+		trs[#trs + 1] = string.format(
+			'<tr>' ..
+			'<td>%s</td>' ..
+			'<td>%s</td>' ..
+			'<td><code>%s</code></td>' ..
+			'<td><span class="dc-badge dc-badge--%s">%s</span></td>' ..
+			'<td>%s</td>' ..
+			'</tr>',
+			when > 0 and os.date("%H:%M:%S", when) or "—",
+			esc(LV[r.level] or r.level or "—"),
+			esc(r.domain or "—"),
+			r.result == "ok" and "ok" or (r.result == "undone" and "mute" or "bad"),
+			esc(RES[r.result] or r.result or "—"),
+			esc(r.note or ""))
+	end
+
+	return '<div class="dc-table-wrap"><table class="dc-table">' ..
+		'<thead><tr>' ..
+		'<th>' .. translate("时刻") .. '</th>' ..
+		'<th>' .. translate("级别") .. '</th>' ..
+		'<th>' .. translate("域名") .. '</th>' ..
+		'<th>' .. translate("结果") .. '</th>' ..
+		'<th>' .. translate("备注") .. '</th>' ..
+		'</tr></thead><tbody>' .. table.concat(trs) .. '</tbody></table></div>'
 end
 
 -- ── 国内上游 ──

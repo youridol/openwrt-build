@@ -52,17 +52,9 @@ config dnschain 'main'
 	option intercept_dot '1'
 	# 尽力而为地阻断已知公共 DoH（443 无法可靠区分，仅标注）
 	option intercept_doh '0'
-	# ── 自动分诊（v0.16.4 起在页面上可配）──────────────────────
-	# 对「不在 GFW 名单、不在 blacklist、不在 china、不在任何数据库」的
-	# 目标执行：① 试直连 → ② 试代理 → ③ 标记 dead。
-	# 跑通的落库：IP 一律先算成 CIDR 段再进集合，域名进 dom_domestic /
-	# dom_foreign。dead 不进任何集合。
-	option triage_enabled '1'
-	# 每轮最多分诊多少个目标（按每目标最坏 6 秒估算）
-	option triage_max '12'
-	# 并发数。8 是 4 核 N2930 的实测平衡点：串行 12 目标 41 秒，
-	# 8 并发约 8 秒。再高会让 curl 争抢 CPU，收益递减。
-	option triage_conc '8'
+	# ── 分诊三键已删除（v0.22.0）────────────────────────────────
+	# triage_enabled / triage_max / triage_conc 曾控制「自动分诊未知目标」，
+	# 分诊功能整体移除后无消费者。留注释说明去向，防止有人以为漏配。
 
 config upstream 'cn'
 	# 国内加密池：DoT 与 DoH 混用，dnsproxy 并行查询取最快
@@ -152,6 +144,27 @@ config domains 'dom_domestic'
 config domains 'dom_foreign'
 
 # ============================================================
+# 自动列表（v0.23.0，ADR-0009 §3.6）
+# ------------------------------------------------------------
+# 系统自动写入的域名归属，与上面两个**手写**列表分区隔离。
+#
+# 为什么必须分开：
+#   v0.22.0 删掉自动改道，正是因为自动动作静默覆盖了正确配置 ——
+#   watch.servers 与 split.conf 同时含某域名时，dnsmasq 把两条 server=
+#   当**候选**而非覆盖，实测 www.wikipedia.org 因此拿到 31.13.106.4
+#   （Facebook 的 IP），而两条 dnsproxy 链本身都返回正确的
+#   103.102.166.224。
+#
+# 优先级：手写 dom_* > 自动 dom_auto_* > 数据库 > 未覆盖
+# 用户手写同域名时，自动条目自动让位（生成分流时手写优先）。
+#
+# 每次自动写入都记审计（/var/run/dnschain/autofix.log），页面可逐条撤销。
+# ============================================================
+config domains 'dom_auto_domestic'
+
+config domains 'dom_auto_foreign'
+
+# ============================================================
 # 链路健康检测与自动改道（v0.13.0）
 # ------------------------------------------------------------
 # 只对 health.watch 里的域名做探测 —— 不做全量探测。
@@ -172,6 +185,11 @@ config domains 'dom_foreign'
 # 不重启 dnsmasq、不清缓存、不影响未观测的域名。
 # ============================================================
 config health 'health'
+	# ⚠️ v0.22.0：健康探测与自动改道已整体删除（dc_health_* 约 430 行）。
+	#    本 section 只剩 timeout / retries 两个键仍被使用 ——
+	#    它们是 dc_probe_chain 的超时与重试参数，自检与「单域名解释」在用。
+	#    enabled / fail_threshold / recover_threshold / min_dwell /
+	#    interval / watch 六个键已无消费者，保留是为了不破坏已有配置。
 	# 总开关：关闭后不探测、不改道，静态分流照常
 	option enabled '1'
 	# 单次探测的硬超时（秒）。BusyBox nslookup 没有 -timeout，
@@ -213,3 +231,42 @@ config ssr 'compat'
 	option enforce '1'
 	# 期望的 IPv6 流量代理开关：1 = 启用（国外 IPv6 也走代理，保留双栈）
 	option require_ipv6 '1'
+
+# ============================================================
+# 客户机链路诊断与分级自愈（v0.23.0）
+# ------------------------------------------------------------
+# 设计依据：docs/adr/0009-client-link-diagnosis.md
+# 术语：GLOSSARY.md 的「客户机链路诊断」「四段链路」「分级自愈」
+#
+# 数据来源：dnsmasq 日志（logqueries=1 已开）。**不抓包** ——
+#   一期只做日志分析，覆盖四段链路里的前三段；第 ④ 段
+#   （DNS 正常但 TCP 连不上）需 tcpdump，留二期。
+#
+# 与自检 20 项的关系：视角不同，不得互相替代。
+#   自检看路由器自身（进程/端口/规则），本功能看客户机实际收发。
+#   「自检全绿但某台客户机打不开 App」正是本功能要解释的场景。
+# ============================================================
+config client_diag 'client_diag'
+	# 总开关：关闭后不扫日志、不记录失败
+	option enabled '1'
+	# 自动自愈开关。关闭后只记录失败、给建议，不动手
+	option autofix_enabled '1'
+	# 扫描间隔（秒）
+	option interval '60'
+	# 同一域名在窗口内累计失败多少次才判定「该自愈」
+	option fail_threshold '3'
+	# 上面那个「窗口」的长度（秒）。默认 5 分钟
+	option fail_window '300'
+	# 失败记录保留时长（秒）。默认 1 小时 —— 用户明确要求
+	# 「超过 1 小时看也没有用了」
+	option retain_sec '3600'
+	# 失败记录条目上限。超过时丢最旧的
+	option retain_max '500'
+	# 自动自愈的最小间隔（秒）。默认 1 小时 —— 用户明确要求
+	# 「默认 1 个小时自动自愈一次」。
+	#
+	# ⚠️ 为什么必须限频：若故障持续存在（如上游节点挂了），
+	#    不限频会反复重启 dnsmasq，每次让**所有客户机**断 3 秒，
+	#    而问题可能根本不在 dnsmasq。
+	#    手动触发（heal 子命令）不受此限 —— 用户明知可以断网才会点。
+	option autofix_interval '3600'

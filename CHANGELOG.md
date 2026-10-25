@@ -3,6 +3,176 @@
 本仓库所有功能/配置改动均记录于此。版本判型遵循全局规范（PATCH / MINOR / MAJOR）。
 
 
+## [v0.23.0] - 2026-10-25
+
+### 新增 — 客户机链路诊断与分级自愈
+
+用户要求：「在 DNS 分流插件中添加在线读取抓包主机链路信息分析客户机不通的链路后处理」，
+场景是**某些移动 App 混合国内外的资源打不开**（举例：拓竹 / Bambu）。
+
+设计依据：`docs/adr/0009-client-link-diagnosis.md`。
+
+#### ① 数据来源：日志优先，一期不抓包
+
+实测事实（路由器，2026-10-25）：
+
+| 项 | 实测 |
+|---|---|
+| `dnsmasq` 的 `logqueries` | **已是 1** |
+| 日志可用条数 | 998 条 |
+| `tcpdump` | **未安装**（CI 未启用） |
+| 日志动作分布 | `reply` 439 / `cached` 182 / `forwarded` 114 / `nftset` 24 |
+
+DNS 层的四段链路里，前三段日志完全够用，只有「DNS 成功但 TCP 连不上」
+必须抓包 —— 那一层留二期。一期零新增依赖。
+
+#### ② 四段链路判定
+
+| 段 | 环节 | 判据 |
+|---|---|---|
+| ① | 客户机 → dnsmasq:53 | 有 query 无 forwarded |
+| ② | dnsmasq → dnsproxy | 有 forwarded 无 reply |
+| ③ | dnsproxy → 上游 | `SERVFAIL` |
+| ④ | 客户机 → 目标 IP | 需 tcpdump（二期） |
+
+#### ③ 客户机识别用 IP + 主机名，不用 MAC
+
+实测 `/tmp/dhcp.leases` 里三台移动设备的 MAC 全是本地管理位（随机 MAC）：
+
+```
+72:62:84:8a:f3:8c  ALN-AL80     ← 第2位 2 = 本地管理位
+ae:fb:34:6e:fa:cd  iPhone       ← 第2位 e = 本地管理位
+f6:d9:87:82:9b:dd  vivo-Y52s    ← 第2位 6 = 本地管理位
+5c:e5:0c:b2:b1:ee  zhimi-air... ← 第2位 c = 全局唯一（真实）
+```
+
+**随机 MAC 恰恰证明 MAC 不能作设备身份。** 稳定的是 IP（租期内固定）
+与主机名（设备自报，不受随机 MAC 影响）。实测主机名显示正确：
+`PSDN-TC30-3BA9` / `ALN-AL80` / `vivo-Y52s`。
+
+#### ④ 分级自愈 L1 → L4
+
+| 级 | 动作 | 中断 | 自动 |
+|---|---|---|---|
+| L1 | `dnschain-selftest flush`（SIGHUP） | 零 | ✅ |
+| L2 | `dnschain-selftest apply` | 零～极短 | ✅ |
+| L3 | 重启 dnsmasq | 实测 3 秒 | ✅ |
+| L4 | 改域名归属（写自动列表） | 零 | ✅ |
+
+**时间窗**：自动自愈默认每小时最多 1 次（可配）；**手动触发不受限**
+—— 用户明知可以断网才会点。限频是必须的：故障持续时不限频会反复
+重启 dnsmasq，每次让**所有客户机**断 3 秒，而问题可能根本不在 dnsmasq。
+
+#### ⑤ 自动列表分区隔离（L4 不碰手写列表）
+
+| 列表 | 谁写 | 优先级 |
+|---|---|---|
+| `dom_domestic` / `dom_foreign` | **用户手工** | **高**（永不被自动改写） |
+| `dom_auto_domestic` / `dom_auto_foreign` | 系统自动 | 低（手写同域名时让位） |
+
+v0.22.0 删掉自动改道的教训就是**自动动作静默覆盖正确配置**
+（`watch.servers` 与 `split.conf` 冲突，`www.wikipedia.org` 拿到
+Facebook 的 IP）。故 L4 只处理 `CLASS=uncovered` 的域名，
+且每次自动调整都记审计、可逐条撤销。
+
+#### ⑥ 页面：两层结构，放状态 tab
+
+```
+上层 客户机列表      192.168.3.203 · ALN-AL80   失败 3 条   [诊断]
+下层 失败时间线      16:02:11  makerworld.bblmw.cn  ③ 上游失败
+```
+
+新增 section「客户机链路诊断」，排在「DNS 分流去向」之后。
+已登记进 `SECTION_TAB`（漏了会在所有 tab 都显示 —— v0.22.0 踩过）。
+
+### 修复 — 施工中发现并修掉的五个真实缺陷
+
+#### (a) v0.22.0 遗留：init 在启动已删除的 `dnschain-health`
+
+`start_health_daemon()` 仍执行 `procd_set_param command
+/usr/bin/dnschain-health daemon`，而该脚本 v0.22.0 已删除。
+实测 procd 里有 2 条 health 实例记录、`/usr/bin/dnschain-health` 不存在
+—— 每次开机都在尝试启动一个不存在的程序。
+
+改为启动新的客户机诊断守护（承担同样的后台周期任务角色）。
+
+#### (b) CNAME 链终态丢失 → 正常域名被判失败并误自愈
+
+一个查询 ID 会有**多条** reply（CNAME 每跳一行），最后一行才是终态。
+实测 `hs.p2p.huya.com`（query[HTTPS]）：
+
+```
+221459 ... reply hs.p2p.huya.com is <CNAME>
+221459 ... reply huya-p2p.jx.volclivedvs.com is <CNAME>
+221459 ... reply sched-l1-dk.tx.volclivedvs.com is NODATA   ← 终态，正常
+```
+
+旧实现只认第一条 reply，把 3 个能正常解析的域名判成失败，
+还对其中一个**误执行了 L1 自愈**。
+
+#### (c) `cached` 动作未处理
+
+`cached` 是命中缓存直接回复，占日志第二多（182 条 vs reply 439 条）。
+旧实现只认 `reply`，所有缓存命中的查询 state 为空 → 判成 `noreply`。
+实测 28 条「失败」里绝大多数是这条引起的。
+
+#### (d) 行尾 CR 导致字符串比较失配
+
+`f[6]` 变成 `"SERVFAIL\r"`，与 `"SERVFAIL"` 不相等 →
+**失败被静默判成 ok**，诊断功能等于失效。加 `sub(/\r$/, "")`。
+
+#### (e) 快照窗口截断 → 每轮把正常域名记成故障
+
+这是**最严重**的一个。daemon 原用 `logread | tail -n 2000` 快照，
+而一条查询跨 20+ 行（CNAME 链 + nftset 穿插）。窗口边界切在中间时：
+
+- `www.apple.com` 一条查询 20+ 行、10 条真实 A 记录，窗口切中间 → 判 noreply
+- `api.deepseek.com` 4 条真实 A 记录落在窗口外 → 判 noreply
+
+后果：连扫 3 轮记录数 **7 → 38 → 78** 持续膨胀，并对
+`copilot.tencent.com` 误执行了 L1 自愈。
+
+**修法**：daemon 改为 `logread -f` 持续跟随 + 流式解析
+（`_diag_stream`），每个查询的完整生命周期都在流里，不再有边界问题。
+实测 40 秒真实流量：**失败记录 0 条、自愈记录空**。
+
+### 新增 — 解析回归测试 `tools/test-client-diag-parse.sh`
+
+24 条断言，用**真实日志样本**覆盖上面 (b)(c)(d)(e) 四个缺陷，
+外加「不算失败」的六类真值表（`nodata` / `nxdomain` / `ok` /
+`refused` / `duplicate` / `pending` / `noquery` 均不算失败）。
+
+⚠️ 这是纯本地工具，**CI 不跑** —— 必须自己跑。
+
+### 验证
+
+```
+verify-dnschain-domains.sh   165 OK / 0 FAIL（新增 15 条契约断言）
+check-dnschain-lua.py        111 PASS / 0 FAIL
+render-dnschain-diagrams.py   54 PASS / 0 FAIL
+extract-dnschain-i18n.py     357 条无缺失
+verify-dnschain-ci-sim.sh    RC=0
+test-client-diag-parse.sh    24 条全过
+```
+
+路由器实测（OpenWrt 24.10.5）：
+
+```
+dnschain-client-diag status     ENABLED=1 AUTOFIX=1 RETAIN_SEC=3600
+dnschain-client-diag list       192.168.3.203|ALN-AL80|...
+dnschain-client-diag scan       失败记录 0 条（无误报）
+```
+
+### 边界（必须明说）
+
+**「DNS 正常但 App 仍打不开」一期不覆盖。** 实测拓竹设备的 DNS 与主链路
+全部健康（`api.bambulab.cn` → `119.0.68.19`、`device-file.bambulab.cn`
+→ 阿里云上海 `180.163.123.186`、MQTT `47.100.40.179:8883`），说明这类
+问题的根因在更上层（证书 / 鉴权 / 区域限制 / 固件）。一期只能告诉用户
+「DNS 层正常，问题在更上层」，二期抓包才补得上第 ④ 段。
+
+---
+
 ## [v0.22.0] - 2026-10-25
 
 ### 重构 — 直连优先 + 自动回落；删除分诊与健康改道

@@ -39,6 +39,7 @@ TRIAGE=files/usr/bin/dnschain-triage
 # v0.18.0 tab 结构断言用（第 13 节，ADR-0007）
 DIAG=package/luci-app-dnschain/luasrc/model/cbi/dnschain/diagnosis.lua
 SELFTEST=files/usr/bin/dnschain-selftest
+MODEL=package/luci-app-dnschain/luasrc/model/cbi/dnschain/dnschain.lua
 UCI_DEF=files/etc/uci-defaults/99-zz-dnschain
 GAMING=files/etc/uci-defaults/99-gaming-optimize
 RECONCILE=files/usr/bin/dnschain-reconcile
@@ -1099,6 +1100,148 @@ if body_of "$SELFTEST" | grep -qF 'AT=${_at}' && \
 	pass "selftest 的 SUMMARY 输出 AT / DUR / RUN"
 else
 	fail "selftest 的 SUMMARY 缺 AT / DUR / RUN（用户无法判断结论新旧）"
+fi
+
+
+echo "── 14. 客户机链路诊断与分级自愈（v0.23.0，ADR-0009）───────"
+
+DIAG="files/usr/bin/dnschain-client-diag"
+CFG="files/etc/config/dnschain"
+
+# ① 脚本存在且有执行位
+if [ -f "$DIAG" ]; then
+	pass "客户机诊断脚本存在"
+else
+	fail "缺少 $DIAG"
+fi
+
+# ② 配置 section 与关键键齐全
+_dk=""
+for _k in enabled autofix_enabled interval fail_threshold fail_window \
+          retain_sec retain_max autofix_interval; do
+	if ! body_of "$CFG" | grep -qE "^[[:space:]]*option $_k "; then
+		_dk="$_dk $_k"
+	fi
+done
+if [ -z "$_dk" ]; then
+	pass "client_diag 的 8 个配置键齐全"
+else
+	fail "client_diag 缺配置键:$_dk"
+fi
+
+# ③ 「不算失败」的四类必须显式出现在代码里
+#
+#    这四类是 ADR-0009 §3.4 的核心：误判会让结论完全相反
+#    （v0.4.0 时代把空答复当失败，得出「国内也全挂」的错误结论）。
+_nd=""
+#    duplicate 在代码里靠「只认 f[5]=="is" 的 reply」排除 ——
+#    `reply query is duplicate` 的第 5 字段是 "query" 不是 "is"，
+#    因此天然不进任何判定分支。故查该白名单判据。
+for _t in 'NODATA-IPv6' 'NXDOMAIN' 'f[5] == "is"' 'CNAME'; do
+	if ! body_of "$DIAG" | grep -qF "$_t"; then
+		_nd="$_nd [$_t]"
+	fi
+done
+if [ -z "$_nd" ]; then
+	pass "四类「不算失败」都在代码里显式排除"
+else
+	fail "客户机诊断漏了「不算失败」的判据:$_nd"
+fi
+
+# ④ 失败判据只认 servfail / noreply
+if body_of "$DIAG" | grep -qE 'servfail\|noreply\) return 0'; then
+	pass "失败判据只认 servfail / noreply"
+else
+	fail "失败判据不明确（应只认 servfail 与 noreply）"
+fi
+
+# ⑤ 分级自愈 L1/L2/L3 都在
+_lv=""
+for _n in 1 2 3; do
+	if ! body_of "$DIAG" | grep -qE "^[[:space:]]*$_n\)"; then
+		_lv="$_lv L$_n"
+	fi
+done
+if [ -z "$_lv" ]; then
+	pass "分级自愈 L1/L2/L3 三档齐全"
+else
+	fail "分级自愈缺档:$_lv"
+fi
+
+# ⑥ 自动路径必须检查时间窗（手动路径不检查）
+if body_of "$DIAG" | grep -qF '_diag_window_ok || return 0'; then
+	pass "自动自愈受时间窗约束（防重启循环）"
+else
+	fail "自动自愈没有时间窗检查（故障持续时会反复重启 dnsmasq）"
+fi
+
+# ⑦ 手动 heal 不得检查时间窗
+if body_of "$DIAG" | sed -n '/^cmd_heal()/,/^}/p' | grep -qF '_diag_window_ok'; then
+	fail "手动 heal 被时间窗挡住（用户明知可断网却点不动）"
+else
+	pass "手动 heal 不受时间窗限制"
+fi
+
+# ⑧ 手写优先：自动列表必须被手写列表排除
+if body_of "$LIB" | grep -qF 'dc_exclude "$DNSCHAIN_CUSTOM_DOM"' && \
+   body_of "$LIB" | grep -qF 'dom_auto_domestic'; then
+	pass "自动列表服从手写优先（生成时排除手写已声明域名）"
+else
+	fail "自动列表没有排除手写列表（会造成同一域名两条 server=，dnsmasq 当候选）"
+fi
+
+# ⑨ 自动列表的排除必须走 dc_exclude，不能用 grep -Fvxf
+if body_of "$LIB" | sed -n '/^dc_gen_custom_lists()/,/^}/p' | grep -qF 'grep -Fvxf'; then
+	fail "自动列表用了 grep -Fvxf（BusyBox 下空文件会吞掉全部输入）"
+else
+	pass "自动列表用 dc_exclude 排除（空文件安全）"
+fi
+
+# ⑩ 客户机识别不得用 MAC
+#    这条判据查「页面/模型层有没有把 MAC 当身份」，不查 diag 脚本 ——
+#    diag 脚本只输出 IP，压根不碰 MAC，无需声明。
+if body_of "$MODEL" | grep -qF '不用 MAC' || \
+   body_of "$GENERAL" | grep -qF '不用 MAC'; then
+	pass "客户机识别不用 MAC（随机 MAC 不能作设备身份）"
+else
+	fail "客户机识别没有声明不用 MAC"
+fi
+
+# ⑪ init 不得再启动已删除的 dnschain-health
+if body_of "$INIT" | grep -qE 'command /usr/bin/dnschain-health'; then
+	fail "init 仍在启动已删除的 dnschain-health（v0.22.0 遗留缺陷）"
+else
+	pass "init 不再启动已删除的 dnschain-health"
+fi
+
+# ⑫ 新守护必须被 procd 托管
+if body_of "$INIT" | grep -qF 'dnschain-client-diag daemon'; then
+	pass "客户机诊断守护由 procd 托管"
+else
+	fail "客户机诊断守护没有被 procd 托管"
+fi
+
+# ⑬ 保留时长与条目上限必须可配（用户明确要求）
+if body_of "$DIAG" | grep -qF 'dc_get client_diag retain_sec' && \
+   body_of "$DIAG" | grep -qF 'dc_get client_diag retain_max'; then
+	pass "保留时长与条目上限均可配置"
+else
+	fail "保留时长或条目上限写死（用户要求可自定义）"
+fi
+
+# ⑭ ACL 必须放行新脚本
+ACLF="package/luci-app-dnschain/root/usr/share/rpcd/acl.d/luci-app-dnschain.json"
+if grep -qF 'dnschain-client-diag' "$ACLF" 2>/dev/null; then
+	pass "ACL 已放行客户机诊断脚本"
+else
+	fail "ACL 未放行 dnschain-client-diag（页面调用会 403）"
+fi
+
+# ⑮ 页面 section 必须登记进 SECTION_TAB（否则在所有 tab 都显示）
+if body_of "$GENERAL" | grep -qF '[translate("客户机链路诊断")]'; then
+	pass "客户机诊断 section 已登记进 SECTION_TAB"
+else
+	fail "客户机诊断 section 未登记进 SECTION_TAB（会在所有 tab 都显示）"
 fi
 
 echo ""

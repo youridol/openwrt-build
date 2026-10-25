@@ -1,0 +1,809 @@
+#!/bin/sh
+# ============================================================
+# dnschain-client-diag — 客户机链路诊断与分级自愈
+# ------------------------------------------------------------
+# 设计依据：docs/adr/0009-client-link-diagnosis.md
+# 术语：GLOSSARY.md 的「客户机链路诊断」「四段链路」「分级自愈」
+#
+# 职责：
+#   1. 读 dnsmasq 日志（logread），解析出「哪台客户机 / 查了什么域名 /
+#      转发给哪条链 / 收到什么答案」
+#   2. 按四段链路判定失败（① 客户机→dnsmasq ② dnsmasq→dnsproxy
+#      ③ dnsproxy→上游 ④ 客户机→目标IP）
+#   4. 达阈值时按 L1→L2→L3→L4 逐级自愈
+#   5. 失败记录与自愈审计落 tmpfs，供页面读取
+#
+# 子命令：
+#   scan            扫一轮日志，更新失败记录，必要时触发自愈
+#   daemon          常驻循环（procd 托管），每 interval 秒 scan 一次
+#   list            输出客户机列表（TSV，供页面解析）
+#   detail <IP>     输出某客户机的失败时间线（TSV）
+#   autofix-log     输出自愈审计记录（TSV）
+#   undo <id>       撤销一条自动调整
+#   heal <level>    手动触发指定级别自愈（L1/L2/L3）
+#   status          输出诊断功能的运行状态
+#
+# ⚠️ 本脚本必须 POSIX sh（dash）兼容 —— CI 用 sh -n 双检。
+# ============================================================
+
+. /usr/share/dnschain/dnschain.sh 2>/dev/null || exit 1
+
+DIAG_FAIL_LOG="${DNSCHAIN_STATE_DIR}/client-fail.log"
+DIAG_FIX_LOG="${DNSCHAIN_STATE_DIR}/autofix.log"
+DIAG_FIX_STATE="${DNSCHAIN_STATE_DIR}/autofix.state"
+DIAG_LAST_SCAN="${DNSCHAIN_STATE_DIR}/diag-last-scan"
+DIAG_LOCK="${DNSCHAIN_STATE_DIR}/.diag.lock"
+
+# ------------------------------------------------------------
+# 日志解析
+#
+# dnsmasq 的日志格式（实测，见 ADR-0009 §2.1）：
+#
+#   dnsmasq[1]: 187349 192.168.3.193/35143 query[A] asia.pool.ntp.org from 192.168.3.193
+#   dnsmasq[1]: 187349 192.168.3.193/35143 forwarded asia.pool.ntp.org to 127.0.0.1#5353
+#   dnsmasq[1]: 187349 192.168.3.193/35143 reply asia.pool.ntp.org is 168.144.182.136
+#
+# 一个查询 ID 把「谁问的 / 问什么 / 转发给谁 / 答了什么」串起来。
+# 按查询 ID 聚合，才能判断「有没有 reply」—— 这是第 ② 段的判据。
+# ------------------------------------------------------------
+
+# 提取「客户机 IP → 上游 → 是否收到 reply」的聚合视图
+#
+# 输出每行：<客户机IP>|<域名>|<上游>|<reply状态>|<答案>
+# reply状态：ok / servfail / timeout / noreply（有 forwarded 但无 reply）
+#
+# ⚠️ 必须用 awk 单遍聚合，不能逐行 shell 调用 ——
+#    实测 dnsmasq 日志一轮可上千行，逐行 fork 会拖垮 N2930。
+_diag_parse() {
+	awk '
+	BEGIN { first_id = ""; last_id = ""; saw_cname = 0 }
+	function flush() {
+		if (qid == "") return
+		if (domain == "") return
+		# 窗口首尾的查询都可能不完整，一并丢弃：
+		#
+		#   首条 —— 它的 reply 可能在窗口之前就被读走了
+		#   末条 —— 它的 reply 可能还没写进日志（日志正在增长）
+		#
+		# 实测两个方向都踩过：
+		#   api.deepseek.com  首条截断 → 4 条真实 A 记录在窗口外 → 误判 noreply
+		#   chat-4.tmspk.net  末条未完成 → 有 reply 但不在窗口内 → 误判 noreply
+		#
+		# 代价是每轮少算最多两个查询，可忽略。
+		if (qid == first_id || qid == last_id) {
+			qid = ""; domain = ""; up = ""; state = ""; ans = ""
+			client = ""; saw_cname = 0
+			return
+		}
+		#
+		# ⚠️ 三种「无终态」必须分开，混了会大面积误报（实测踩过）：
+		#
+		#   pending  —— 已收到 <CNAME> 但终态答案还没到。
+		#               最常见原因：**日志滑动窗口截断**。实测
+		#               www.163.com 的 query[A] 与 query[AAAA] 都是
+		#               forwarded → reply <CNAME> 就到窗口边界了，
+		#               终态 A/AAAA 行落在窗口外。这是采样边界问题，
+		#               **不是失败** —— 若判成失败，每次扫都会把正常
+		#               域名记成故障并触发误自愈。
+		#   noreply  —— 有 forwarded 但**一条 reply 都没有**。这是
+		#               真实的第 ② 段失败（上游确实没回）。
+		#   noquery  —— 只有 query 行、无 forwarded。dnsmasq 把并发
+		#               相同查询合并了，正常行为，不是失败。
+		#
+		if (state == "" && saw_cname) state = "pending"
+		else if (state == "" && up != "") state = "noreply"
+		else if (state == "") state = "noquery"
+		printf "%s|%s|%s|%s|%s\n", client, domain, up, state, ans
+		qid = ""; domain = ""; up = ""; state = ""; ans = ""
+		client = ""; saw_cname = 0
+	}
+	{
+		# ⚠️ 必须先剥离行尾的 CR（\r）。
+		#
+		#    实测踩过：样本文件经 Windows 传输后带 CRLF，于是 f[6] 是
+		#    "SERVFAIL\r" 而不是 "SERVFAIL"，字符串比较全部失配 ——
+		#    失败被静默判成 ok，诊断功能等于失效。路由器日志本身虽为 LF，
+		#    但 logread 输出经管道/终端可能带 CR，防御性剥离成本极低。
+		sub(/\r$/, "")
+		# 只处理 dnsmasq 的行
+		if (index($0, "dnsmasq[") == 0) next
+		# 取冒号后的内容
+		p = index($0, "]: ")
+		if (p == 0) next
+		rest = substr($0, p + 3)
+		n = split(rest, f, " ")
+		if (n < 3) next
+
+		# f[1] = 查询ID，f[2] = IP/端口
+		thisid = f[1]
+		if (thisid !~ /^[0-9]+$/) next
+
+		# ⚠️ 丢弃「窗口首条」不完整的查询。
+		#
+		#    滑动窗口（tail -n N）必然把第一条查询的尾部截掉：它的
+		#    reply 行可能在窗口之前就被读走了。实测 api.deepseek.com：
+		#    ID 250633 的 4 条真实 A 记录（171.108.215.12 等）落在窗口外，
+		#    窗口内只剩它的 query + forwarded → 被判成 noreply 失败，
+		#    而该域名实际解析完全正常。
+		#
+		#    做法：记下窗口里出现的**第一个** query ID，它在 flush 时
+		#    一律丢弃 —— 我们无法知道它前面还有多少行没读到。
+		#    代价是每轮少算一个查询，可忽略。
+		#
+		# 新查询 ID → 冲掉上一条
+		#
+		# ⚠️ 必须把 action 判断放在**这个 if 之外**。
+		#    原实现把整段 action 分支写在 `if (thisid != qid) {...}` 内部，
+		#    于是同一查询 ID 的第 2 行起（forwarded / reply）走不到任何分支：
+		#      · forwarded 不被记录 → up 为空
+		#      · reply 不被记录   → state 为空
+		#    最终 flush 时 state=="" 且 up=="" → 记成 noquery。
+		#    实测：metric.huya.com 正常返回 NODATA，却被记成失败，
+		#    还对 hs.p2p.huya.com 误执行了 L1 自愈。
+		if (thisid != qid) {
+			flush()
+			qid = thisid
+			split(f[2], ipp, "/")
+			client = ipp[1]
+			if (first_id == "") first_id = thisid
+		}
+		action = f[3]
+		if (action == "query[A]" || action == "query[AAAA]" || action == "query[HTTPS]" || action == "query[ANY]") {
+			# query[TYPE] domain from IP
+			if (domain == "") domain = f[4]
+		} else if (action == "forwarded") {
+			# 只在还没记录域名时取（query 行的域名才是客户机问的原始域名）
+			if (domain == "") domain = f[4]
+			if (n >= 6) up = f[6]
+		} else if (action == "reply" || action == "cached") {
+			# reply / cached <域名> is <答案>
+			#
+			# ⚠️ `cached` 必须与 `reply` 同等处理。
+			#    实测动作分布（一台路由器，最近一段日志）：
+			#      reply 439 / cached 182 / forwarded 114 / nftset 24
+			#    cached 是**命中缓存直接回复**，占第二多。原实现只认
+			#    reply，于是所有缓存命中的查询 state 为空 →
+			#    有 forwarded 的判成 noreply（误报失败）、
+			#    无 forwarded 的判成 noquery。
+			#    实测 28 条「失败」里绝大多数是这条引起的。
+			#
+			# ⚠️ 一个查询 ID 会有**多条** reply —— CNAME 链每一跳一行，
+			#    最后一行才是终态。实测（hs.p2p.huya.com，query[HTTPS]）：
+			#
+			#      221459 ... reply hs.p2p.huya.com is <CNAME>
+			#      221459 ... reply hs.p2p.huya.com.c.volcfcdndvs.com is <CNAME>
+			#      221459 ... reply huya-p2p.jx.volclivedvs.com is <CNAME>
+			#      221459 ... reply huya-p2p.tx.volclivedvs.com is <CNAME>
+			#      221459 ... reply sched-l1-dk.tx.volclivedvs.com is NODATA
+			#
+			#    这条链的终态是 NODATA（HTTPS 记录确实不存在），**完全正常**。
+			#    若只认第一个 reply 或只在 state 为空时记 NODATA，会判成
+			#    noreply 并触发误自愈 —— 实测踩过：三个能正常解析的
+			#    域名被判失败，还对其中一个执行了 L1 自愈。
+			#
+			#    所以：**每条 reply 都覆盖 state**，最后一条说了算。
+			if (n >= 5) {
+				what = f[5]
+				if (what == "is") {
+					ans = f[6]
+					# CNAME 是中间跳，不改变 state（等最终行），
+					# 但要记住「链路已开始」——flush 时据此区分 pending
+					# 与真正的 noreply。
+					if (ans == "<CNAME>") {
+						saw_cname = 1
+					} else if (ans == "NODATA-IPv6" || ans == "NODATA") {
+						state = "nodata"
+					} else if (ans == "NXDOMAIN") {
+						state = "nxdomain"
+					} else if (ans == "SERVFAIL") {
+						state = "servfail"
+					} else if (ans == "REFUSED") {
+						state = "refused"
+					} else {
+						state = "ok"
+					}
+				}
+				# what == "query" → `reply query is duplicate`，去重提示，不算失败
+			}
+		}
+	}
+	END { last_id = qid; flush() }
+	'
+}
+
+# ------------------------------------------------------------
+# 流式解析（daemon 专用）
+#
+# 与 _diag_parse 的区别：
+#   _diag_parse  处理**有限快照**，首尾必然残缺，只能丢弃边界
+#   _diag_stream 处理**无限流**，按查询 ID 在内存里跟踪在途查询，
+#                收到终态即输出，超龄未完成才判失败
+#
+# 为什么必须这样：实测一条查询会跨 20+ 行（CNAME 链 + nftset 行），
+# 快照窗口切在中间就产生「有 forwarded 无 reply」的假象 ——
+# www.apple.com（10 条真实 A 记录）与 api.deepseek.com 都因此被
+# 误判成 noreply，还对 copilot.tencent.com 误执行了 L1 自愈。
+#
+# 输出：<客户机IP>|<域名>|<上游>|<状态>|<答案>
+# ------------------------------------------------------------
+_diag_stream() {
+	awk '
+	BEGIN {
+		FS = " "
+		line_no = 0
+		AGE = 400        # 超过这么多行没动静，判定该查询已死
+		CHECK = 100      # 每这么多行做一次超龄清理
+	}
+
+	# 输出一条记录并清掉它的所有状态
+	function emit(id) {
+		if (!(id in q_dom)) return
+		if (q_dom[id] == "") { delete_id(id); return }
+		st = q_state[id]
+		if (st == "") {
+			if (q_cname[id]) st = "pending"
+			else if (q_up[id] != "") st = "noreply"
+			else st = "noquery"
+		}
+		printf "%s|%s|%s|%s|%s\n", q_client[id], q_dom[id], q_up[id], st, q_ans[id]
+		delete_id(id)
+		# 记住这个 ID 已结束 —— 同 ID 的后续 reply 行（CNAME 链的其余
+		# 地址记录）不能再建一条新记录，否则 www.apple.com 会输出两次。
+		q_done[id] = 1
+	}
+
+	function delete_id(id) {
+		delete q_dom[id]; delete q_up[id]; delete q_client[id]
+		delete q_state[id]; delete q_ans[id]; delete q_seen[id]
+		delete q_cname[id]
+	}
+
+	# 清理超龄在途查询（真失败的查询不会再有后续行）
+	function sweep(now) {
+		for (id in q_dom) {
+			if (now - q_seen[id] > AGE) emit(id)
+		}
+	}
+
+	{
+		sub(/\r$/, "")
+		if (index($0, "dnsmasq[") == 0) next
+		p = index($0, "]: ")
+		if (p == 0) next
+		rest = substr($0, p + 3)
+		n = split(rest, f, " ")
+		if (n < 3) next
+
+		thisid = f[1]
+		if (thisid !~ /^[0-9]+$/) next
+
+		line_no++
+		action = f[3]
+
+		# 该查询已输出过终态，后续同 ID 的 reply 行一律忽略
+		if (thisid in q_done) next
+
+		if (action ~ /^query\[/) {
+			# 新查询开始：先输出同 ID 的旧记录（ID 不会复用，保险）
+			if (thisid in q_dom) emit(thisid)
+			split(f[2], ipp, "/")
+			q_client[thisid] = ipp[1]
+			q_dom[thisid] = f[4]
+			q_up[thisid] = ""
+			q_state[thisid] = ""
+			q_ans[thisid] = ""
+			q_cname[thisid] = 0
+		} else if (action == "forwarded") {
+			if (!(thisid in q_dom)) {
+				# 没见过 query 行（窗口起点），补一个
+				split(f[2], ipp, "/")
+				q_client[thisid] = ipp[1]
+				q_dom[thisid] = f[4]
+				q_state[thisid] = ""
+				q_ans[thisid] = ""
+				q_cname[thisid] = 0
+			}
+			if (n >= 6) q_up[thisid] = f[6]
+		} else if (action == "reply" || action == "cached") {
+			if (!(thisid in q_dom)) {
+				split(f[2], ipp, "/")
+				q_client[thisid] = ipp[1]
+				q_dom[thisid] = f[4]
+				q_state[thisid] = ""
+				q_ans[thisid] = ""
+				q_cname[thisid] = 0
+			}
+			if (n >= 5 && f[5] == "is") {
+				a = f[6]
+				if (a == "<CNAME>") {
+					q_cname[thisid] = 1
+				} else if (a == "NODATA-IPv6" || a == "NODATA") {
+					q_state[thisid] = "nodata"; q_ans[thisid] = a
+				} else if (a == "NXDOMAIN") {
+					q_state[thisid] = "nxdomain"; q_ans[thisid] = a
+				} else if (a == "SERVFAIL") {
+					q_state[thisid] = "servfail"; q_ans[thisid] = a
+				} else if (a == "REFUSED") {
+					q_state[thisid] = "refused"; q_ans[thisid] = a
+				} else {
+					q_state[thisid] = "ok"; q_ans[thisid] = a
+				}
+				# 终态一到就输出，不再等
+				if (q_state[thisid] != "" && q_state[thisid] != "pending") {
+					emit(thisid)
+					next
+				}
+			}
+		} else {
+			next
+		}
+
+		q_seen[thisid] = line_no
+		if (line_no % CHECK == 0) sweep(line_no)
+	}
+
+	END { for (id in q_dom) emit(id) }
+	'
+}
+
+# ------------------------------------------------------------
+# 失败判定
+#
+# 只有 state 为 servfail / timeout / noreply 才算失败。
+# nodata / nxdomain / refused / ok / duplicate 都不算（ADR-0009 §3.4）。
+# ------------------------------------------------------------
+_diag_is_fail() {
+	case "$1" in
+		servfail|noreply) return 0 ;;
+		*) return 1 ;;
+	esac
+}
+
+# 追加一条失败记录（TSV）
+#
+# 格式：<epoch>|<客户机IP>|<域名>|<上游>|<状态>|<段>
+#
+# 段号由状态反推（ADR-0009 §3.2）：
+#   noreply  → ② dnsmasq 转发了但上游没回
+#   servfail → ③ 上游明确失败
+_diag_record_fail() {
+	local ts ip dom up st seg
+	ts="$1"; ip="$2"; dom="$3"; up="$4"; st="$5"
+	case "$st" in
+		noreply)  seg=2 ;;
+		servfail) seg=3 ;;
+		*)        seg=0 ;;
+	esac
+	printf '%s|%s|%s|%s|%s|%s\n' "$ts" "$ip" "$dom" "$up" "$st" "$seg" >> "$DIAG_FAIL_LOG"
+}
+
+# 修剪失败记录：按保留时长与条目上限
+_diag_trim() {
+	local keep_sec max_n now cutoff tmp
+	keep_sec=$(dc_get client_diag retain_sec 3600)
+	max_n=$(dc_get client_diag retain_max 500)
+
+	[ -f "$DIAG_FAIL_LOG" ] || return 0
+	now=$(date +%s)
+	cutoff=$((now - keep_sec))
+
+	tmp=$(mktemp) || return 1
+	# 先按时间过滤，再按条数截尾（保留最新的 max_n 条）
+	awk -F'|' -v c="$cutoff" '$1 >= c' "$DIAG_FAIL_LOG" | tail -n "$max_n" > "$tmp"
+	mv -f "$tmp" "$DIAG_FAIL_LOG"
+}
+
+# ------------------------------------------------------------
+# 阈值判定：同一域名在窗口内累计失败次数
+#
+# 默认 5 分钟内 ≥3 次（ADR-0009 §3.4）
+# ------------------------------------------------------------
+_diag_fail_count() {
+	local dom win now cutoff
+	dom="$1"
+	win=$(dc_get client_diag fail_window 300)
+	now=$(date +%s)
+	cutoff=$((now - win))
+
+	[ -f "$DIAG_FAIL_LOG" ] || { echo 0; return; }
+	awk -F'|' -v d="$dom" -v c="$cutoff" '$2 != "" && $3 == d && $1 >= c { n++ } END { print n + 0 }' "$DIAG_FAIL_LOG"
+}
+
+# ------------------------------------------------------------
+# 分级自愈 L1 → L2 → L3
+#
+# L4（改归属）单独处理，因为它要写 UCI 且必须分区隔离。
+#
+# ⚠️ 时间窗：自动自愈默认每小时最多 1 次（ADR-0009 §3.5）。
+#    手动触发（heal 子命令）不受限 —— 用户明知可以断网才会点。
+# ------------------------------------------------------------
+_diag_window_ok() {
+	local win last now
+	win=$(dc_get client_diag autofix_interval 3600)
+	last=$(cat "$DIAG_FIX_STATE" 2>/dev/null)
+	case "$last" in ''|*[!0-9]*) last=0 ;; esac
+	now=$(date +%s)
+	[ $((now - last)) -ge "$win" ]
+}
+
+_diag_mark_fix() {
+	date +%s > "$DIAG_FIX_STATE"
+}
+
+# 执行一级自愈，返回 0 表示成功
+#
+# L1: flush（SIGHUP dnsmasq，零中断）
+# L2: apply（重建 split.conf）
+# L3: 重启 dnsmasq（实测 3 秒中断）
+_diag_heal_level() {
+	local lv out
+	lv="$1"
+	case "$lv" in
+		1)
+			out=$(/usr/bin/dnschain-selftest flush 2>&1)
+			case "$out" in
+				OK=*) return 0 ;;
+				*) return 1 ;;
+			esac
+			;;
+		2)
+			out=$(/usr/bin/dnschain-selftest apply 2>&1)
+			case "$out" in
+				OK=*) return 0 ;;
+				*) return 1 ;;
+			esac
+			;;
+		3)
+			/etc/init.d/dnsmasq restart >/dev/null 2>&1
+			return 0
+			;;
+		*) return 1 ;;
+	esac
+}
+
+# 记一条自愈审计（可撤销）
+#
+# 格式：<id>|<epoch>|<级别>|<触发域名>|<结果>|<备注>
+_diag_log_fix() {
+	local id ts lv dom res note
+	ts="$1"; lv="$2"; dom="$3"; res="$4"; note="$5"
+	id=$(date +%s)$$
+	printf '%s|%s|%s|%s|%s|%s\n' "$id" "$ts" "$lv" "$dom" "$res" "$note" >> "$DIAG_FIX_LOG"
+
+	# 审计也受条目上限约束
+	local max_n tmp
+	max_n=$(dc_get client_diag retain_max 500)
+	tmp=$(mktemp) || return 0
+	tail -n "$max_n" "$DIAG_FIX_LOG" > "$tmp" && mv -f "$tmp" "$DIAG_FIX_LOG"
+}
+
+# 自动自愈主流程：先 L1，无效升 L2，再无效升 L3
+_diag_autofix() {
+	local dom ts lv ok
+	dom="$1"
+	ts=$(date +%s)
+
+	# 时间窗：自动路径必须检查
+	_diag_window_ok || return 0
+
+	for lv in 1 2 3; do
+		if _diag_heal_level "$lv"; then
+			ok=1
+			_diag_log_fix "$ts" "L$lv" "$dom" "ok" "自动自愈（域名 $dom 连续失败）"
+			_diag_mark_fix
+			dnschain_log "客户机诊断：$dom 连续失败，已执行 L$lv 自愈"
+			return 0
+		fi
+	done
+
+	_diag_log_fix "$ts" "L3" "$dom" "fail" "三级自愈均失败"
+	_diag_mark_fix
+	dnschain_log "客户机诊断：$dom 连续失败，L1-L3 均失败"
+	return 1
+}
+
+# ------------------------------------------------------------
+# scan：扫一轮
+# ------------------------------------------------------------
+cmd_scan() {
+	local ts line ip dom up st cnt need healed
+
+	# 互斥：daemon 与手动触发不能并发（同 dc_health_cycle 的教训）
+	if ! mkdir "$DIAG_LOCK" 2>/dev/null; then
+		# 死锁自动清理：锁目录超过 5 分钟视为残留
+		if [ -d "$DIAG_LOCK" ]; then
+			local age
+			age=$(( $(date +%s) - $(date -r "$DIAG_LOCK" +%s 2>/dev/null || echo 0) ))
+			if [ "$age" -gt 300 ]; then
+				rmdir "$DIAG_LOCK" 2>/dev/null
+				mkdir "$DIAG_LOCK" 2>/dev/null || return 0
+			else
+				return 0
+			fi
+		else
+			return 0
+		fi
+	fi
+
+	trap 'rmdir "$DIAG_LOCK" 2>/dev/null' EXIT INT TERM
+
+	[ "$(dc_get client_diag enabled 1)" = "1" ] || return 0
+
+	ts=$(date +%s)
+	mkdir -p "$DNSCHAIN_STATE_DIR" 2>/dev/null
+
+	# 只扫上次扫描之后的日志（避免重复记录）
+	#
+	# ⚠️ logread 没有「since」参数，用时间戳比对。
+	#    取最近 2000 行足够覆盖一轮（实测一轮查询量级）。
+	logread 2>/dev/null | tail -n 2000 | _diag_parse > /tmp/.diag-parse.$$ 2>/dev/null
+
+	# 同一域名只要本轮有**任意一次成功**，就不记失败
+	#
+	# ⚠️ 这条是必须的，实测踩过：api.deepseek.com 在日志里有 4 个查询 ID，
+	#    其中 ID 250633 完整成功（返回 4 个 A 记录），但另一个 ID 因
+	#    **日志滑动窗口截断**只有 forwarded 没有 reply。若按「每条查询
+	#    独立判定」，那个截断的 ID 会把域名记成 noreply 失败 ——
+	#    而实际上该域名解析完全正常。
+	#
+	#    判据应该是「这个域名这一轮到底通不通」，不是「每个查询 ID 通不通」。
+	awk -F'|' '$4 == "ok" { print $2 }' /tmp/.diag-parse.$$ | sort -u > /tmp/.diag-ok.$$
+
+	# 逐条判定，达阈值的域名触发自愈（每个域名一轮只触发一次）
+	: > /tmp/.diag-healed.$$
+	while IFS='|' read -r ip dom up st ans; do
+		[ -n "$ip" ] || continue
+		[ -n "$dom" ] || continue
+		_diag_is_fail "$st" || continue
+
+		# 本轮该域名有成功记录 → 不记失败
+		grep -qxF "$dom" /tmp/.diag-ok.$$ 2>/dev/null && continue
+
+		_diag_record_fail "$ts" "$ip" "$dom" "$up" "$st"
+
+		# 阈值判定
+		cnt=$(_diag_fail_count "$dom")
+		need=$(dc_get client_diag fail_threshold 3)
+		if [ "$cnt" -ge "$need" ]; then
+			# 同一轮内同一域名只自愈一次
+			grep -qxF "$dom" /tmp/.diag-healed.$$ 2>/dev/null && continue
+			echo "$dom" >> /tmp/.diag-healed.$$
+			if [ "$(dc_get client_diag autofix_enabled 1)" = "1" ]; then
+				_diag_autofix "$dom"
+			fi
+		fi
+	done < /tmp/.diag-parse.$$
+
+	rm -f /tmp/.diag-parse.$$ /tmp/.diag-healed.$$ /tmp/.diag-ok.$$
+	_diag_trim
+	echo "$ts" > "$DIAG_LAST_SCAN"
+	return 0
+}
+
+# ------------------------------------------------------------
+# list：客户机列表（TSV）
+#
+# 输出：<IP>|<主机名>|<失败数>|<最近失败时刻>|<最近域名>
+# 按失败数降序（有问题的排前面）
+# ------------------------------------------------------------
+cmd_list() {
+	local win now cutoff
+	win=$(dc_get client_diag retain_sec 3600)
+	now=$(date +%s)
+	cutoff=$((now - win))
+
+	[ -f "$DIAG_FAIL_LOG" ] || return 0
+
+	# 先聚合失败统计
+	awk -F'|' -v c="$cutoff" '
+		$1 >= c {
+			n[$2]++
+			if ($1 > last[$2]) { last[$2] = $1; dom[$2] = $3 }
+		}
+		END {
+			for (ip in n) printf "%s\t%d\t%d\t%s\n", ip, n[ip], last[ip], dom[ip]
+		}
+	' "$DIAG_FAIL_LOG" | sort -t'	' -k2,2rn | while IFS='	' read -r ip cnt last dom; do
+		# 查主机名（/tmp/dhcp.leases 第 3 列 IP、第 4 列主机名）
+		local host
+		host=$(awk -v i="$ip" '$3 == i { print $4; exit }' /tmp/dhcp.leases 2>/dev/null)
+		[ -n "$host" ] || host="*"
+		printf '%s|%s|%s|%s|%s\n' "$ip" "$host" "$cnt" "$last" "$dom"
+	done
+}
+
+# ------------------------------------------------------------
+# detail：某客户机的失败时间线（TSV）
+#
+# 输出：<epoch>|<域名>|<上游>|<状态>|<段>|<建议动作>
+# ------------------------------------------------------------
+cmd_detail() {
+	local ip win now cutoff
+	ip="$1"
+	[ -n "$ip" ] || return 1
+
+	win=$(dc_get client_diag retain_sec 3600)
+	now=$(date +%s)
+	cutoff=$((now - win))
+
+	[ -f "$DIAG_FAIL_LOG" ] || return 0
+
+	awk -F'|' -v i="$ip" -v c="$cutoff" \
+		'$2 == i && $1 >= c { print $1 "|" $3 "|" $4 "|" $5 "|" $6 }' "$DIAG_FAIL_LOG" \
+		| sort -t'|' -k1,1rn | while IFS='|' read -r ts dom up st seg; do
+			# 建议动作：段 2/3 都是上游问题，建议重试或改走另一条链
+			local hint
+			case "$seg" in
+				2) hint="upstream-no-reply" ;;
+				3) hint="upstream-fail" ;;
+				*) hint="unknown" ;;
+			esac
+			printf '%s|%s|%s|%s|%s|%s\n' "$ts" "$dom" "$up" "$st" "$seg" "$hint"
+		done
+}
+
+# ------------------------------------------------------------
+# autofix-log / undo
+# ------------------------------------------------------------
+cmd_autofix_log() {
+	[ -f "$DIAG_FIX_LOG" ] || return 0
+	tail -n 100 "$DIAG_FIX_LOG"
+}
+
+cmd_undo() {
+	local id
+	id="$1"
+	[ -n "$id" ] || return 1
+
+	# 只允许撤销 L4（改归属）—— L1-L3 是幂等的服务动作，无需撤销
+	local lv
+	lv=$(awk -F'|' -v i="$id" '$1 == i { print $3; exit }' "$DIAG_FIX_LOG" 2>/dev/null)
+	[ -n "$lv" ] || { echo "ERROR=记录不存在"; return 1; }
+	[ "$lv" = "L4" ] || { echo "ERROR=L1-L3 是幂等服务动作，无需撤销"; return 1; }
+
+	# L4 的撤销：从自动列表移除该域名
+	local dom
+	dom=$(awk -F'|' -v i="$id" '$1 == i { print $4; exit }' "$DIAG_FIX_LOG" 2>/dev/null)
+	[ -n "$dom" ] || { echo "ERROR=记录里没有域名"; return 1; }
+
+	uci -q del_list "dnschain.dom_auto_foreign.domain=$dom" 2>/dev/null
+	uci -q del_list "dnschain.dom_auto_domestic.domain=$dom" 2>/dev/null
+	uci -q commit dnschain 2>/dev/null
+
+	# 审计里标为已撤销
+	local tmp
+	tmp=$(mktemp) || return 1
+	awk -F'|' -v i="$id" 'BEGIN{OFS="|"} $1 == i { $5 = "undone" } { print }' "$DIAG_FIX_LOG" > "$tmp" \
+		&& mv -f "$tmp" "$DIAG_FIX_LOG"
+
+	echo "OK=已撤销 $dom 的自动归属调整"
+}
+
+# ------------------------------------------------------------
+# heal：手动触发指定级别
+#
+# 手动路径**不受时间窗限制** —— 用户明知可以断网才会点。
+# ------------------------------------------------------------
+cmd_heal() {
+	local lv ts
+	lv="$1"
+	case "$lv" in 1|2|3) ;; *) echo "ERROR=级别必须是 1/2/3"; return 1 ;; esac
+
+	ts=$(date +%s)
+	if _diag_heal_level "$lv"; then
+		_diag_log_fix "$ts" "L$lv" "-" "ok" "手动触发"
+		echo "OK=已执行 L$lv 自愈"
+		return 0
+	else
+		_diag_log_fix "$ts" "L$lv" "-" "fail" "手动触发失败"
+		echo "ERROR=L$lv 自愈失败"
+		return 1
+	fi
+}
+
+cmd_status() {
+	local last n
+	last=$(cat "$DIAG_LAST_SCAN" 2>/dev/null)
+	case "$last" in ''|*[!0-9]*) last=0 ;; esac
+	n=0
+	[ -f "$DIAG_FAIL_LOG" ] && n=$(wc -l < "$DIAG_FAIL_LOG" 2>/dev/null || echo 0)
+	printf 'ENABLED=%s\n' "$(dc_get client_diag enabled 1)"
+	printf 'AUTOFIX=%s\n' "$(dc_get client_diag autofix_enabled 1)"
+	printf 'LAST_SCAN=%s\n' "$last"
+	printf 'FAIL_COUNT=%s\n' "$n"
+	printf 'RETAIN_SEC=%s\n' "$(dc_get client_diag retain_sec 3600)"
+	printf 'RETAIN_MAX=%s\n' "$(dc_get client_diag retain_max 500)"
+}
+
+# ------------------------------------------------------------
+# daemon：常驻循环
+# ------------------------------------------------------------
+cmd_daemon() {
+	local interval
+	interval=$(dc_get client_diag interval 60)
+	[ "$interval" -gt 0 ] 2>/dev/null || interval=60
+
+	dnschain_log "客户机诊断守护启动（持续跟随日志，每 ${interval} 秒汇总一次）"
+
+	# ── 为什么必须持续跟随，而不是每轮 tail 快照 ────────────────
+	#
+	# 实测教训：`logread | tail -n 2000` 每轮取到的是**不同片段**，
+	# 而一条查询会跨 20+ 行（CNAME 链 + nftset 行）。当窗口边界切在
+	# 查询中间时，就出现「有 forwarded 无 reply」的假象：
+	#
+	#   www.apple.com  一条查询 20+ 行，其中 10 条是真实 A 记录，
+	#                  窗口切在中间 → 判成 noreply 失败
+	#   api.deepseek.com  同理，4 条真实 A 记录落在窗口外
+	#
+	# 后果：每轮都把正常域名记成故障，还对 copilot.tencent.com
+	# 误执行了 L1 自愈；记录数 7→38→78 持续膨胀。
+	#
+	# 正确做法：daemon 用 `logread -f` **持续读流**，每个查询的完整
+	# 生命周期都在流里，不存在窗口边界问题。轮次只用于定期 flush
+	# 与修剪，不再重新取快照。
+	if ! mkdir "$DIAG_LOCK" 2>/dev/null; then
+		dnschain_log "客户机诊断：已有实例在跑，本实例退出"
+		return 0
+	fi
+	trap 'rmdir "$DIAG_LOCK" 2>/dev/null' EXIT INT TERM
+
+	# 流式处理：每输出一条判定结果就立即落盘，不等整轮
+	#
+	# 这条管道里的 while 每读一行就处理，不会缓冲到最后 ——
+	# 若改用 `logread -f | awk > file` 再读文件，会因缓冲看不到实时结果。
+	local ts
+	logread -f 2>/dev/null | _diag_stream | while IFS='|' read -r ip dom up st ans; do
+		[ -n "$ip" ] || continue
+		[ -n "$dom" ] || continue
+		_diag_is_fail "$st" || continue
+
+		ts=$(date +%s)
+		_diag_record_fail "$ts" "$ip" "$dom" "$up" "$st"
+
+		# 阈值判定 + 自愈
+		cnt=$(_diag_fail_count "$dom")
+		need=$(dc_get client_diag fail_threshold 3)
+		if [ "$cnt" -ge "$need" ]; then
+			if [ "$(dc_get client_diag autofix_enabled 1)" = "1" ]; then
+				_diag_autofix "$dom"
+			fi
+		fi
+
+		# 每 20 条修剪一次（避免频繁 fork）
+		REC_N=$(( ${REC_N:-0} + 1 ))
+		if [ $((REC_N % 20)) -eq 0 ]; then
+			_diag_trim
+			echo "$ts" > "$DIAG_LAST_SCAN"
+		fi
+	done
+}
+
+main() {
+	case "$1" in
+		scan)        shift; cmd_scan "$@" ;;
+		daemon)      shift; cmd_daemon "$@" ;;
+		list)        shift; cmd_list "$@" ;;
+		detail)      shift; cmd_detail "$@" ;;
+		autofix-log) shift; cmd_autofix_log "$@" ;;
+		undo)        shift; cmd_undo "$@" ;;
+		heal)        shift; cmd_heal "$@" ;;
+		status)      shift; cmd_status "$@" ;;
+		*)
+			cat <<'USAGE'
+用法：dnschain-client-diag <子命令>
+
+  scan             扫一轮日志，更新失败记录，必要时自愈
+  daemon           常驻循环（procd 托管）
+  list             客户机列表（TSV）
+  detail <IP>      某客户机的失败时间线（TSV）
+  autofix-log      自愈审计记录（TSV）
+  undo <id>        撤销一条自动归属调整
+  heal <1|2|3>     手动触发自愈（不受时间窗限制）
+  status           运行状态
+USAGE
+			return 1
+			;;
+	esac
+}
+
+main "$@"

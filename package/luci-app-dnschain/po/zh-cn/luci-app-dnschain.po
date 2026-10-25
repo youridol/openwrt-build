@@ -1881,3 +1881,126 @@ msgstr "经代理出口，可访问境外站点"
 
 msgid "共 %d 个"
 msgstr "共 %d 个"
+
+msgid "客户机链路诊断"
+msgstr "客户机链路诊断"
+
+msgid "按<b>客户机视角</b>分析：这台设备查了什么域名、收到什么答案、哪一段失败。<br/>与上方「自检」互补 —— 自检看路由器自身，这里看客户机实际收发。「自检全绿但某台设备打不开」正是这里要解释的。"
+msgstr "按<b>客户机视角</b>分析：这台设备查了什么域名、收到什么答案、哪一段失败。<br/>与上方「自检」互补 —— 自检看路由器自身，这里看客户机实际收发。「自检全绿但某台设备打不开」正是这里要解释的。"
+
+msgid "客户机"
+msgstr "客户机"
+
+msgid "诊断已启用"
+msgstr "诊断已启用"
+
+msgid "诊断已关闭"
+msgstr "诊断已关闭"
+
+msgid "自动自愈已开"
+msgstr "自动自愈已开"
+
+msgid "自动自愈已关"
+msgstr "自动自愈已关"
+
+msgid "失败记录 %d 条 · 保留 %d 秒"
+msgstr "失败记录 %d 条 · 保留 %d 秒"
+
+msgid "保留期内没有客户机失败记录。"
+msgstr "保留期内没有客户机失败记录。"
+
+msgid "客户机 IP"
+msgstr "客户机 IP"
+
+msgid "主机名"
+msgstr "主机名"
+
+msgid "失败数"
+msgstr "失败数"
+
+msgid "最近失败"
+msgstr "最近失败"
+
+msgid "最近域名"
+msgstr "最近域名"
+
+msgid "主机名来自 DHCP 租约，设备自己上报。随机 MAC 的设备同样能识别 —— 因为这里不用 MAC 作身份。"
+msgstr "主机名来自 DHCP 租约，设备自己上报。随机 MAC 的设备同样能识别 —— 因为这里不用 MAC 作身份。"
+
+msgid "失败时间线"
+msgstr "失败时间线"
+
+msgid "在上表任一客户机行点「诊断」查看它的失败时间线。"
+msgstr "在上表任一客户机行点「诊断」查看它的失败时间线。"
+
+msgid "客户机 %s 在保留期内没有失败记录。"
+msgstr "客户机 %s 在保留期内没有失败记录。"
+
+msgid "② dnsmasq 已转发，上游无回应"
+msgstr "② dnsmasq 已转发，上游无回应"
+
+msgid "③ 上游明确失败"
+msgstr "③ 上游明确失败"
+
+msgid "无回应"
+msgstr "无回应"
+
+msgid "上游失败"
+msgstr "上游失败"
+
+msgid "时刻"
+msgstr "时刻"
+
+msgid "原始"
+msgstr "原始"
+
+msgid "失败段"
+msgstr "失败段"
+
+msgid "立即清缓存"
+msgstr "立即清缓存"
+
+msgid "执行 L1"
+msgstr "执行 L1"
+
+msgid "SIGHUP dnsmasq，零中断。绝大多数故障这一级就够。"
+msgstr "SIGHUP dnsmasq，零中断。绝大多数故障这一级就够。"
+
+msgid "重启 dnsmasq"
+msgstr "重启 dnsmasq"
+
+msgid "执行 L3"
+msgstr "执行 L3"
+
+msgid "实测约 3 秒解析中断。仅在 L1/L2 无效时使用。"
+msgstr "实测约 3 秒解析中断。仅在 L1/L2 无效时使用。"
+
+msgid "自愈记录"
+msgstr "自愈记录"
+
+msgid "还没有自愈记录。"
+msgstr "还没有自愈记录。"
+
+msgid "清缓存"
+msgstr "清缓存"
+
+msgid "重放配置"
+msgstr "重放配置"
+
+msgid "改归属"
+msgstr "改归属"
+
+msgid "成功"
+msgstr "成功"
+
+msgid "失败"
+msgstr "失败"
+
+msgid "已撤销"
+msgstr "已撤销"
+
+msgid "级别"
+msgstr "级别"
+
+msgid "备注"
+msgstr "备注"

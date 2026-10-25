@@ -68,6 +68,7 @@
 | 给已有页面加一个开关 | 对应包文档的「页面元素 → 后端调用」 | `docs/runtime/overlay-inventory.md`（如果它要写 UCI 默认值） |
 | 改 DNS 分流规则 | `docs/runtime/dns-chain.md` | `docs/adr/0008-direct-first-with-fallback.md`（**v0.22.0 起的分流语义**）、`docs/adr/0006-domain-routing-and-reroute.md`（§3 归属判定仍有效，§4–§7 已失效） |
 | 改页面 tab 结构 / section 归属 | `docs/adr/0007-tab-structure.md`（含**文档联动清单**，改结构必读） | `docs/packages/luci-app-dnschain.md` 的 section 清单 |
+| 改客户机链路诊断 / 分级自愈 | `docs/adr/0009-client-link-diagnosis.md`（含四段链路、不算失败的四类、L1–L4 分级） | `GLOSSARY.md` 的「客户机链路诊断」「分级自愈」 |
 | 改 DNS 拦截行为 | `docs/packages/luci-app-dnsproxy.md` | `files/etc/init.d/dnsproxy` 的 `dnschain_takes_over` |
 | 升级 trafficctl 上游 | `patches/luci-app-trafficctl/README.md` | `docs/packages/luci-app-trafficctl.md` 的「构建与打包」 |
 | 排查「客户机解析不了」 | `docs/operations/verification.md` 的排障顺序 | `docs/runtime/dns-chain.md` |
