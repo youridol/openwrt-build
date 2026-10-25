@@ -28,6 +28,7 @@
 
 . /usr/share/dnschain/dnschain.sh 2>/dev/null || exit 1
 
+DIAG_FLOW_LOG="${DNSCHAIN_STATE_DIR}/client-flow.log"
 DIAG_FAIL_LOG="${DNSCHAIN_STATE_DIR}/client-fail.log"
 DIAG_FIX_LOG="${DNSCHAIN_STATE_DIR}/autofix.log"
 DIAG_FIX_STATE="${DNSCHAIN_STATE_DIR}/autofix.state"
@@ -375,6 +376,51 @@ _diag_record_fail() {
 		*)        seg=0 ;;
 	esac
 	printf '%s|%s|%s|%s|%s|%s\n' "$ts" "$ip" "$dom" "$up" "$st" "$seg" >> "$DIAG_FAIL_LOG"
+	[ -f "$DIAG_FAIL_LOG" ] && chmod 644 "$DIAG_FAIL_LOG" 2>/dev/null
+}
+
+# 追加一条**查询流水**（TSV）
+#
+# 格式：<epoch>|<客户机IP>|<域名>|<上游>|<状态>|<段>|<答案>
+#
+# 与失败记录的区别：**流水记全部查询，不分成功失败**。
+# 用户要「客户机发起的查询完整链路」，成功查询也必须看得到 ——
+# 只看失败列表无法回答「这台设备刚才查了什么、走的哪条链」。
+#
+# 状态取值见 GLOSSARY「不算失败」：ok / nodata / nxdomain / refused /
+# duplicate / pending / noquery / servfail / noreply。
+_diag_record_flow() {
+	local ts ip dom up st seg ans
+	ts="$1"; ip="$2"; dom="$3"; up="$4"; st="$5"; ans="$6"
+	case "$st" in
+		noreply)  seg=2 ;;
+		servfail) seg=3 ;;
+		noquery)  seg=1 ;;
+		*)        seg=0 ;;
+	esac
+	printf '%s|%s|%s|%s|%s|%s|%s\n' "$ts" "$ip" "$dom" "$up" "$st" "$seg" "$ans" >> "$DIAG_FLOW_LOG"
+	# 首次创建时 umask 可能给出 600，显式放开读权限供 LuCI 读取
+	[ -f "$DIAG_FLOW_LOG" ] && chmod 644 "$DIAG_FLOW_LOG" 2>/dev/null
+}
+
+# 修剪流水：按保留时长与条目上限（与失败记录独立配置）
+_diag_trim_flow() {
+	local keep_sec max_n now cutoff tmp
+	keep_sec=$(dc_get client_diag flow_retain_sec 600)
+	max_n=$(dc_get client_diag flow_retain_max 1000)
+
+	[ -f "$DIAG_FLOW_LOG" ] || return 0
+	now=$(date +%s)
+	cutoff=$((now - keep_sec))
+
+	tmp=$(mktemp) || return 1
+	awk -F'|' -v c="$cutoff" '$1 >= c' "$DIAG_FLOW_LOG" | tail -n "$max_n" > "$tmp"
+	# ⚠️ mktemp 建的文件是 0600，而 LuCI 的 rpcd 以受限身份读 ——
+	#    权限不对时页面显示「保留期内还没有查询流水」，而数据其实在。
+	#    实测踩过：脚本里 flow 有 364 条输出，页面却一片空。
+	chmod 644 "$tmp" 2>/dev/null
+	mv -f "$tmp" "$DIAG_FLOW_LOG"
+	chmod 644 "$DIAG_FLOW_LOG" 2>/dev/null
 }
 
 # 修剪失败记录：按保留时长与条目上限
@@ -390,7 +436,9 @@ _diag_trim() {
 	tmp=$(mktemp) || return 1
 	# 先按时间过滤，再按条数截尾（保留最新的 max_n 条）
 	awk -F'|' -v c="$cutoff" '$1 >= c' "$DIAG_FAIL_LOG" | tail -n "$max_n" > "$tmp"
+	chmod 644 "$tmp" 2>/dev/null
 	mv -f "$tmp" "$DIAG_FAIL_LOG"
+	chmod 644 "$DIAG_FAIL_LOG" 2>/dev/null
 }
 
 # ------------------------------------------------------------
@@ -592,24 +640,52 @@ cmd_list() {
 	now=$(date +%s)
 	cutoff=$((now - win))
 
-	[ -f "$DIAG_FAIL_LOG" ] || return 0
+	# ⚠️ 不能因「失败表不存在」就整体返回 —— 流水表可能有大量成功查询。
+	#    实测踩过：只判 DIAG_FAIL_LOG 时，没有任何失败记录的客户机
+	#    在列表里完全不出现，用户以为「这台设备没上网」。
+	[ -f "$DIAG_FAIL_LOG" ] || [ -f "$DIAG_FLOW_LOG" ] || return 0
 
-	# 先聚合失败统计
+	# 失败统计（来自失败表）
+	local ftmp
+	ftmp=$(mktemp) || return 1
 	awk -F'|' -v c="$cutoff" '
 		$1 >= c {
 			n[$2]++
 			if ($1 > last[$2]) { last[$2] = $1; dom[$2] = $3 }
 		}
-		END {
-			for (ip in n) printf "%s\t%d\t%d\t%s\n", ip, n[ip], last[ip], dom[ip]
-		}
-	' "$DIAG_FAIL_LOG" | sort -t'	' -k2,2rn | while IFS='	' read -r ip cnt last dom; do
-		# 查主机名（/tmp/dhcp.leases 第 3 列 IP、第 4 列主机名）
+		END { for (ip in n) printf "%s\t%d\t%d\t%s\n", ip, n[ip], last[ip], dom[ip] }
+	' "$DIAG_FAIL_LOG" > "$ftmp" 2>/dev/null
+
+	# 总查询数（来自流水表）—— 用户要看「这台设备一共查了多少」
+	local qtmp
+	qtmp=$(mktemp) || { rm -f "$ftmp"; return 1; }
+	local fwin
+	fwin=$(dc_get client_diag flow_retain_sec 600)
+	local fcutoff
+	fcutoff=$((now - fwin))
+	[ -f "$DIAG_FLOW_LOG" ] && awk -F'|' -v c="$fcutoff" '$1 >= c { q[$2]++ } END { for (ip in q) print ip "\t" q[ip] }' "$DIAG_FLOW_LOG" > "$qtmp" 2>/dev/null
+
+	# 合并：以流水里的客户机为主体（有查询就列出），失败数可能为 0
+	{
+		cut -f1 "$qtmp" 2>/dev/null
+		cut -f1 "$ftmp" 2>/dev/null
+	} | sort -u | while read -r ip; do
+		[ -n "$ip" ] || continue
+		local fc lc dc qc
+		fc=$(awk -F'	' -v i="$ip" '$1 == i { print $2 }' "$ftmp" 2>/dev/null)
+		lc=$(awk -F'	' -v i="$ip" '$1 == i { print $3 }' "$ftmp" 2>/dev/null)
+		dc=$(awk -F'	' -v i="$ip" '$1 == i { print $4 }' "$ftmp" 2>/dev/null)
+		qc=$(awk -F'	' -v i="$ip" '$1 == i { print $2 }' "$qtmp" 2>/dev/null)
+		[ -n "$fc" ] || fc=0
+		[ -n "$lc" ] || lc=0
+		[ -n "$qc" ] || qc=0
 		local host
 		host=$(awk -v i="$ip" '$3 == i { print $4; exit }' /tmp/dhcp.leases 2>/dev/null)
 		[ -n "$host" ] || host="*"
-		printf '%s|%s|%s|%s|%s\n' "$ip" "$host" "$cnt" "$last" "$dom"
-	done
+		printf '%s|%s|%s|%s|%s|%s\n' "$ip" "$host" "$fc" "$lc" "${dc:--}" "$qc"
+	done | sort -t'|' -k3,3rn
+
+	rm -f "$ftmp" "$qtmp"
 }
 
 # ------------------------------------------------------------
@@ -640,6 +716,54 @@ cmd_detail() {
 			esac
 			printf '%s|%s|%s|%s|%s|%s\n' "$ts" "$dom" "$up" "$st" "$seg" "$hint"
 		done
+}
+
+# ------------------------------------------------------------
+# flow：某客户机的**完整查询链路**（含成功）
+#
+# 输出：<epoch>|<域名>|<上游>|<状态>|<段>|<答案>
+#
+# 这是用户要的「客户机发起的查询完整链路」—— 与 detail 的区别：
+#   detail  只有失败，用于排障
+#   flow    全部查询，用于「这台设备刚才在干什么」
+# ------------------------------------------------------------
+cmd_flow() {
+	local ip limit win now cutoff
+	ip="$1"
+	limit="$2"
+
+	# ⚠️ 兼容两种调用形态：
+	#   flow <IP> <N>   —— 指定客户机
+	#   flow <N>        —— 只给条数（Lua 侧 IP 为空时就是这个形态）
+	# 不兼容时 `flow 200` 会把 200 当成 IP，结果零输出 ——
+	# 实测踩过：页面「实时查询链路」一直空白，而脚本手动跑正常。
+	case "$ip" in
+		''|*[!0-9]*) ;;          # 非纯数字 → 当 IP 用
+		*)
+			# 纯数字：它是条数，不是 IP
+			if [ -n "$ip" ]; then
+				limit="$ip"
+				ip=""
+			fi
+			;;
+	esac
+
+	win=$(dc_get client_diag flow_retain_sec 600)
+	now=$(date +%s)
+	cutoff=$((now - win))
+	case "$limit" in ''|*[!0-9]*) limit=200 ;; esac
+
+	[ -f "$DIAG_FLOW_LOG" ] || return 0
+
+	# 按 IP 过滤（空 IP = 全部客户机）
+	# 输出带客户机 IP：<epoch>|<客户机>|<域名>|<上游>|<状态>|<段>|<答案>
+	if [ -n "$ip" ]; then
+		awk -F'|' -v i="$ip" -v c="$cutoff" \
+			'$2 == i && $1 >= c { print $1 "|" $2 "|" $3 "|" $4 "|" $5 "|" $6 "|" $7 }' "$DIAG_FLOW_LOG"
+	else
+		awk -F'|' -v c="$cutoff" \
+			'$1 >= c { print $1 "|" $2 "|" $3 "|" $4 "|" $5 "|" $6 "|" $7 }' "$DIAG_FLOW_LOG"
+	fi | sort -t'|' -k1,1rn | head -n "$limit"
 }
 
 # ------------------------------------------------------------
@@ -755,17 +879,24 @@ cmd_daemon() {
 	logread -f 2>/dev/null | _diag_stream | while IFS='|' read -r ip dom up st ans; do
 		[ -n "$ip" ] || continue
 		[ -n "$dom" ] || continue
-		_diag_is_fail "$st" || continue
 
 		ts=$(date +%s)
-		_diag_record_fail "$ts" "$ip" "$dom" "$up" "$st"
 
-		# 阈值判定 + 自愈
-		cnt=$(_diag_fail_count "$dom")
-		need=$(dc_get client_diag fail_threshold 3)
-		if [ "$cnt" -ge "$need" ]; then
-			if [ "$(dc_get client_diag autofix_enabled 1)" = "1" ]; then
-				_diag_autofix "$dom"
+		# ① 流水：**每条查询都记**，不分成功失败。
+		#    用户要「客户机发起的查询完整链路」，成功查询同样要看得到。
+		_diag_record_flow "$ts" "$ip" "$dom" "$up" "$st" "$ans"
+
+		# ② 失败表：只有真失败才进，供自愈阈值判定用。
+		if _diag_is_fail "$st"; then
+			_diag_record_fail "$ts" "$ip" "$dom" "$up" "$st"
+
+			# 阈值判定 + 自愈
+			cnt=$(_diag_fail_count "$dom")
+			need=$(dc_get client_diag fail_threshold 3)
+			if [ "$cnt" -ge "$need" ]; then
+				if [ "$(dc_get client_diag autofix_enabled 1)" = "1" ]; then
+					_diag_autofix "$dom"
+				fi
 			fi
 		fi
 
@@ -773,6 +904,7 @@ cmd_daemon() {
 		REC_N=$(( ${REC_N:-0} + 1 ))
 		if [ $((REC_N % 20)) -eq 0 ]; then
 			_diag_trim
+			_diag_trim_flow
 			echo "$ts" > "$DIAG_LAST_SCAN"
 		fi
 	done
@@ -784,6 +916,7 @@ main() {
 		daemon)      shift; cmd_daemon "$@" ;;
 		list)        shift; cmd_list "$@" ;;
 		detail)      shift; cmd_detail "$@" ;;
+		flow)        shift; cmd_flow "$@" ;;
 		autofix-log) shift; cmd_autofix_log "$@" ;;
 		undo)        shift; cmd_undo "$@" ;;
 		heal)        shift; cmd_heal "$@" ;;
@@ -796,6 +929,7 @@ main() {
   daemon           常驻循环（procd 托管）
   list             客户机列表（TSV）
   detail <IP>      某客户机的失败时间线（TSV）
+  flow [IP] [N]    某客户机的完整查询链路（含成功，默认最近 200 条）
   autofix-log      自愈审计记录（TSV）
   undo <id>        撤销一条自动归属调整
   heal <1|2|3>     手动触发自愈（不受时间窗限制）

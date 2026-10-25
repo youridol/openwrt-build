@@ -937,7 +937,9 @@ function M.client_diag_list()
 	local out = sys.exec(CLIENT_DIAG .. " list 2>&1") or ""
 	local rows = {}
 	for line in out:gmatch("[^\n]+") do
-		local ip, host, cnt, last, dom = line:match("^([^|]+)|([^|]*)|([^|]*)|([^|]*)|([^|]*)$")
+		-- 六列：IP|主机名|失败数|最近失败|最近域名|查询数
+		local ip, host, cnt, last, dom, qn =
+			line:match("^([^|]+)|([^|]*)|([^|]*)|([^|]*)|([^|]*)|([^|]*)$")
 		if ip then
 			-- 字段名用 last_ts 而非 last：general.lua 里有一条断言禁止
 			-- 出现 r.last（那是已删除的「改道明细」字段），复用同名字段
@@ -945,6 +947,45 @@ function M.client_diag_list()
 			rows[#rows + 1] = {
 				ip = ip, host = host or "", count = cnt or "0",
 				last_ts = last or "0", domain = dom or "",
+				queries = qn or "0",
+			}
+		end
+	end
+	return rows
+end
+
+--- 某客户机的完整查询链路（含成功）
+--
+-- 与 client_diag_detail 的区别：
+--   detail  只有失败，用于排障
+--   flow    全部查询，用于「这台设备刚才在干什么」
+--
+-- 输出格式：<epoch>|<域名>|<上游>|<状态>|<段>|<答案>
+-- ip 为空时返回全部客户机。
+function M.client_diag_flow(ip, limit)
+	limit = tonumber(limit) or 200
+	if limit < 1 then limit = 200 end
+	if limit > 2000 then limit = 2000 end
+
+	local cmd = CLIENT_DIAG .. " flow"
+	-- 只允许 IP 字符，防止拼进 shell
+	if ip and ip ~= "" then
+		if not ip:match("^[0-9a-fA-F:.]+$") then return {} end
+		cmd = cmd .. " '" .. ip .. "'"
+	end
+	cmd = cmd .. " " .. limit .. " 2>&1"
+
+	local out = sys.exec(cmd) or ""
+	local rows = {}
+	-- 七列：<epoch>|<客户机>|<域名>|<上游>|<状态>|<段>|<答案>
+	for line in out:gmatch("[^\n]+") do
+		local ts, cli, dom, up, st, seg, ans =
+			line:match("^([^|]+)|([^|]*)|([^|]*)|([^|]*)|([^|]*)|([^|]*)|([^|]*)$")
+		if ts then
+			rows[#rows + 1] = {
+				ts = ts, client = cli or "", domain = dom or "",
+				upstream = up or "", state = st or "",
+				seg = seg or "", answer = ans or "",
 			}
 		end
 	end

@@ -1244,6 +1244,76 @@ else
 	fail "客户机诊断 section 未登记进 SECTION_TAB（会在所有 tab 都显示）"
 fi
 
+
+# ⑯ 新 section 不得使用裸 esc（它只是 emit_tab_meta 内的局部函数）
+#
+#    实测踩过：v0.23.0 的客户机诊断 section 用了裸 `esc(`，而 `esc`
+#    只在 `emit_tab_meta` 与「单域名解释」两个 cfgvalue 内部局部定义，
+#    全局不可见 → 打开页面直接 Runtime error:
+#        attempt to call global 'esc' (a nil value)
+#    整页 500。渲染测试用 pcall 捕获后只记 ok=False，而该 section 在
+#    测试数据下走了「无数据提前返回」分支，所以没抓到。
+_esc_bad=""
+_dstart=$(grep -n '客户机链路诊断（v0.23.0' "$GENERAL" | head -1 | cut -d: -f1)
+_dend=$(grep -n '^-- ── 国内上游 ──' "$GENERAL" | head -1 | cut -d: -f1)
+if [ -n "$_dstart" ] && [ -n "$_dend" ]; then
+	if sed -n "${_dstart},${_dend}p" "$GENERAL" | grep -vE '^\s*--' | grep -qE '(^|[^.[:alnum:]_])esc\('; then
+		_esc_bad="yes"
+	fi
+fi
+if [ -z "$_esc_bad" ]; then
+	pass "客户机诊断 section 使用 dg.esc（裸 esc 是局部函数，全局不可见）"
+else
+	fail "客户机诊断 section 用了裸 esc（打开页面会 Runtime error: attempt to call global 'esc'）"
+fi
+
+
+# ⑰ 查询流水必须记全部查询（含成功），不能只记失败
+#
+#    实测踩过：首版 `_diag_is_fail "$st" || continue` 在写流水之前就跳过了，
+#    成功查询全丢 → 用户看不到「这台设备刚才查了什么」。
+if body_of "$DIAG" | grep -qF '_diag_record_flow' && \
+   body_of "$DIAG" | sed -n '/_diag_stream | while/,/^	done/p' | grep -qF '_diag_record_flow'; then
+	pass "查询流水记录全部查询（含成功）"
+else
+	fail "查询流水只在失败时记录（用户看不到成功查询的完整链路）"
+fi
+
+# ⑱ flow 子命令必须存在且兼容「只给条数」的调用形态
+if body_of "$DIAG" | grep -qE '^\s*flow\)' && \
+   body_of "$DIAG" | sed -n '/^cmd_flow()/,/^}/p' | grep -qF 'limit="$ip"'; then
+	pass "flow 子命令兼容两种调用形态（flow <IP> <N> / flow <N>）"
+else
+	fail "flow 子命令缺参数兼容（Lua 侧 IP 为空时拼出 flow 200 会零输出）"
+fi
+
+# ⑲ 九个可配置项必须在页面上有输入框
+#
+#    用户明确要求「可自定义时间和条目数量」。只在脚本里 dc_get 读、
+#    页面无入口 = 用户改不了。
+_ui_missing=""
+for _k in enabled autofix_enabled interval fail_threshold fail_window \
+          flow_retain_sec flow_retain_max retain_sec retain_max autofix_interval; do
+	if ! body_of "$GENERAL" | grep -qE "option\((Flag|Value), \"$_k\""; then
+		_ui_missing="$_ui_missing $_k"
+	fi
+done
+if [ -z "$_ui_missing" ]; then
+	pass "10 个诊断配置项都有页面输入框"
+else
+	fail "诊断配置项缺页面输入框:$_ui_missing（用户改不了）"
+fi
+
+# ⑳ 流水与失败记录必须 chmod 644
+#
+#    mktemp 建的文件是 0600，rpcd 以受限身份读 → 页面显示「还没有查询流水」
+#    而数据其实在。实测踩过。
+if body_of "$DIAG" | grep -qF 'chmod 644 "$DIAG_FLOW_LOG"'; then
+	pass "查询流水文件放开读权限（否则 LuCI 读不到）"
+else
+	fail "查询流水文件没 chmod 644（页面会显示空列表而数据其实在）"
+fi
+
 echo ""
 if [ "$rc" -ne 0 ]; then
 	echo "!!! 域名分流与改道契约校验失败" >&2

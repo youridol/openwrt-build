@@ -1223,6 +1223,61 @@ s = m:section(TypedSection, "dnschain", translate("客户机链路诊断"),
 s.anonymous = true
 s.addremove = false
 
+-- ── 可配置项（用户明确要求「可自定义时间和条目数量」）──────────
+--
+-- 这些键原先只在脚本里 dc_get 读取，页面无入口 —— 用户改不了。
+-- 现在暴露成输入框，保存即写 UCI（TypedSection 自动处理）。
+
+o = s:option(Flag, "enabled", translate("启用诊断"),
+	translate("关闭后不扫日志、不记录任何查询。"))
+o.default = "1"
+o.rmempty = false
+
+o = s:option(Flag, "autofix_enabled", translate("启用自动自愈"),
+	translate("关闭后只记录失败、给建议，不动手。手动按钮不受此限。"))
+o.default = "1"
+o.rmempty = false
+
+o = s:option(Value, "interval", translate("扫描间隔（秒）"),
+	translate("守护进程每这么多秒汇总一次。"))
+o.datatype = "range(10,3600)"
+o.default = "60"
+
+o = s:option(Value, "fail_threshold", translate("失败阈值（次）"),
+	translate("同一域名在窗口内累计失败多少次才判定「该自愈」。"))
+o.datatype = "range(1,100)"
+o.default = "3"
+
+o = s:option(Value, "fail_window", translate("失败判定窗口（秒）"),
+	translate("上面那个阈值的统计窗口。"))
+o.datatype = "range(30,86400)"
+o.default = "300"
+
+o = s:option(Value, "flow_retain_sec", translate("查询流水保留（秒）"),
+	translate("客户机完整查询链路保留多久。流水量大，默认 10 分钟。"))
+o.datatype = "range(60,86400)"
+o.default = "600"
+
+o = s:option(Value, "flow_retain_max", translate("查询流水条目上限"),
+	translate("超过时丢弃最旧的。"))
+o.datatype = "range(50,100000)"
+o.default = "1000"
+
+o = s:option(Value, "retain_sec", translate("失败记录保留（秒）"),
+	translate("失败记录量小，默认保留 1 小时 —— 超过 1 小时看也没有用了。"))
+o.datatype = "range(60,86400)"
+o.default = "3600"
+
+o = s:option(Value, "retain_max", translate("失败记录条目上限"))
+o.datatype = "range(50,100000)"
+o.default = "500"
+
+o = s:option(Value, "autofix_interval", translate("自动自愈最小间隔（秒）"),
+	translate("自动自愈默认每小时最多 1 次。<b>手动按钮不受此限</b> —— " ..
+		"你明知可以断网才会点。"))
+o.datatype = "range(60,86400)"
+o.default = "3600"
+
 o = s:option(DummyValue, "_client_list", translate("客户机"))
 o.rawhtml = true
 function o.cfgvalue()
@@ -1264,20 +1319,23 @@ function o.cfgvalue()
 			'<tr data-dc-client="%s">' ..
 			'<td><code>%s</code></td>' ..
 			'<td>%s</td>' ..
+			'<td>%d</td>' ..
 			'<td><span class="dc-badge dc-badge--%s">%d</span></td>' ..
 			'<td>%s</td>' ..
 			'<td><code>%s</code></td>' ..
 			'</tr>',
-			esc(r.ip), esc(r.ip), esc(host),
+			dg.esc(r.ip), dg.esc(r.ip), dg.esc(host),
+			tonumber(r.queries) or 0,
 			(tonumber(r.count) or 0) > 0 and "warn" or "mute",
 			tonumber(r.count) or 0,
-			tstr, esc(r.domain or "—"))
+			tstr, dg.esc(r.domain or "—"))
 	end
 
 	p[#p + 1] = '<div class="dc-table-wrap"><table class="dc-table">' ..
 		'<thead><tr>' ..
 		'<th>' .. translate("客户机 IP") .. '</th>' ..
 		'<th>' .. translate("主机名") .. '</th>' ..
+		'<th>' .. translate("查询数") .. '</th>' ..
 		'<th>' .. translate("失败数") .. '</th>' ..
 		'<th>' .. translate("最近失败") .. '</th>' ..
 		'<th>' .. translate("最近域名") .. '</th>' ..
@@ -1289,6 +1347,89 @@ function o.cfgvalue()
 		'</div>'
 
 	return table.concat(p)
+end
+
+o = s:option(DummyValue, "_client_flow", translate("实时查询链路"))
+o.rawhtml = true
+function o.cfgvalue()
+	local ip = luci.http.formvalue("dc_client") or ""
+	local rows = ds.client_diag_flow(ip, 200)
+
+	local head = {}
+	if ip ~= "" then
+		head[#head + 1] = string.format(
+			'<div class="dc-hint">' ..
+			translate("正在显示客户机 <code>%s</code> 的完整查询链路" ..
+				"（含成功，最近 200 条）。") .. '</div>', dg.esc(ip))
+	else
+		head[#head + 1] = '<div class="dc-hint">' ..
+			translate("正在显示<b>全部客户机</b>的完整查询链路" ..
+				"（含成功，最近 200 条）。在下方「失败时间线」输入客户机 IP " ..
+				"可只看某一台。") .. '</div>'
+	end
+
+	if #rows == 0 then
+		head[#head + 1] = '<div class="dc-alert dc-alert--info">' ..
+			'<span class="dc-alert__icon">i</span><div>' ..
+			translate("保留期内还没有查询流水。") ..
+			'</div></div>'
+		return table.concat(head)
+	end
+
+	-- 状态 → 徽标色调与中文（七类「不算失败」+ 两类失败）
+	local TONE = {
+		ok = "ok", nodata = "mute", nxdomain = "mute",
+		refused = "warn", duplicate = "mute", pending = "mute",
+		noquery = "mute", servfail = "bad", noreply = "bad",
+	}
+	local TEXT = {
+		ok = translate("成功"), nodata = translate("无此类型"),
+		nxdomain = translate("域名不存在"), refused = translate("被拒绝"),
+		duplicate = translate("重复查询"), pending = translate("等待终态"),
+		noquery = translate("仅查询"), servfail = translate("上游失败"),
+		noreply = translate("上游无回应"),
+	}
+	-- 段号 → 人话（ADR-0009 §3.2）
+	local SEG = {
+		["0"] = translate("—"),
+		["1"] = translate("① 未转发"),
+		["2"] = translate("② 转发后无回应"),
+		["3"] = translate("③ 上游失败"),
+	}
+
+	local trs = {}
+	for _, r in ipairs(rows) do
+		local when = tonumber(r.ts) or 0
+		local st = r.state or ""
+		trs[#trs + 1] = string.format(
+			'<tr>' ..
+			'<td>%s</td>' ..
+			'<td><code>%s</code></td>' ..
+			'<td><code>%s</code></td>' ..
+			'<td><span class="dc-badge dc-badge--%s">%s</span></td>' ..
+			'<td>%s</td>' ..
+			'<td><code>%s</code></td>' ..
+			'</tr>',
+			when > 0 and os.date("%H:%M:%S", when) or "—",
+			dg.esc(r.client or "—"),
+			dg.esc(r.domain or "—"),
+			TONE[st] or "mute",
+			dg.esc(TEXT[st] or st),
+			dg.esc(SEG[r.seg] or "—"),
+			dg.esc(r.answer or "—"))
+	end
+
+	head[#head + 1] = '<div class="dc-table-wrap"><table class="dc-table">' ..
+		'<thead><tr>' ..
+		'<th>' .. translate("时刻") .. '</th>' ..
+		'<th>' .. translate("客户机") .. '</th>' ..
+		'<th>' .. translate("域名") .. '</th>' ..
+		'<th>' .. translate("结果") .. '</th>' ..
+		'<th>' .. translate("链路") .. '</th>' ..
+		'<th>' .. translate("答案") .. '</th>' ..
+		'</tr></thead><tbody>' .. table.concat(trs) .. '</tbody></table></div>'
+
+	return table.concat(head)
 end
 
 o = s:option(DummyValue, "_client_detail", translate("失败时间线"))
@@ -1305,7 +1446,7 @@ function o.cfgvalue()
 	if #rows == 0 then
 		return '<div class="dc-alert dc-alert--info">' ..
 			'<span class="dc-alert__icon">i</span><div>' ..
-			string.format(translate("客户机 %s 在保留期内没有失败记录。"), esc(ip)) ..
+			string.format(translate("客户机 %s 在保留期内没有失败记录。"), dg.esc(ip)) ..
 			'</div></div>'
 	end
 
@@ -1331,10 +1472,10 @@ function o.cfgvalue()
 			'<td>%s</td>' ..
 			'</tr>',
 			when > 0 and os.date("%H:%M:%S", when) or "—",
-			esc(r.domain or "—"),
-			esc(ST[r.state] or r.state or "—"),
-			esc(r.state or "—"),
-			esc(SEG[r.seg] or "—"))
+			dg.esc(r.domain or "—"),
+			dg.esc(ST[r.state] or r.state or "—"),
+			dg.esc(r.state or "—"),
+			dg.esc(SEG[r.seg] or "—"))
 	end
 
 	return '<div class="dc-table-wrap"><table class="dc-table">' ..
@@ -1389,11 +1530,11 @@ function o.cfgvalue()
 			'<td>%s</td>' ..
 			'</tr>',
 			when > 0 and os.date("%H:%M:%S", when) or "—",
-			esc(LV[r.level] or r.level or "—"),
-			esc(r.domain or "—"),
+			dg.esc(LV[r.level] or r.level or "—"),
+			dg.esc(r.domain or "—"),
 			r.result == "ok" and "ok" or (r.result == "undone" and "mute" or "bad"),
-			esc(RES[r.result] or r.result or "—"),
-			esc(r.note or ""))
+			dg.esc(RES[r.result] or r.result or "—"),
+			dg.esc(r.note or ""))
 	end
 
 	return '<div class="dc-table-wrap"><table class="dc-table">' ..
