@@ -390,6 +390,11 @@ _G.luci.http = {
     # 不 preload 会让整份 general.lua 加载失败 —— 实测一次挂掉 78 条断言。
     preload("luci.model.cbi.dnschain.diagnosis",
             "package/luci-app-dnschain/luasrc/model/cbi/dnschain/diagnosis.lua")
+    # v0.24.0：general.lua 新增 require diagrams-chain（全链路静态架构图）。
+    # ⚠️ 它内部又 require "luci.model.cbi.dnschain.diagrams"，
+    #    故必须在 diagrams 已 preload 之后再 preload 它。
+    preload("luci.model.cbi.dnschain.diagrams-chain",
+            "package/luci-app-dnschain/luasrc/model/cbi/dnschain/diagrams-chain.lua")
     return L
 
 

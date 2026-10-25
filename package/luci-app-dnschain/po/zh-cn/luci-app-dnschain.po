@@ -2247,3 +2247,12 @@ msgstr "状态分布"
 
 msgid "首次 %s · 最近 %s"
 msgstr "首次 %s · 最近 %s"
+
+msgid "全链路拓扑"
+msgstr "全链路拓扑"
+
+msgid "数据流向"
+msgstr "数据流向"
+
+msgid "查询生命周期"
+msgstr "查询生命周期"

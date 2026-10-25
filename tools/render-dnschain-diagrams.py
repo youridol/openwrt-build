@@ -27,6 +27,9 @@ from lupa import LuaRuntime
 
 REPO = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
 LUA = "package/luci-app-dnschain/luasrc/model/cbi/dnschain/diagrams.lua"
+# v0.24.0 新增：全链路思维导图（静态架构，回答「它怎么工作的」）。
+# 与 diagrams.lua（运行时状态，回答「现在通不通」）分开，避免单文件膨胀。
+LUA_CHAIN = "package/luci-app-dnschain/luasrc/model/cbi/dnschain/diagrams-chain.lua"
 OUT = os.path.join(REPO, "tools", "out", "dnschain-diagrams.html")
 
 PASS = 0
@@ -66,7 +69,31 @@ _G.translate = function(s) return s end
     with open(path, encoding="utf-8") as f:
         src = f.read()
     L.execute("__chunk = function()\n" + src + "\nend")
-    return L, L.eval("__chunk()")
+    mod = L.eval("__chunk()")
+
+    # v0.24.0：加载全链路图并合并到同一个表。
+    #
+    # diagrams-chain.lua 顶部 `require "luci.model.cbi.dnschain.diagrams"`，
+    # 而它还没被加载到 package.loaded —— 故先把刚 eval 出来的模块注册进去，
+    # 否则 require 会去磁盘找 .lua 文件、在 lupa 里失败。
+    chain_path = os.path.join(REPO, LUA_CHAIN)
+    if os.path.exists(chain_path):
+        L.execute("__mod = __chunk()")
+        L.execute("package.loaded['luci.model.cbi.dnschain.diagrams'] = __mod")
+        with open(chain_path, encoding="utf-8") as f:
+            csrc = f.read()
+        L.execute("__chain = function()\n" + csrc + "\nend")
+        # 合并：chain 的键加前缀 chain_，避免与现有图重名
+        L.execute("""
+__merged = __mod
+local c = __chain()
+for k, v in pairs(c) do
+	__merged["chain_" .. k] = v
+end
+""")
+        mod = L.eval("__merged")
+
+    return L, mod
 
 
 def svg_geom(svg):
@@ -902,6 +929,100 @@ def main():
         bad("triage_map 已删除", "仍可调用")
     except TypeError:
         ok("triage_map 已删除")
+
+    # ── v0.24.0：全链路思维导图（3 张）──────────────────────
+    #
+    # 与上面三张运行时状态图的区别：这 3 张是**静态架构图**，
+    # 回答「它到底怎么工作的」，数据来自 2026-10-25 的实测快照。
+    print("=== 全链路思维导图（静态架构）===")
+
+    chain_specs = [
+        ("chain_topology",  "全链路拓扑图",  8),
+        ("chain_flow",      "数据流向图",    4),
+        ("chain_lifecycle", "查询生命周期图", 8),
+    ]
+    for key, label, min_texts in chain_specs:
+        try:
+            svg = str(D[key]())
+        except Exception as e:                        # noqa: BLE001
+            bad("%s 可渲染" % label, str(e).split("\n")[0][:120])
+            continue
+        ok("%s 可渲染" % label)
+
+        g = svg_geom(svg)
+        if not g:
+            bad("%s 有 viewBox" % label, "解析失败")
+            continue
+        ok("%s 有 viewBox" % label)
+
+        if g["figures"]:
+            ok("%s 有 figure 身份标记" % label)
+        else:
+            bad("%s 有 figure 身份标记" % label, "缺 data-dc-figure")
+
+        if len(g["texts"]) >= min_texts:
+            ok("%s 文字条目充足（%d）" % (label, len(g["texts"])))
+        else:
+            bad("%s 文字条目充足" % label, "仅 %d 条" % len(g["texts"]))
+
+        # 所有图元必须在 viewBox 内
+        overflow = []
+        for (x, y, w, h) in g["rects"]:
+            if x < 0 or y < 0 or x + w > g["W"] or y + h > g["H"]:
+                overflow.append("rect(%d,%d,%d,%d)" % (x, y, w, h))
+        for (x, y, fs, t) in g["texts"]:
+            if x < 0 or y < 0 or x > g["W"] or y > g["H"]:
+                overflow.append("text(%d,%d)" % (x, y))
+        if overflow:
+            bad("%s 所有图元在 viewBox 内" % label, "溢出: %s" % ", ".join(overflow[:3]))
+        else:
+            ok("%s 所有图元在 viewBox 内" % label)
+
+        # 不画箭头（v0.15.0 起的约定）
+        if "<marker" in svg or "marker-end=" in svg:
+            bad("%s 不画箭头" % label, "仍有 marker")
+        else:
+            ok("%s 不画箭头" % label)
+
+        # 文字不得溢出方框（v0.13.1 的同类问题，静态图同样要测）
+        try:
+            check_text_inside_boxes(label, svg)
+        except AssertionError:
+            pass  # 该函数内部已通过 ok()/bad() 记账
+
+        # 不写死颜色值：只允许 var(--dc-*) 与 none
+        hard = re.findall(r'(?:fill|stroke)="(#[0-9a-fA-F]{3,8}|rgba?\([^)]*\))"', svg)
+        if hard:
+            bad("%s 颜色走 CSS 变量" % label, "写死: %s" % ", ".join(hard[:3]))
+        else:
+            ok("%s 颜色走 CSS 变量" % label)
+
+    # 内容断言：关键事实必须出现在图上，防止图与实测漂移
+    topo = str(D["chain_topology"]())
+    for needle, desc in [
+        ("dnsmasq:53",            "dnsmasq 分流层"),
+        ("127.0.0.1#5336",        "代理链上游端口"),
+        ("127.0.0.1#5353",        "直连链上游端口"),
+        ("_DC_DIRECT_DEFAULT_",   "出站兜底已改直连"),
+        ("blacklist",             "blacklist 集合"),
+    ]:
+        if needle in topo:
+            ok("拓扑图含「%s」" % desc)
+        else:
+            bad("拓扑图含「%s」" % desc, "缺 %s" % needle)
+
+    flow = str(D["chain_flow"]())
+    for needle, desc in [
+        ("23,771",   "gfw 名单条数"),
+        ("23,745",   "生成的 server= 条数"),
+        ("4,316",    "china_ssr 条数"),
+        ("8,797",    "APNIC 完整条数"),
+        ("47.239.100.208", "误判案例 IP"),
+    ]:
+        if needle in flow:
+            ok("数据流图含「%s」" % desc)
+        else:
+            bad("数据流图含「%s」" % desc, "缺 %s" % needle)
 
     print("=== 空数据兜底 ===")
     empty = str(D.status_map(L.eval("{}"), L.eval("{}")))

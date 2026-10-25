@@ -35,6 +35,10 @@
 
 local ds = require "luci.model.cbi.dnschain.dnschain"
 local dg = require "luci.model.cbi.dnschain.diagrams"
+-- v0.24.0：全链路思维导图（静态架构图）。
+-- 与 dg（运行时状态图）分开：dg 回答「现在通不通」，
+-- dgc 回答「它到底怎么工作的」。
+local dgc = require "luci.model.cbi.dnschain.diagrams-chain"
 -- v0.18.0：归组规则与「证据→症状」推导独立成模块（纯函数，可单测）。
 -- 别名 dg2 是为了不与 dg（绘图层）混淆：dg 只管画，dg2 只管判断。
 local dg2 = require "luci.model.cbi.dnschain.diagnosis"
@@ -404,6 +408,36 @@ function o.cfgvalue()
 	if fallback then all[#all + 1] = fallback end
 
 	return dg.live_diag_map(all)
+end
+
+-- ── 工作原理（静态架构图，v0.24.0）──────────────────────────────
+--
+-- 用户要求「梳理一遍当前的链路是怎么走，包括数据库的数据是怎么走
+-- 流向如何」。上面那张「链路拓扑」是**运行时**状态（每个节点带
+-- ok/warn 标记，回答「现在通不通」），回答不了「它怎么工作」。
+--
+-- 这三张是**静态架构图**，数据来自 2026-10-25 的实测快照：
+--   ① 全链路拓扑   客户机 → dnsmasq → dnsproxy → 出网
+--   ② 数据流向     名单/配置从哪来、经过什么转换、落到哪个文件
+--   ③ 查询生命周期 一次查询经过的 8 个步骤，每步的失败表现
+--
+-- 三张图都用 DummyValue + rawhtml 渲染，不发额外后端请求。
+o = s:option(DummyValue, "_chain_topology", translate("全链路拓扑"))
+o.rawhtml = true
+function o.cfgvalue()
+	return dgc.topology()
+end
+
+o = s:option(DummyValue, "_chain_flow", translate("数据流向"))
+o.rawhtml = true
+function o.cfgvalue()
+	return dgc.flow()
+end
+
+o = s:option(DummyValue, "_chain_lifecycle", translate("查询生命周期"))
+o.rawhtml = true
+function o.cfgvalue()
+	return dgc.lifecycle()
 end
 
 -- ── 断点诊断明细（图下折叠区，v0.18.0）────────────────────────────
