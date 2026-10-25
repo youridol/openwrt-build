@@ -2136,3 +2136,114 @@ msgstr "查什么"
 
 msgid "到哪里去"
 msgstr "到哪里去"
+
+msgid "当前视图"
+msgstr "当前视图"
+
+msgid "第一级 · 在线主机"
+msgstr "第一级 · 在线主机"
+
+msgid "点任一主机的「查看链路」进入第二级，看它从哪来、到哪里去、打开主域名后跳转到哪里、到哪一步出问题。"
+msgstr "点任一主机的「查看链路」进入第二级，看它从哪来、到哪里去、打开主域名后跳转到哪里、到哪一步出问题。"
+
+msgid "第二级 · 单机链路"
+msgstr "第二级 · 单机链路"
+
+msgid "搜索域名"
+msgstr "搜索域名"
+
+msgid "按域名关键词过滤。留空显示全部。"
+msgstr "按域名关键词过滤。留空显示全部。"
+
+msgid "搜索"
+msgstr "搜索"
+
+msgid "按域名关键词搜索当前客户机的查询记录（不区分大小写）。"
+msgstr "按域名关键词搜索当前客户机的查询记录（不区分大小写）。"
+
+msgid "手动刷新当前视图。自动刷新间隔见上方「实时刷新间隔」。"
+msgstr "手动刷新当前视图。自动刷新间隔见上方「实时刷新间隔」。"
+
+msgid "在线主机"
+msgstr "在线主机"
+
+msgid "没有检测到在线主机。"
+msgstr "没有检测到在线主机。"
+
+msgid "在线"
+msgstr "在线"
+
+msgid "离线"
+msgstr "离线"
+
+msgid "查看链路"
+msgstr "查看链路"
+
+msgid "最近活动"
+msgstr "最近活动"
+
+msgid "主机名来自 DHCP 租约。MAC 是随机 MAC 的设备同样能识别 —— 这里不用 MAC 作身份。"
+msgstr "主机名来自 DHCP 租约。MAC 是随机 MAC 的设备同样能识别 —— 这里不用 MAC 作身份。"
+
+msgid "完整链路"
+msgstr "完整链路"
+
+msgid "客户机 <code>%s</code> 中含「<b>%s</b>」的查询（最近 200 条）"
+msgstr "客户机 <code>%s</code> 中含「<b>%s</b>」的查询（最近 200 条）"
+
+msgid "客户机 <code>%s</code> 的完整查询链路（含成功，最近 200 条）"
+msgstr "客户机 <code>%s</code> 的完整查询链路（含成功，最近 200 条）"
+
+msgid "没有匹配的查询记录。"
+msgstr "没有匹配的查询记录。"
+
+msgid "查什么（点开看链路）"
+msgstr "查什么（点开看链路）"
+
+msgid "域名链路详情"
+msgstr "域名链路详情"
+
+msgid "保留期内没有 <code>%s</code> 的查询记录。"
+msgstr "保留期内没有 <code>%s</code> 的查询记录。"
+
+msgid "✅ 全链路正常，未发现失败"
+msgstr "✅ 全链路正常，未发现失败"
+
+msgid "❌ 该域名全部查询失败，见下方状态分布"
+msgstr "❌ 该域名全部查询失败，见下方状态分布"
+
+msgid "⚠️ 部分查询在上游失败（第 ③ 段）"
+msgstr "⚠️ 部分查询在上游失败（第 ③ 段）"
+
+msgid "⚠️ 部分查询转发后无回应（第 ② 段）"
+msgstr "⚠️ 部分查询转发后无回应（第 ② 段）"
+
+msgid "从哪里来：客户机"
+msgstr "从哪里来：客户机"
+
+msgid "第一跳：本机 dnsmasq"
+msgstr "第一跳：本机 dnsmasq"
+
+msgid "唯一缓存与分流层"
+msgstr "唯一缓存与分流层"
+
+msgid "第二跳：上游实例"
+msgstr "第二跳：上游实例"
+
+msgid "最终答案"
+msgstr "最终答案"
+
+msgid "归属判定"
+msgstr "归属判定"
+
+msgid "查询 %s 次"
+msgstr "查询 %s 次"
+
+msgid "成功 %s 次"
+msgstr "成功 %s 次"
+
+msgid "状态分布"
+msgstr "状态分布"
+
+msgid "首次 %s · 最近 %s"
+msgstr "首次 %s · 最近 %s"

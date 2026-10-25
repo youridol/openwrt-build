@@ -1284,117 +1284,175 @@ o = s:option(Value, "autofix_interval", translate("自动自愈最小间隔（�
 o.datatype = "range(60,86400)"
 o.default = "3600"
 
-o = s:option(DummyValue, "_client_list", translate("客户机"))
+o = s:option(DummyValue, "_client_nav", translate("当前视图"))
 o.rawhtml = true
 function o.cfgvalue()
-	local st = ds.client_diag_status()
-	local rows = ds.client_diag_list()
+	local sel = luci.http.formvalue("dc_host") or ""
+	local kw = luci.http.formvalue("dc_q") or ""
 
 	local p = {}
 
-	-- 顶部状态条：一眼看出功能是否在跑、记录多少条
-	p[#p + 1] = string.format(
-		'<div class="dc-metrics">' ..
-		'<span class="dc-badge dc-badge--%s">%s</span> ' ..
-		'<span class="dc-badge dc-badge--%s">%s</span> ' ..
-		'<span class="dc-badge dc-badge--mute">%s</span>' ..
-		'</div>',
-		st.enabled == "1" and "ok" or "mute",
-		st.enabled == "1" and translate("诊断已启用") or translate("诊断已关闭"),
-		st.autofix == "1" and "ok" or "warn",
-		st.autofix == "1" and translate("自动自愈已开") or translate("自动自愈已关"),
-		string.format(translate("失败记录 %d 条 · 保留 %d 秒"),
-			tonumber(st.fail_count) or 0, tonumber(st.retain_sec) or 3600))
-
-	if #rows == 0 then
-		p[#p + 1] = '<div class="dc-alert dc-alert--info">' ..
-			'<span class="dc-alert__icon">i</span><div>' ..
-			translate("保留期内没有客户机失败记录。") ..
-			'</div></div>'
-		return table.concat(p)
+	if sel == "" then
+		-- ── 第一级：在线主机列表 ──────────────────────────────────
+		p[#p + 1] = '<div class="dc-metrics">' ..
+			'<span class="dc-badge dc-badge--ok">' ..
+			translate("第一级 · 在线主机") .. '</span>' ..
+			'</div>'
+		p[#p + 1] = '<div class="dc-hint">' ..
+			translate("点任一主机的「查看链路」进入第二级，" ..
+				"看它从哪来、到哪里去、打开主域名后跳转到哪里、到哪一步出问题。") ..
+			'</div>'
+	else
+		-- ── 第二级：单机详情 ──────────────────────────────────────
+		local host = ""
+		for _, r in ipairs(ds.client_diag_hosts()) do
+			if r.ip == sel then
+				host = (r.host ~= "" and r.host or "")
+				break
+			end
+		end
+		p[#p + 1] = '<div class="dc-metrics">' ..
+			'<span class="dc-badge dc-badge--info">' ..
+			translate("第二级 · 单机链路") .. '</span> ' ..
+			string.format('<span class="dc-badge dc-badge--mute">%s</span>',
+				dg.esc(sel .. (host ~= "" and (" · " .. host) or ""))) ..
+			'</div>'
 	end
 
-	-- 客户机表格：按失败数降序（有问题的排前面）
+	return table.concat(p)
+end
+
+-- 搜索框（用户要求「按域名和关键词搜索」）
+o = s:option(Value, "_dc_q", translate("搜索域名"),
+	translate("按域名关键词过滤。留空显示全部。"))
+o.rmempty = true
+o.default = ""
+function o.cfgvalue()
+	return luci.http.formvalue("dc_q") or ""
+end
+
+o = s:option(Button, "_dc_search", translate("搜索"))
+o.inputtitle = translate("搜索")
+o.description = translate("按域名关键词搜索当前客户机的查询记录（不区分大小写）。")
+function o.write()
+	-- 只做查询参数跳转，不写配置
+end
+
+o = s:option(Button, "_flow_refresh", translate("立即刷新"))
+o.inputtitle = translate("刷新")
+o.description = translate("手动刷新当前视图。自动刷新间隔见上方「实时刷新间隔」。")
+function o.write()
+	-- 空实现：只触发页面重新渲染
+end
+
+-- ── 第一级：在线主机 ──────────────────────────────────────────
+o = s:option(DummyValue, "_client_hosts", translate("在线主机"))
+o.rawhtml = true
+function o.cfgvalue()
+	local sel = luci.http.formvalue("dc_host") or ""
+	if sel ~= "" then
+		-- 第二级不再显示主机表
+		return ""
+	end
+
+	local rows = ds.client_diag_hosts()
+
+	if #rows == 0 then
+		return '<div class="dc-alert dc-alert--info">' ..
+			'<span class="dc-alert__icon">i</span><div>' ..
+			translate("没有检测到在线主机。") ..
+			'</div></div>'
+	end
+
 	local trs = {}
 	for _, r in ipairs(rows) do
-		local host = r.host ~= "" and r.host or "—"
+		local host = (r.host ~= "" and r.host or "—")
 		local when = tonumber(r.last_ts) or 0
 		local tstr = when > 0 and os.date("%H:%M:%S", when) or "—"
+		local qn = tonumber(r.queries) or 0
+		local fn = tonumber(r.fails) or 0
+
+		-- 在线状态徽标
+		local onb = r.online
+			and ('<span class="dc-badge dc-badge--ok">' .. translate("在线") .. '</span>')
+			or ('<span class="dc-badge dc-badge--mute">' .. translate("离线") .. '</span>')
+
+		-- 「查看链路」按钮：用 <a href> 带 dc_host 参数
+		--
+		-- ⚠️ 不能用 <form>（CBI 已把整页包在 form 里）。
+		--    用 <a> 触发 GET 是安全的：CBI 的 save 走 POST，
+		--    GET 只重新渲染页面，不写配置。
+		local link = string.format(
+			'<a class="dc-btn" href="?dc_host=%s">%s</a>',
+			dg.esc(r.ip), translate("查看链路"))
 
 		trs[#trs + 1] = string.format(
-			'<tr data-dc-client="%s">' ..
+			'<tr>' ..
+			'<td>%s</td>' ..
 			'<td><code>%s</code></td>' ..
 			'<td>%s</td>' ..
 			'<td>%d</td>' ..
 			'<td><span class="dc-badge dc-badge--%s">%d</span></td>' ..
 			'<td>%s</td>' ..
 			'<td><code>%s</code></td>' ..
+			'<td>%s</td>' ..
 			'</tr>',
-			dg.esc(r.ip), dg.esc(r.ip), dg.esc(host),
-			tonumber(r.queries) or 0,
-			(tonumber(r.count) or 0) > 0 and "warn" or "mute",
-			tonumber(r.count) or 0,
-			tstr, dg.esc(r.domain or "—"))
+			onb, dg.esc(r.ip), dg.esc(host), qn,
+			fn > 0 and "warn" or "mute", fn,
+			tstr, dg.esc(r.domain or "—"), link)
 	end
 
-	p[#p + 1] = '<div class="dc-table-wrap"><table class="dc-table">' ..
+	return '<div class="dc-table-wrap"><table class="dc-table">' ..
 		'<thead><tr>' ..
-		'<th>' .. translate("客户机 IP") .. '</th>' ..
+		'<th>' .. translate("状态") .. '</th>' ..
+		'<th>' .. translate("IP") .. '</th>' ..
 		'<th>' .. translate("主机名") .. '</th>' ..
 		'<th>' .. translate("查询数") .. '</th>' ..
 		'<th>' .. translate("失败数") .. '</th>' ..
-		'<th>' .. translate("最近失败") .. '</th>' ..
+		'<th>' .. translate("最近活动") .. '</th>' ..
 		'<th>' .. translate("最近域名") .. '</th>' ..
-		'</tr></thead><tbody>' .. table.concat(trs) .. '</tbody></table></div>'
-
-	p[#p + 1] = '<div class="dc-hint">' ..
-		translate("主机名来自 DHCP 租约，设备自己上报。随机 MAC 的设备同样能识别 —— " ..
-			"因为这里不用 MAC 作身份。") ..
-		'</div>'
-
-	return table.concat(p)
+		'<th>' .. translate("操作") .. '</th>' ..
+		'</tr></thead><tbody>' .. table.concat(trs) .. '</tbody></table></div>' ..
+		'<div class="dc-hint">' ..
+		translate("主机名来自 DHCP 租约。MAC 是随机 MAC 的设备同样能识别 —— " ..
+			"这里不用 MAC 作身份。") .. '</div>'
 end
 
--- 刷新控制：手动按钮 + 自动刷新开关提示
---
--- ⚠️ 按钮必须用 Button（CBI 的 input），不能用 <a href>：
---    CBI 已把整页包在 <form method="post"> 里，<a> 会触发整页 POST，
---    而 Button.write 是空操作，正好只做刷新不写配置。
-o = s:option(Button, "_flow_refresh", translate("立即刷新"))
-o.inputtitle = translate("刷新")
-o.description = translate("手动刷新下方「实时查询链路」。自动刷新间隔见上方配置。")
-function o.write()
-	-- 空实现：按钮只触发页面重新渲染，不需要写任何配置
-end
-
-o = s:option(DummyValue, "_client_flow", translate("实时查询链路"))
+-- ── 第二级：单机完整链路 ──────────────────────────────────────
+o = s:option(DummyValue, "_client_flow", translate("完整链路"))
 o.rawhtml = true
 function o.cfgvalue()
-	local ip = luci.http.formvalue("dc_client") or ""
-	local rows = ds.client_diag_flow(ip, 200)
-
-	local head = {}
-	if ip ~= "" then
-		head[#head + 1] = string.format(
-			'<div class="dc-hint">' ..
-			translate("正在显示客户机 <code>%s</code> 的完整查询链路" ..
-				"（含成功，最近 200 条）。") .. '</div>', dg.esc(ip))
-	else
-		head[#head + 1] = '<div class="dc-hint">' ..
-			translate("正在显示<b>全部客户机</b>的完整查询链路" ..
-				"（含成功，最近 200 条）。在下方「失败时间线」输入客户机 IP " ..
-				"可只看某一台。") .. '</div>'
+	local sel = luci.http.formvalue("dc_host") or ""
+	if sel == "" then
+		return ""
 	end
+
+	local kw = luci.http.formvalue("dc_q") or ""
+	local rows, title
+	if kw ~= "" then
+		rows = ds.client_diag_search(kw, sel, 200)
+		title = string.format(
+			translate("客户机 <code>%s</code> 中含「<b>%s</b>」的查询（最近 200 条）"),
+			dg.esc(sel), dg.esc(kw))
+	else
+		rows = ds.client_diag_flow(sel, 200)
+		title = string.format(
+			translate("客户机 <code>%s</code> 的完整查询链路（含成功，最近 200 条）"),
+			dg.esc(sel))
+	end
+
+	local head = { '<div class="dc-hint">' .. title .. '</div>' }
 
 	if #rows == 0 then
 		head[#head + 1] = '<div class="dc-alert dc-alert--info">' ..
 			'<span class="dc-alert__icon">i</span><div>' ..
-			translate("保留期内还没有查询流水。") ..
+			(kw ~= "" and translate("没有匹配的查询记录。")
+				or translate("保留期内还没有查询流水。")) ..
 			'</div></div>'
 		return table.concat(head)
 	end
 
-	-- 状态 → 徽标色调与中文（七类「不算失败」+ 两类失败）
+	-- 状态 → 色调与中文
 	local TONE = {
 		ok = "ok", nodata = "mute", nxdomain = "mute",
 		refused = "warn", duplicate = "mute", pending = "mute",
@@ -1407,56 +1465,42 @@ function o.cfgvalue()
 		noquery = translate("仅查询"), servfail = translate("上游失败"),
 		noreply = translate("上游无回应"),
 	}
-	-- ── 「从哪里来 → 到哪里去」──────────────────────────────────
-	--
-	-- 用户要的是「客户机的当前行为记录」：这条查询**从哪台设备发起、
-	-- 经过哪条上游、拿到什么答案**。所以链路列不能只写「失败段」，
-	-- 必须把完整去向写出来。
-	--
-	-- 去向由 `upstream` 决定（脚本记的是 dnsmasq 的 forwarded 目标）：
-	--   127.0.0.1#5353  → 直连链（国内 dnsproxy）
-	--   127.0.0.1#5336  → 代理链（国外 dnsproxy）
-	--   空              → 未转发（缓存命中 / 并发合并 / 查询未完成）
+
+	-- 「到哪里去」：由 upstream 决定
+	local ep = tostring(ds.entry_port())
+	local fp = tostring(ds.foreign_port())
 	local function where_to(up)
-		if up == nil or up == "" then
-			return translate("未转发")
-		end
-		-- 端口从 entry_port / foreign_port 读，不写死
-		local ep = tostring(ds.entry_port())
-		local fp = tostring(ds.foreign_port())
+		if up == nil or up == "" then return translate("未转发"), "mute" end
 		if up:find("#" .. ep) or up:find(":" .. ep) then
-			return translate("直连")
+			return translate("直连"), "ok"
 		elseif up:find("#" .. fp) or up:find(":" .. fp) then
-			return translate("代理")
+			return translate("代理"), "warn"
 		end
-		return up
+		return up, "mute"
 	end
 
 	local trs = {}
 	for _, r in ipairs(rows) do
 		local when = tonumber(r.ts) or 0
 		local st = r.state or ""
-		local dest = where_to(r.upstream)
+		local dest, dtone = where_to(r.upstream)
 
-		-- 去向色调：直连=ok（绿）、代理=warn（黄）、未转发=mute（灰）
-		local dtone = "mute"
-		if dest == translate("直连") then dtone = "ok"
-		elseif dest == translate("代理") then dtone = "warn" end
+		-- 域名做成「可下钻」链接：点开看该域名的完整链路
+		local domlink = string.format(
+			'<a href="?dc_host=%s&dc_dom=%s">%s</a>',
+			dg.esc(sel), dg.esc(r.domain or ""), dg.esc(r.domain or "—"))
 
 		trs[#trs + 1] = string.format(
 			'<tr>' ..
 			'<td>%s</td>' ..
-			'<td><code>%s</code></td>' ..
 			'<td><code>%s</code></td>' ..
 			'<td><span class="dc-badge dc-badge--%s">%s</span></td>' ..
 			'<td><span class="dc-badge dc-badge--%s">%s</span></td>' ..
 			'<td><code>%s</code></td>' ..
 			'</tr>',
 			when > 0 and os.date("%H:%M:%S", when) or "—",
-			dg.esc(r.client or "—"),
-			dg.esc(r.domain or "—"),
-			TONE[st] or "mute",
-			dg.esc(TEXT[st] or st),
+			domlink,
+			TONE[st] or "mute", dg.esc(TEXT[st] or st),
 			dtone, dg.esc(dest),
 			dg.esc(r.answer or "—"))
 	end
@@ -1464,8 +1508,7 @@ function o.cfgvalue()
 	head[#head + 1] = '<div class="dc-table-wrap"><table class="dc-table">' ..
 		'<thead><tr>' ..
 		'<th>' .. translate("时刻") .. '</th>' ..
-		'<th>' .. translate("从哪里来") .. '</th>' ..
-		'<th>' .. translate("查什么") .. '</th>' ..
+		'<th>' .. translate("查什么（点开看链路）") .. '</th>' ..
 		'<th>' .. translate("结果") .. '</th>' ..
 		'<th>' .. translate("到哪里去") .. '</th>' ..
 		'<th>' .. translate("答案") .. '</th>' ..
@@ -1474,25 +1517,148 @@ function o.cfgvalue()
 	return table.concat(head)
 end
 
-o = s:option(DummyValue, "_client_detail", translate("失败时间线"))
+-- ── 第二级：单域名链路详情（点域名后展开）─────────────────────
+o = s:option(DummyValue, "_client_trace", translate("域名链路详情"))
 o.rawhtml = true
 function o.cfgvalue()
-	local ip = luci.http.formvalue("dc_client")
-	if not ip or ip == "" then
-		return '<div class="dc-hint">' ..
-			translate("在上表任一客户机行点「诊断」查看它的失败时间线。") ..
-			'</div>'
+	local sel = luci.http.formvalue("dc_host") or ""
+	local dom = luci.http.formvalue("dc_dom") or ""
+	if sel == "" or dom == "" then
+		return ""
 	end
 
-	local rows = ds.client_diag_detail(ip)
+	local rows = ds.client_diag_trace(sel, dom)
 	if #rows == 0 then
 		return '<div class="dc-alert dc-alert--info">' ..
 			'<span class="dc-alert__icon">i</span><div>' ..
-			string.format(translate("客户机 %s 在保留期内没有失败记录。"), dg.esc(ip)) ..
+			string.format(translate("保留期内没有 <code>%s</code> 的查询记录。"),
+				dg.esc(dom)) ..
 			'</div></div>'
 	end
 
-	-- 段号 → 人话（ADR-0009 §3.2）
+	-- 收集汇总字段
+	local kv = {}
+	for _, r in ipairs(rows) do
+		if r.key == "UPSTREAM" then
+			-- 格式：<上游> ×<次数>
+			local one = r.value
+			if r.count and r.count ~= "" then
+				one = one .. " ×" .. r.count
+			end
+			kv.upstreams = (kv.upstreams or "") ..
+				(kv.upstreams and "、" or "") .. one
+		elseif r.key == "STATE" then
+			local one = r.value
+			if r.count and r.count ~= "" then
+				one = one .. " ×" .. r.count
+			end
+			kv.states = (kv.states or "") ..
+				(kv.states and "、" or "") .. one
+		else
+			kv[r.key] = r.value
+		end
+	end
+
+	-- 「到哪一步出问题」：按段号推断
+	--
+	-- ADR-0009 §3.2 四段：
+	--   ① 客户机 → dnsmasq     （有 query 无 forwarded）
+	--   ② dnsmasq → dnsproxy   （有 forwarded 无 reply）
+	--   ③ dnsproxy → 上游      （SERVFAIL）
+	--   ④ 客户机 → 目标 IP     （需抓包，一期不覆盖）
+	local verdict = translate("✅ 全链路正常，未发现失败")
+	local vtone = "ok"
+	if (kv.OK or "0") == "0" then
+		verdict = translate("❌ 该域名全部查询失败，见下方状态分布")
+		vtone = "bad"
+	elseif kv.STATE and kv.STATE:find("servfail") then
+		verdict = translate("⚠️ 部分查询在上游失败（第 ③ 段）")
+		vtone = "warn"
+	elseif kv.STATE and kv.STATE:find("noreply") then
+		verdict = translate("⚠️ 部分查询转发后无回应（第 ② 段）")
+		vtone = "warn"
+	end
+
+	local p = {}
+	p[#p + 1] = string.format(
+		'<div class="dc-metrics">' ..
+		'<span class="dc-badge dc-badge--%s">%s</span>' ..
+		'</div>', vtone, verdict)
+
+	-- 链路步骤（从哪来 → 到哪去）
+	local steps = {}
+	steps[#steps + 1] = string.format(
+		'<li><b>%s</b> <code>%s</code></li>',
+		translate("从哪里来：客户机"), dg.esc(sel))
+	steps[#steps + 1] = string.format(
+		'<li><b>%s</b> <code>dnsmasq:53</code>（%s）</li>',
+		translate("第一跳：本机 dnsmasq"), translate("唯一缓存与分流层"))
+	if kv.upstreams then
+		steps[#steps + 1] = string.format(
+			'<li><b>%s</b> <code>%s</code></li>',
+			translate("第二跳：上游实例"), dg.esc(kv.upstreams))
+	end
+	if kv.ANSWER then
+		steps[#steps + 1] = string.format(
+			'<li><b>%s</b> <code>%s</code></li>',
+			translate("最终答案"), dg.esc(kv.ANSWER))
+	end
+	if kv.CLASS then
+		steps[#steps + 1] = string.format(
+			'<li><b>%s</b> <code>%s</code> → <code>%s</code></li>',
+			translate("归属判定"), dg.esc(kv.CLASS),
+			dg.esc(kv.PREFERRED or "—"))
+	end
+
+	p[#p + 1] = '<div class="dc-chain"><ol>' ..
+		table.concat(steps) .. '</ol></div>'
+
+	-- 统计
+	local stats = {}
+	if kv.COUNT then
+		stats[#stats + 1] = string.format(translate("查询 %s 次"), kv.COUNT)
+	end
+	if kv.OK then
+		stats[#stats + 1] = string.format(translate("成功 %s 次"), kv.OK)
+	end
+	if kv.STATE then
+		stats[#stats + 1] = translate("状态分布") .. "：" .. kv.STATE
+	end
+	if kv.FIRST and kv.LAST then
+		local f = tonumber(kv.FIRST) or 0
+		local l = tonumber(kv.LAST) or 0
+		if f > 0 and l > 0 then
+			stats[#stats + 1] = string.format(
+				translate("首次 %s · 最近 %s"),
+				os.date("%H:%M:%S", f), os.date("%H:%M:%S", l))
+		end
+	end
+	if #stats > 0 then
+		p[#p + 1] = '<div class="dc-hint">' ..
+			table.concat(stats, " · ") .. '</div>'
+	end
+
+	return table.concat(p)
+end
+
+-- ── 第二级：该主机的失败时间线 ────────────────────────────────
+o = s:option(DummyValue, "_client_detail", translate("失败时间线"))
+o.rawhtml = true
+function o.cfgvalue()
+	local sel = luci.http.formvalue("dc_host") or ""
+	if sel == "" then
+		return ""
+	end
+
+	local rows = ds.client_diag_detail(sel)
+	if #rows == 0 then
+		return '<div class="dc-alert dc-alert--info">' ..
+			'<span class="dc-alert__icon">i</span><div>' ..
+			string.format(translate("客户机 %s 在保留期内没有失败记录。"),
+				dg.esc(sel)) ..
+			'</div></div>'
+	end
+
 	local SEG = {
 		["2"] = translate("② dnsmasq 已转发，上游无回应"),
 		["3"] = translate("③ 上游明确失败"),
@@ -1530,23 +1696,7 @@ function o.cfgvalue()
 		'</tr></thead><tbody>' .. table.concat(trs) .. '</tbody></table></div>'
 end
 
--- 自愈动作（手动，不受时间窗限制 —— 用户明知可以断网才会点）
-o = s:option(Button, "_heal_l1", translate("立即清缓存"))
-o.inputtitle = translate("执行 L1")
-o.description = translate("SIGHUP dnsmasq，零中断。绝大多数故障这一级就够。")
-function o.write()
-	local ok, out = ds.client_diag_heal("1")
-	setmsg(ok and ("✓ " .. out) or ("✗ " .. out))
-end
-
-o = s:option(Button, "_heal_l3", translate("重启 dnsmasq"))
-o.inputtitle = translate("执行 L3")
-o.description = translate("实测约 3 秒解析中断。仅在 L1/L2 无效时使用。")
-function o.write()
-	local ok, out = ds.client_diag_heal("3")
-	setmsg(ok and ("✓ " .. out) or ("✗ " .. out))
-end
-
+-- ── 自愈记录（两级共用）──────────────────────────────────────
 o = s:option(DummyValue, "_autofix_log", translate("自愈记录"))
 o.rawhtml = true
 function o.cfgvalue()

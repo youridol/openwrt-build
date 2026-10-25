@@ -797,6 +797,176 @@ cmd_flow() {
 }
 
 # ------------------------------------------------------------
+# hosts：在线主机（第一级）
+#
+# 输出：<IP>|<主机名>|<MAC>|<查询数>|<失败数>|<最近活动>|<最近域名>
+#
+# 与 list 的区别：hosts 以**当前在线**为准（来自 ARP 邻居表 +
+# DHCP 租约），而不是「保留期内有记录」。用户要的是「当前在线主机」。
+# ------------------------------------------------------------
+cmd_hosts() {
+	local win now cutoff qtmp ftmp atmp
+	win=$(dc_get client_diag flow_retain_sec 600)
+	now=$(date +%s)
+	cutoff=$((now - win))
+
+	qtmp=$(mktemp); ftmp=$(mktemp); atmp=$(mktemp)
+
+	# 查询数（流水表）
+	[ -f "$DIAG_FLOW_LOG" ] && awk -F'|' -v c="$cutoff" \
+		'$1 >= c { q[$2]++; if ($1 > last[$2]) { last[$2] = $1; dom[$2] = $3 } }
+		 END { for (ip in q) printf "%s\t%d\t%d\t%s\n", ip, q[ip], last[ip], dom[ip] }' \
+		"$DIAG_FLOW_LOG" > "$qtmp" 2>/dev/null
+
+	# 失败数（失败表）
+	[ -f "$DIAG_FAIL_LOG" ] && awk -F'|' -v c="$cutoff" \
+		'$1 >= c { f[$2]++ } END { for (ip in f) printf "%s\t%d\n", ip, f[ip] }' \
+		"$DIAG_FAIL_LOG" > "$ftmp" 2>/dev/null
+
+	# 在线主机：ARP 邻居表里 REACHABLE/STALE/DELAY 的 IPv4
+	ip neigh show 2>/dev/null | awk '
+		/lladdr/ && $1 ~ /^[0-9]+\./ {
+			mac = ""
+			for (i = 1; i <= NF; i++) if ($i == "lladdr") mac = $(i + 1)
+			st = $NF
+			if (st == "REACHABLE" || st == "STALE" || st == "DELAY" || st == "PROBE")
+				printf "%s\t%s\n", $1, mac
+		}' > "$atmp" 2>/dev/null
+
+	# 合并：以「在线」为主体，附上查询/失败统计
+	# 同时把「有查询记录但当前 ARP 不在」的主机也列出（标 offline）
+	{
+		cut -f1 "$atmp" 2>/dev/null
+		cut -f1 "$qtmp" 2>/dev/null
+	} | sort -u | while read -r ip; do
+		[ -n "$ip" ] || continue
+
+		local mac online qn fn lt dom host
+		mac=$(awk -F'	' -v i="$ip" '$1 == i { print $2; exit }' "$atmp" 2>/dev/null)
+		online=1
+		[ -n "$mac" ] || { online=0; mac=""; }
+
+		qn=$(awk -F'	' -v i="$ip" '$1 == i { print $2; exit }' "$qtmp" 2>/dev/null)
+		fn=$(awk -F'	' -v i="$ip" '$1 == i { print $2; exit }' "$ftmp" 2>/dev/null)
+		lt=$(awk -F'	' -v i="$ip" '$1 == i { print $3; exit }' "$qtmp" 2>/dev/null)
+		dom=$(awk -F'	' -v i="$ip" '$1 == i { print $4; exit }' "$qtmp" 2>/dev/null)
+		[ -n "$qn" ] || qn=0
+		[ -n "$fn" ] || fn=0
+		[ -n "$lt" ] || lt=0
+
+		# 主机名：先查 DHCP 租约，再查 ARP 反解
+		host=$(awk -v i="$ip" '$3 == i { print $4; exit }' /tmp/dhcp.leases 2>/dev/null)
+		[ -n "$host" ] && [ "$host" != "*" ] || host=""
+
+		printf '%s|%s|%s|%s|%s|%s|%s|%s\n' \
+			"$ip" "$host" "$mac" "$qn" "$fn" "$lt" "${dom:--}" "$online"
+	done | sort -t'|' -k8,8r -k4,4rn
+
+	rm -f "$qtmp" "$ftmp" "$atmp"
+}
+
+# ------------------------------------------------------------
+# trace：单个域名的完整链路（第二级「打开主域名后跳转到哪里」）
+#
+# 输出：<字段>|<值> 形式，供页面逐项展示
+#
+# 把一条查询的完整过程摊开：
+#   客户机 → dnsmasq → 上游实例 → 答案 → 归属判定 → 最终去向
+# ------------------------------------------------------------
+cmd_trace() {
+	local ip dom win now cutoff
+	ip="$1"
+	dom="$2"
+	[ -n "$dom" ] || { echo "ERROR=缺少域名"; return 1; }
+
+	win=$(dc_get client_diag flow_retain_sec 600)
+	now=$(date +%s)
+	cutoff=$((now - win))
+
+	[ -f "$DIAG_FLOW_LOG" ] || { echo "ERROR=没有查询流水"; return 1; }
+
+	# 该域名在保留期内的所有记录（按 IP 过滤可选）
+	local rows
+	if [ -n "$ip" ]; then
+		rows=$(awk -F'|' -v i="$ip" -v d="$dom" -v c="$cutoff" \
+			'$2 == i && $3 == d && $1 >= c' "$DIAG_FLOW_LOG")
+	else
+		rows=$(awk -F'|' -v d="$dom" -v c="$cutoff" '$3 == d && $1 >= c' "$DIAG_FLOW_LOG")
+	fi
+
+	[ -n "$rows" ] || { echo "ERROR=保留期内没有该域名的查询记录"; return 1; }
+
+	# 汇总：次数、成功/失败、上游、首末时间
+	printf '%s\n' "$rows" | awk -F'|' '
+		{
+			n++
+			if ($1 < first || first == 0) first = $1
+			if ($1 > last) last = $1
+			st[$5]++
+			if ($4 != "") up[$4]++
+			if ($5 == "ok") { ok++; ans = $7 }
+		}
+		END {
+			printf "COUNT|%d\n", n
+			printf "FIRST|%d\n", first
+			printf "LAST|%d\n", last
+			printf "OK|%d\n", ok + 0
+			printf "ANSWER|%s\n", ans
+			for (u in up) printf "UPSTREAM|%s|%d\n", u, up[u]
+			for (s in st) printf "STATE|%s|%d\n", s, st[s]
+		}'
+
+	# 归属判定（复用现有 explain）
+	local cls pref
+	cls=$(/usr/bin/dnschain-selftest explain "$dom" 2>/dev/null | sed -n 's/^CLASS=//p')
+	pref=$(/usr/bin/dnschain-selftest explain "$dom" 2>/dev/null | sed -n 's/^PREFERRED=//p')
+	[ -n "$cls" ] && printf 'CLASS|%s\n' "$cls"
+	[ -n "$pref" ] && printf 'PREFERRED|%s\n' "$pref"
+}
+
+# ------------------------------------------------------------
+# search：按域名/关键词搜索（用户要求「搜索框功能」）
+#
+# 输出：<epoch>|<客户机>|<域名>|<上游>|<状态>|<段>|<答案>
+# 参数：<关键词> [IP] [条数]
+# ------------------------------------------------------------
+cmd_search() {
+	local kw ip limit win now cutoff
+	kw="$1"
+	ip="$2"
+	limit="$3"
+	[ -n "$kw" ] || return 0
+
+	win=$(dc_get client_diag flow_retain_sec 600)
+	now=$(date +%s)
+	cutoff=$((now - win))
+	case "$limit" in ''|*[!0-9]*) limit=200 ;; esac
+
+	[ -f "$DIAG_FLOW_LOG" ] || return 0
+
+	# 关键词匹配域名（不区分大小写），可选按 IP 收窄
+	awk -F'|' -v k="$kw" -v i="$ip" -v c="$cutoff" -v lim="$limit" '
+		{
+			if ($1 < c) next
+			if (i != "" && $2 != i) next
+			# 不区分大小写子串匹配
+			if (index(tolower($3), tolower(k)) == 0) next
+			n++
+			line[n] = $1 "|" $2 "|" $3 "|" $4 "|" $5 "|" $6 "|" $7
+			key[n] = $1 + 0
+		}
+		END {
+			for (a = 2; a <= n; a++) {
+				l = line[a]; kk = key[a]; b = a - 1
+				while (b >= 1 && key[b] < kk) { line[b+1] = line[b]; key[b+1] = key[b]; b-- }
+				line[b+1] = l; key[b+1] = kk
+			}
+			m = (n < lim) ? n : lim
+			for (a = 1; a <= m; a++) print line[a]
+		}' "$DIAG_FLOW_LOG"
+}
+
+# ------------------------------------------------------------
 # autofix-log / undo
 # ------------------------------------------------------------
 cmd_autofix_log() {
@@ -965,6 +1135,9 @@ main() {
 		list)        shift; cmd_list "$@" ;;
 		detail)      shift; cmd_detail "$@" ;;
 		flow)        shift; cmd_flow "$@" ;;
+		hosts)       shift; cmd_hosts "$@" ;;
+		trace)       shift; cmd_trace "$@" ;;
+		search)      shift; cmd_search "$@" ;;
 		autofix-log) shift; cmd_autofix_log "$@" ;;
 		undo)        shift; cmd_undo "$@" ;;
 		heal)        shift; cmd_heal "$@" ;;
@@ -978,6 +1151,9 @@ main() {
   list             客户机列表（TSV）
   detail <IP>      某客户机的失败时间线（TSV）
   flow [IP] [N]    某客户机的完整查询链路（含成功，默认最近 200 条）
+  hosts            当前在线主机（第一级）
+  trace <IP> <域名> 单域名的完整链路
+  search <关键词> [IP] [N]  按域名搜索
   autofix-log      自愈审计记录（TSV）
   undo <id>        撤销一条自动归属调整
   heal <1|2|3>     手动触发自愈（不受时间窗限制）

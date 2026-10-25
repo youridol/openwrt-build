@@ -399,6 +399,9 @@
 		}
 		if (!marker) return;
 
+		/* ⚠️ 必须带上当前 URL 的查询参数（dc_host / dc_q）——
+		 *    否则刷新后回到第一级，用户正在看的第二级详情被踢掉。
+		 *    实测踩过：不带 search 时每次自动刷新都跳回主机列表。 */
 		var xhr = new XMLHttpRequest();
 		xhr.open('GET', location.pathname + location.search, true);
 		xhr.setRequestHeader('X-Requested-With', 'XMLHttpRequest');
@@ -422,6 +425,35 @@
 			} catch (e) { /* 解析失败保持原样，不打断用户 */ }
 		};
 		xhr.send();
+	}
+
+	/**
+	 * 搜索框回车提交。
+	 *
+	 * CBI 的输入框在 form 里，直接回车会触发整页 POST（= 保存配置），
+	 * 而用户只是想搜索。这里拦下 Enter，改成带 dc_q 参数的 GET。
+	 */
+	function bindSearch() {
+		var input = null;
+		var fields = document.querySelectorAll('.cbi-value');
+		for (var i = 0; i < fields.length; i++) {
+			var lbl = fields[i].querySelector('.cbi-value-title');
+			if (lbl && lbl.textContent.indexOf('搜索域名') >= 0) {
+				input = fields[i].querySelector('input');
+				break;
+			}
+		}
+		if (!input) return;
+		input.addEventListener('keydown', function (ev) {
+			if (ev.key !== 'Enter') return;
+			ev.preventDefault();
+			var kw = input.value.trim();
+			var host = new URLSearchParams(location.search).get('dc_host') || '';
+			var q = '?';
+			if (host) q += 'dc_host=' + encodeURIComponent(host) + '&';
+			q += 'dc_q=' + encodeURIComponent(kw);
+			location.href = location.pathname + q;
+		});
 	}
 
 	/**
@@ -485,6 +517,7 @@
 						console.info('[dnschain] 找到诊断 section，启动自动刷新');
 					}
 					startAutoRefresh();
+					bindSearch();
 					return true;
 				}
 			}

@@ -1382,6 +1382,60 @@ else
 	fail "刷新间隔不可配置"
 fi
 
+
+# ㉖ 必须是两级结构：第一级在线主机 → 第二级单机链路
+#
+#    用户明确要求「选定点击主机后转到第二级，按选中的主机实时刷新整个链路状态」。
+if body_of "$GENERAL" | grep -qE 'option\(DummyValue, "_client_hosts"' && \
+   body_of "$GENERAL" | grep -qF 'dc_host=' && \
+   body_of "$GENERAL" | grep -qE 'option\(DummyValue, "_client_flow"'; then
+	pass "两级结构（在线主机 → 单机链路）"
+else
+	fail "缺两级结构（用户要求点主机后进第二级）"
+fi
+
+# ㉗ 第二级必须能显示「从哪里来 / 到哪里去」
+if body_of "$GENERAL" | grep -qF 'where_to' && \
+   body_of "$GENERAL" | grep -qF 'translate("到哪里去")'; then
+	pass "第二级显示「到哪里去」"
+else
+	fail "第二级缺「到哪里去」列"
+fi
+
+# ㉘ 域名必须可下钻到链路详情（trace）
+if body_of "$GENERAL" | grep -qF 'dc_dom=' && \
+   body_of "$MODEL" | grep -qF 'function M.client_diag_trace'; then
+	pass "域名可下钻看完整链路（trace）"
+else
+	fail "域名不能下钻看链路详情"
+fi
+
+# ㉙ 搜索功能必须存在（脚本 + 模型 + 页面）
+if body_of "$DIAG" | grep -qE '^\s*search\)' && \
+   body_of "$MODEL" | grep -qF 'function M.client_diag_search' && \
+   body_of "$GENERAL" | grep -qF 'dc_q'; then
+	pass "搜索功能完整（脚本 + 模型 + 页面）"
+else
+	fail "搜索功能不完整（用户要求按域名关键词搜索）"
+fi
+
+# ㉚ hosts 必须以 ARP 在线表为准，不能只靠历史记录
+if body_of "$DIAG" | grep -qF 'ip neigh show'; then
+	pass "在线主机取自 ARP 邻居表（不是只靠历史记录）"
+else
+	fail "在线主机没查 ARP（会把已下线主机也列为在线）"
+fi
+
+# ㉛ 刷新必须保留 dc_host / dc_q 参数
+#
+#    实测踩过：自动刷新不带 search 时每次跳回第一级，
+#    用户正在看的第二级详情被踢掉。
+if body_of "$JS" | grep -qF 'location.pathname + location.search'; then
+	pass "刷新保留 URL 参数（不踢回第一级）"
+else
+	fail "刷新丢了 URL 参数（会自动跳回第一级）"
+fi
+
 echo ""
 if [ "$rc" -ne 0 ]; then
 	echo "!!! 域名分流与改道契约校验失败" >&2

@@ -1050,6 +1050,85 @@ function M.client_diag_heal(level)
 	return false, err or "自愈失败"
 end
 
+--- 当前在线主机（第一级）
+--
+-- 输出格式：<IP>|<主机名>|<MAC>|<查询数>|<失败数>|<最近活动>|<最近域名>|<在线>
+function M.client_diag_hosts()
+	local out = sys.exec(CLIENT_DIAG .. " hosts 2>&1") or ""
+	local rows = {}
+	for line in out:gmatch("[^\n]+") do
+		local ip, host, mac, qn, fn, lt, dom, on =
+			line:match("^([^|]*)|([^|]*)|([^|]*)|([^|]*)|([^|]*)|([^|]*)|([^|]*)|([^|]*)$")
+		if ip and ip ~= "" then
+			rows[#rows + 1] = {
+				ip = ip, host = host or "", mac = mac or "",
+				queries = qn or "0", fails = fn or "0",
+				last_ts = lt or "0", domain = dom or "",
+				online = (on == "1"),
+			}
+		end
+	end
+	return rows
+end
+
+--- 单域名的完整链路（第二级下钻）
+--
+-- 输出 key|value 形式，返回一个有序数组供页面逐项渲染。
+function M.client_diag_trace(ip, domain)
+	if not domain or domain == "" then return {} end
+	if ip and ip ~= "" and not ip:match("^[0-9a-fA-F:.]+$") then return {} end
+	-- 域名只允许合法字符，防止拼进 shell
+	if not domain:match("^[%w%._%-]+$") then return {} end
+
+	local cmd = CLIENT_DIAG .. " trace"
+	if ip and ip ~= "" then cmd = cmd .. " '" .. ip .. "'" else cmd = cmd .. " ''" end
+	cmd = cmd .. " '" .. domain .. "' 2>&1"
+
+	local out = sys.exec(cmd) or ""
+	local rows = {}
+	for line in out:gmatch("[^\n]+") do
+		-- 格式：KEY|VALUE 或 KEY|VALUE|计数（UPSTREAM / STATE 带计数）
+		local k, v, c = line:match("^([A-Z_]+)|([^|]*)|?([^|]*)$")
+		if k then
+			rows[#rows + 1] = { key = k, value = v or "", count = c or "" }
+		end
+	end
+	return rows
+end
+
+--- 按关键词搜索域名
+function M.client_diag_search(kw, ip, limit)
+	if not kw or kw == "" then return {} end
+	-- 关键词只允许常见域名字符，防止拼进 shell
+	if not kw:match("^[%w%._%-]+$") then return {} end
+	limit = tonumber(limit) or 200
+	if limit < 1 then limit = 200 end
+	if limit > 2000 then limit = 2000 end
+
+	local cmd = CLIENT_DIAG .. " search '" .. kw .. "'"
+	if ip and ip ~= "" and ip:match("^[0-9a-fA-F:.]+$") then
+		cmd = cmd .. " '" .. ip .. "'"
+	else
+		cmd = cmd .. " ''"
+	end
+	cmd = cmd .. " " .. limit .. " 2>&1"
+
+	local out = sys.exec(cmd) or ""
+	local rows = {}
+	for line in out:gmatch("[^\n]+") do
+		local ts, cli, dom, up, st, seg, ans =
+			line:match("^([^|]+)|([^|]*)|([^|]*)|([^|]*)|([^|]*)|([^|]*)|([^|]*)$")
+		if ts then
+			rows[#rows + 1] = {
+				ts = ts, client = cli or "", domain = dom or "",
+				upstream = up or "", state = st or "",
+				seg = seg or "", answer = ans or "",
+			}
+		end
+	end
+	return rows
+end
+
 --- 撤销一条自动归属调整（L4）
 function M.client_diag_undo(id)
 	if not id or not id:match("^[0-9]+$") then
