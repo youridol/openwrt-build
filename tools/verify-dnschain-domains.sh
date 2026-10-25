@@ -1439,49 +1439,37 @@ else
 fi
 
 
-# ㉜ 必须有「强制直连 CIDR」机制（v0.23.1）
+# ㉜ 出站兜底必须改为直连（v0.23.2）
 #
-#    实测教训：SSR-Plus 的 chnroute 数据不完整，47.239.100.208（阿里云上海）
-#    不在 china/whitelist 集合里 → 被判为国外 → 走 v2ray 代理 →
-#    代理出站到国内反而失败 → TLS 被关闭。
+#    SSR-Plus 原兜底是「不在 china/whitelist 的 IP 一律走代理」，
+#    而 china 集合只有 4316 条、覆盖不全 —— 实测阿里云 CDN 的
+#    47.239.100.208（ping 22ms、traceroute 走 202.97 电信骨干）
+#    连 APNIC 官方 8797 条数据都不收录。
 #
-#    后果极隐蔽：cdn.staticsfile.org 解析到该 IP，它是 cc.sefan.pw 依赖的
-#    jQuery CDN。jQuery 加载失败 → 页面 $(function(){...}) 不执行 →
-#    iframe 的 src 永远不设置 → 白屏。而 DNS 查询全部返回 ok，
-#    日志里看不出任何异常。
-#
-#    实测对照：走代理 ERR_CONNECTION_CLOSED / TLS 握手失败；
-#              直连 200，0.15 秒。
-if body_of "$DNSCHAIN_SH" | grep -qF 'dc_apply_direct_cidr' && \
-   body_of "$CFG" | grep -qE '^\s*list direct_cidr ' && \
-   body_of "$RECONCILE" | grep -qF 'dc_apply_direct_cidr'; then
-	pass "有强制直连 CIDR 机制（绕过 chnroute 误判）"
+#    后果：漏判的国内 IP 被送去海外节点，国内 CDN 拒绝海外访问
+#    （经代理 0.3 秒即断；直连 200）→ 页面依赖的 CDN 加载失败 → 白屏。
+#    用户原话：「不是单一域名的问题，其他网页也有这种现象」。
+if body_of "$DNSCHAIN_SH" | grep -qF 'dc_fix_wan_ac_fallback' && \
+   body_of "$RECONCILE" | grep -qF 'dc_fix_wan_ac_fallback'; then
+	pass "出站兜底改为直连（未列入 gfw 的 IP 不绕海外）"
 else
-	fail "缺强制直连 CIDR 机制（国内 IP 被误判走代理会导致 CDN 加载失败）"
+	fail "缺出站兜底修正（国内 IP 被误判走代理会导致 CDN 加载失败）"
 fi
 
-# ㉝ direct_cidr 必须用 uci show 解析，不能用 uci get
-#
-#    list 类型用 `uci get` 返回 rc=1，表现为「配置明明写了却读不到」。
-#    实测踩过：函数静默返回 0，whitelist 一条都没写进去，白屏照旧。
-if body_of "$DNSCHAIN_SH" | sed -n '/^dc_apply_direct_cidr()/,/^}/p' | grep -qF 'uci -q show dnschain.main'; then
-	pass "direct_cidr 用 uci show 解析（list 类型 uci get 读不到）"
+# ㉝ 兜底修正必须带标记，避免重复改
+if body_of "$DNSCHAIN_SH" | grep -qF '_DC_DIRECT_DEFAULT_'; then
+	pass "兜底修正带幂等标记"
 else
-	fail "direct_cidr 用 uci get 解析（list 类型会返回 rc=1，静默失效）"
+	fail "兜底修正无标记（每轮会重复删除/添加）"
 fi
 
-# ㉞ dc_apply_direct_cidr 必须在 reconcile 末尾调用
-#
-#    whitelist 集合由 SSR-Plus 创建，太早写入会静默失败。
-#    判据：该调用必须出现在 `return 0` 之前、且行号靠后（收敛末尾）。
-#    ⚠️ 不能用「最后一次出现」—— 函数定义在 dnschain.sh 里，
-#    reconcile 里只有调用，但行号需按实际文件长度判断。
+# ㉞ 兜底修正必须在 reconcile 末尾
 _total=$(body_of "$RECONCILE" | wc -l)
-_line=$(body_of "$RECONCILE" | grep -n 'dc_apply_direct_cidr' | head -1 | cut -d: -f1)
+_line=$(body_of "$RECONCILE" | grep -n 'dc_fix_wan_ac_fallback' | head -1 | cut -d: -f1)
 if [ -n "$_line" ] && [ "$_line" -gt $((_total / 2)) ]; then
-	pass "强制直连在收敛末尾执行（whitelist 此时已存在）"
+	pass "兜底修正在收敛末尾执行"
 else
-	fail "强制直连在收敛早期执行（whitelist 可能还不存在，写入会静默失败）"
+	fail "兜底修正在收敛早期执行（会被 SSR-Plus 重建覆盖）"
 fi
 
 echo ""

@@ -576,57 +576,54 @@ dc_flush_cache() {
 }
 
 # ------------------------------------------------------------
-# 强制直连的 CIDR（v0.23.1）
+# 修正出站兜底规则（v0.23.2）
 #
-# 为什么需要这个：
-#   SSR-Plus 用 chnroute 生成的 `china` / `whitelist` 集合判断「是否国内」。
-#   该数据不完整 —— 实测 `47.239.100.208`（阿里云上海）不在其中，
-#   于是被判为国外 → 走 v2ray 代理 → 代理出站到国内阿里云失败
-#   → TLS 被关闭。
+# 问题：SSR-Plus 的 `ss_spec_wan_ac` 最后一条是**无条件** jump 到
+#   ss_spec_wan_fw（= 走代理）。含义是「不在 china / whitelist 集合里的
+#   IP 一律走代理」。
 #
-#   后果极隐蔽：`cdn.staticsfile.org` 解析到该 IP，它是 jQuery 的 CDN。
-#   jQuery 加载失败 → 页面 $(function(){...}) 不执行 → iframe 的 src
-#   永远不设置 → **白屏**。而 DNS 查询全部返回 ok，日志里看不出任何异常。
+#   而 china 集合只有 4316 条（SSR-Plus 精简版），覆盖不全：
+#   实测 47.239.100.208（阿里云 CDN，ping 22ms、traceroute 走 202.97
+#   电信骨干）**不在任何公开 chnroute 里**（连 APNIC 官方 8797 条也没有）。
 #
-#   实测对照（2026-10-25）：
-#     走代理：ERR_CONNECTION_CLOSED / TLS 握手失败
-#     直连  ：200，0.5 秒
+#   后果：漏判的国内 IP 被送去**海外节点**，国内 CDN 拒绝海外访问
+#   （实测经代理访问该 IP：0.3 秒即断；直连 200）。
 #
-# 做法：把这些网段写进 SSR-Plus 的 `whitelist` 集合（命中即 return 直连）。
-# 该集合是运行时 nft set，重启会重建，故每次收敛都要重新写。
+#   这解释了用户报的「不是单一域名的问题，其他网页也有这种现象」——
+#   任何 CDN 回源到未收录国内 IP 的站点都会白屏。
 #
-# 配置：uci dnschain.main.direct_cidr（可重复）
+# 修法：把兜底规则从「走代理」改为「走直连」。
+#   分流依据改为**只有 blacklist 才走代理**（blacklist 由 gfw 名单的
+#   域名解析结果 nftset 填充，是「明确需要代理」的集合）。
+#   这符合 ADR-0009 的「直连优先」：国内能通就不要绕海外。
+#
+#   注意：blacklist 集合由 dnsmasq 的 nftset 动态维护，SSR-Plus 重启
+#   会重建链，故每次收敛都要重新写。
 # ------------------------------------------------------------
-dc_apply_direct_cidr() {
-	local list
+dc_fix_wan_ac_fallback() {
+	# 只在 SSR-Plus 接管时处理
+	dc_nftset_exists blacklist || return 0
+	nft list chain inet ss_spec ss_spec_wan_ac >/dev/null 2>&1 || return 0
 
-	# ⚠️ list 类型不能用 `uci get` —— 它对多值选项返回 rc=1，
-	#    表现为「配置明明写了却读不到」。实测踩过：函数静默返回 0，
-	#    whitelist 一条都没写进去，白屏照旧。
-	#    正确写法是 `uci show` 后按 key 前缀过滤。
-	list=$(uci -q show dnschain.main 2>/dev/null \
-		| sed -n "s/^dnschain\.main\.direct_cidr='\(.*\)'$/\1/p" \
-		| tr '\n' ' ')
-	[ -n "$list" ] || return 0
+	# 检查最后一条是否仍是「无条件 jump 到 wan_fw」
+	local last
+	last=$(nft list chain inet ss_spec ss_spec_wan_ac 2>/dev/null | grep -E '^\s+jump ss_spec_wan_fw' | tail -1)
+	[ -n "$last" ] || return 0
 
-	# 集合不存在说明 SSR-Plus 没接管，无需处理
-	dc_nftset_exists whitelist || return 0
+	# 已经改过（带注释标记）就跳过
+	nft list chain inet ss_spec ss_spec_wan_ac 2>/dev/null | grep -q '_DC_DIRECT_DEFAULT_' && return 0
 
-	local cidr added
-	added=0
-	for cidr in $list; do
-		# 只接受 IPv4 CIDR 或单 IP，防止拼进 nft 语法
-		case "$cidr" in
-			*[!0-9./]*) continue ;;
-		esac
-		[ -n "$cidr" ] || continue
+	# 删掉无条件兜底，换成带标记的 return（= 直连）
+	local h
+	h=$(nft -a list chain inet ss_spec ss_spec_wan_ac 2>/dev/null \
+		| grep -E '^\s+jump ss_spec_wan_fw' | tail -1 \
+		| grep -oE 'handle [0-9]+' | awk '{print $2}')
+	[ -n "$h" ] || return 0
 
-		if nft add element inet ss_spec whitelist { "$cidr" } 2>/dev/null; then
-			added=$((added + 1))
-		fi
-	done
+	nft delete rule inet ss_spec ss_spec_wan_ac handle "$h" 2>/dev/null || return 0
+	nft add rule inet ss_spec ss_spec_wan_ac return comment "_DC_DIRECT_DEFAULT_" 2>/dev/null || return 1
 
-	[ "$added" -gt 0 ] && dnschain_log "强制直连：已写入 $added 条 CIDR 到 whitelist"
+	dnschain_log "出站兜底已改为直连（未列入 gfw 的 IP 不再绕海外）"
 	return 0
 }
 

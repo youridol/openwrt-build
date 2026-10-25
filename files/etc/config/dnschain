@@ -52,16 +52,6 @@ config dnschain 'main'
 	option intercept_dot '1'
 	# 尽力而为地阻断已知公共 DoH（443 无法可靠区分，仅标注）
 	option intercept_doh '0'
-	# ── 强制直连 CIDR（v0.23.1）──────────────────────────────
-	# SSR-Plus 的 chnroute 数据不完整，部分国内 IP 会被误判为国外而走代理，
-	# 代理出站到国内反而失败（实测 47.239.100.208 阿里云上海）。
-	# 把这类网段写在这里，收敛时自动加入 whitelist（命中即直连）。
-	#
-	# 实测案例：cdn.staticsfile.org → 47.239.100.208，
-	# 它是 cc.sefan.pw 依赖的 jQuery CDN。走代理时 TLS 被关闭 →
-	# jQuery 加载失败 → iframe 的 src 永不设置 → 白屏，
-	# 而 DNS 日志全部正常，极难定位。
-	list direct_cidr '47.239.0.0/16'
 	# ── 分诊三键已删除（v0.22.0）────────────────────────────────
 	# triage_enabled / triage_max / triage_conc 曾控制「自动分诊未知目标」，
 	# 分诊功能整体移除后无消费者。留注释说明去向，防止有人以为漏配。
