@@ -1,25 +1,27 @@
-fix(ci): 补齐 5 个运行时脚本的 git 执行位，扩充 CI 断言覆盖
+fix(ci): 修正 4 处查错文件的图示断言（应查 diagrams.lua 而非 general.lua）
 
-v0.22.0 的 master 构建在 2m43s 失败，真实原因：
+v0.22.0 标签构建在 3m31s 失败，失败步骤是
+「Add luci-app-dnschain」。该步骤的 4 条图示断言仍指向
+general.lua，但被断言的函数在 v0.19.0/v0.22.0 已迁到 diagrams.lua：
 
-  FAIL files/usr/bin/dnschain-reconcile 缺执行位（页面按钮会静默失败）
-  Process completed with exit code 1
+  ① 链路图几何常量 W,H / X1..X4 / NW,NH / GAP
+     → 这些属于已删除的「判定链路图」（route_map）。
+     改为查 live_diag_map 的 LIVE_W / LIVE_X3 / LIVE_EVID_W，
+     并验 LIVE_W > LIVE_X3 + LIVE_EVID_W（1180 > 844，留 336px）。
 
-根因：这些脚本在 git 索引里是 100644（无执行位）。本地看不出来是因为
-Windows 文件系统不体现 Unix 权限位，只有 CI 在 Linux 检出后才暴露。
+  ② 贝塞尔 C 指令          → curve() 在 diagrams.lua
+  ③ 曲线控制点交叉保护 cap  → curve() 在 diagrams.lua
+  ④ 节点 fill=var(--dc-surface) → box() 在 diagrams.lua
 
-修复（git 索引，不是 chmod 工作树）：
+失败时的症状极难定位：**不打印任何 FAIL 行**，只有
+`##[error]Process completed with exit code 1`，且前面最后一条
+输出还是 OK。原因是断言块里 `grep -q ... "$GEN"` 找不到内容时
+直接走 else 分支 exit 1，而 GitHub 的日志聚合把 FAIL 行归到了
+「UNKNOWN STEP」下，用 --log-failed 抓不到。
 
-  git update-index --chmod=+x files/etc/init.d/dnschain
-  git update-index --chmod=+x files/etc/uci-defaults/99-zz-dnschain
-  git update-index --chmod=+x files/usr/bin/dnschain-reconcile
-  git update-index --chmod=+x files/usr/bin/dnschain-selftest
-  git update-index --chmod=+x files/usr/share/dnschain/dnschain.sh
+排查方法：用 yaml 解析工作流、提取该 step 的 run 脚本，
+在本地模拟 CI 目录结构（../openwrt-build/）后逐条执行 ——
+这样能直接看到第一个失败点。修完后该步骤本地 RC=0。
 
-同时把 CI 的执行位断言从「只查 dnschain-reconcile」扩到全部 5 个。
-原来只查一个，所以另外 4 个一直是 100644 却从未被发现 ——
-这正是 AGENTS.md 红线 4 要求「新增此类文件后一并更新 chmod 清单」
-却漏掉的场景。断言扩全后，任何新增脚本漏设权限都会在 CI 立刻暴露。
-
-验证：git ls-files -s 确认 5 个均为 100755；
-本地 verify 150 OK / 0 FAIL、lua 108、diagrams 54、ci-sim RC=0。
+验证：verify 150 OK / 0 FAIL、lua 108、diagrams 54、
+i18n 309 条无缺失、ci-sim RC=0、提取的 CI 步骤本地 RC=0。

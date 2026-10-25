@@ -406,23 +406,32 @@ jobs:
             exit 1
           fi
 
-          # 链路图 viewBox 必须能容纳最右节点
-          # 最右节点 x = X4 + NW + GAP，右边缘 = 该值 + NW；W 必须更大。
-          # 静态校验：W 与 X4/NW/GAP 的字面值要对得上（改坐标必须同步改 W）。
-          VB=$(grep -oE 'local W, H = [0-9]+, [0-9]+' "$GEN" | grep -oE '[0-9]+' | head -1)
-          X4V=$(grep -oE 'local X1, X2, X3, X4 = [0-9]+, [0-9]+, [0-9]+, [0-9]+' "$GEN" | grep -oE '[0-9]+' | tail -1)
-          NWV=$(grep -oE 'local NW, NH = [0-9]+, [0-9]+' "$GEN" | grep -oE '[0-9]+' | head -1)
-          GAPV=$(grep -oE 'local GAP = [0-9]+' "$GEN" | grep -oE '[0-9]+$')
-          if [ -n "$VB" ] && [ -n "$X4V" ] && [ -n "$NWV" ] && [ -n "$GAPV" ]; then
-            NEED=$((X4V + NWV + GAPV + NWV))
-            if [ "$VB" -gt "$NEED" ]; then
-              echo "OK   链路图 viewBox $VB > 最右节点右边缘 $NEED（留 $((VB - NEED))px）"
+          # 链路拓扑图 viewBox 必须能容纳最右节点（v0.22.0 重写）
+          #
+          # ⚠️ 原断言查的是 general.lua 里「判定链路图」的
+          #    `local W, H = ...` / `X1..X4` / `NW, NH` / `GAP` 四组常量。
+          #    那张图（`route_map`）已在 v0.19.0 删除，常量随之消失 ——
+          #    断言于是永久失败（实测 run 40127000136 就栽在这里，
+          #    且失败时**不打印 FAIL 行**，只有 exit code 1，极难定位）。
+          #
+          #    现在查 diagrams.lua 里 `live_diag_map` 的真实常量：
+          #      LIVE_W       画布宽
+          #      LIVE_X3      证据框 x
+          #      LIVE_EVID_W  证据框宽
+          #    最右元素右边缘 = LIVE_X3 + LIVE_EVID_W，必须 < LIVE_W。
+          LIVEW=$(grep -oE '^local LIVE_W = [0-9]+' "$DIA" | grep -oE '[0-9]+$')
+          LIVEX3=$(grep -oE '^local LIVE_X3 = [0-9]+' "$DIA" | grep -oE '[0-9]+$')
+          LIVEEW=$(grep -oE '^local LIVE_EVID_W = [0-9]+' "$DIA" | grep -oE '[0-9]+$')
+          if [ -n "$LIVEW" ] && [ -n "$LIVEX3" ] && [ -n "$LIVEEW" ]; then
+            LIVE_NEED=$((LIVEX3 + LIVEEW))
+            if [ "$LIVEW" -gt "$LIVE_NEED" ]; then
+              echo "OK   链路拓扑图 viewBox $LIVEW > 最右元素右边缘 $LIVE_NEED（留 $((LIVEW - LIVE_NEED))px）"
             else
-              echo "FAIL 链路图 viewBox $VB 容不下最右节点（右边缘 $NEED）" >&2
+              echo "FAIL 链路拓扑图 viewBox $LIVEW 容不下最右元素（右边缘 $LIVE_NEED）" >&2
               exit 1
             fi
           else
-            echo "FAIL 无法解析链路图几何常量（W/X4/NW/GAP）" >&2
+            echo "FAIL 无法解析链路拓扑图几何常量（LIVE_W/LIVE_X3/LIVE_EVID_W）" >&2
             exit 1
           fi
 
@@ -434,10 +443,12 @@ jobs:
           #     红/绿连线配灰箭头，看起来像没连上
           #  ③ 曲线控制点必须满足 c1x <= c2x —— 否则曲线在中间兜回来、
           #     出现自交扭结（实测踩过：C 415 169, 373 85, 424 85）
-          if grep -q 'd="M %d %d C %d %d, %d %d, %d %d"' "$GEN"; then
-            echo "OK   链路图用贝塞尔 C 指令画分叉"
+          # v0.22.0：贝塞尔曲线函数 `curve()` 在 diagrams.lua（三张图共用），
+          # 不在 general.lua —— 原断言查错了文件。
+          if grep -q 'd="M %d %d C %d %d, %d %d, %d %d"' "$DIA"; then
+            echo "OK   图示用贝塞尔 C 指令画分叉"
           else
-            echo "FAIL 链路图缺少贝塞尔曲线（H/V 直角折线会像断链）" >&2
+            echo "FAIL 图示缺少贝塞尔曲线（H/V 直角折线会像断链）" >&2
             exit 1
           fi
 
@@ -481,7 +492,8 @@ jobs:
             exit 1
           fi
 
-          if grep -q 'local cap = math.floor((x2 - x1) / 2)' "$GEN"; then
+          # v0.22.0：`curve()` 在 diagrams.lua（三张图共用），不在 general.lua。
+          if grep -q 'local cap = math.floor((x2 - x1) / 2)' "$DIA"; then
             echo "OK   曲线控制点有交叉保护（dx <= 跨度/2）"
           else
             echo "FAIL 曲线缺少控制点交叉保护（会出现自交扭结）" >&2
@@ -489,7 +501,8 @@ jobs:
           fi
 
           # 节点必须有填充 —— fill="none" 时连线会从节点内部透出，看起来像断链
-          if grep -q 'fill="var(--dc-surface)" stroke="%s"' "$GEN"; then
+          # v0.22.0：节点绘制函数 `box()` 在 diagrams.lua，不在 general.lua。
+          if grep -q 'fill="var(--dc-surface)" stroke="%s"' "$DIA"; then
             echo "OK   节点有填充（连线不会透出）"
           else
             echo "FAIL 节点 fill 不是 --dc-surface（连线会透出，像断链）" >&2
