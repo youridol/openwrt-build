@@ -757,13 +757,43 @@ cmd_flow() {
 
 	# 按 IP 过滤（空 IP = 全部客户机）
 	# 输出带客户机 IP：<epoch>|<客户机>|<域名>|<上游>|<状态>|<段>|<答案>
+	#
+	# ⚠️ 不能用 `sort -t'|' -k1,1rn` 排序 —— 实测 BusyBox 的 sort
+	#    对 `-t` + `-k1,1rn` 组合**忽略 -r**，输出是升序：
+	#      printf "3|a\n1|b\n2|c\n" | sort -t'|' -k1,1rn
+	#      → 1|b  2|c  3|a        （要降序，却给了升序）
+	#    而纯 `sort -rn`（不带 -t/-k）才正常。
+	#
+	#    后果：页面「实时查询链路」永远显示**最旧的 200 条**，
+	#    用户看到的时间戳停在几分钟前，以为自动刷新失效。
+	#
+	#    改用 awk 在内存里排序（每轮最多几千行，N2930 无压力）。
 	if [ -n "$ip" ]; then
-		awk -F'|' -v i="$ip" -v c="$cutoff" \
-			'$2 == i && $1 >= c { print $1 "|" $2 "|" $3 "|" $4 "|" $5 "|" $6 "|" $7 }' "$DIAG_FLOW_LOG"
+		awk -F'|' -v i="$ip" -v c="$cutoff" -v lim="$limit" '
+			$2 == i && $1 >= c { n++; line[n] = $1 "|" $2 "|" $3 "|" $4 "|" $5 "|" $6 "|" $7; key[n] = $1 + 0 }
+			END {
+				# 插入排序（n 通常 < 2000，足够快）
+				for (a = 2; a <= n; a++) {
+					l = line[a]; k = key[a]; b = a - 1
+					while (b >= 1 && key[b] < k) { line[b+1] = line[b]; key[b+1] = key[b]; b-- }
+					line[b+1] = l; key[b+1] = k
+				}
+				m = (n < lim) ? n : lim
+				for (a = 1; a <= m; a++) print line[a]
+			}' "$DIAG_FLOW_LOG"
 	else
-		awk -F'|' -v c="$cutoff" \
-			'$1 >= c { print $1 "|" $2 "|" $3 "|" $4 "|" $5 "|" $6 "|" $7 }' "$DIAG_FLOW_LOG"
-	fi | sort -t'|' -k1,1rn | head -n "$limit"
+		awk -F'|' -v c="$cutoff" -v lim="$limit" '
+			$1 >= c { n++; line[n] = $1 "|" $2 "|" $3 "|" $4 "|" $5 "|" $6 "|" $7; key[n] = $1 + 0 }
+			END {
+				for (a = 2; a <= n; a++) {
+					l = line[a]; k = key[a]; b = a - 1
+					while (b >= 1 && key[b] < k) { line[b+1] = line[b]; key[b+1] = key[b]; b-- }
+					line[b+1] = l; key[b+1] = k
+				}
+				m = (n < lim) ? n : lim
+				for (a = 1; a <= m; a++) print line[a]
+			}' "$DIAG_FLOW_LOG"
+	fi
 }
 
 # ------------------------------------------------------------
@@ -876,7 +906,22 @@ cmd_daemon() {
 	# 这条管道里的 while 每读一行就处理，不会缓冲到最后 ——
 	# 若改用 `logread -f | awk > file` 再读文件，会因缓冲看不到实时结果。
 	local ts
-	logread -f 2>/dev/null | _diag_stream | while IFS='|' read -r ip dom up st ans; do
+
+	# ⚠️ 三节管道（logread | awk | while）在后台/procd 下会被缓冲，
+	#    实测 daemon 跑 15 秒一条都没落盘，而手动 `sh -c` 同样的管道
+	#    却正常 —— 差别在 stdout 是不是 tty。
+	#
+	#    改成两段：先由 awk 直接写文件（awk 的 stdout 是文件，无缓冲），
+	#    再由 shell 用 tail -f 消费。这样每行都立即可见。
+	local pipe="$DNSCHAIN_STATE_DIR/.diag-pipe"
+	: > "$pipe"
+
+	# 后台跑解析，输出重定向到文件
+	( logread -f 2>/dev/null | _diag_stream >> "$pipe" ) &
+	local parser_pid=$!
+
+	# 消费端：tail -f 跟踪该文件
+	tail -f "$pipe" 2>/dev/null | while IFS='|' read -r ip dom up st ans; do
 		[ -n "$ip" ] || continue
 		[ -n "$dom" ] || continue
 
@@ -908,6 +953,9 @@ cmd_daemon() {
 			echo "$ts" > "$DIAG_LAST_SCAN"
 		fi
 	done
+
+	kill "$parser_pid" 2>/dev/null
+	rm -f "$pipe"
 }
 
 main() {

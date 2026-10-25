@@ -1272,8 +1272,13 @@ fi
 #
 #    实测踩过：首版 `_diag_is_fail "$st" || continue` 在写流水之前就跳过了，
 #    成功查询全丢 → 用户看不到「这台设备刚才查了什么」。
+#    判据：daemon 的消费循环里必须调 _diag_record_flow，且它不在
+#    `_diag_is_fail` 的条件分支内（即对每条查询都记）。
+#    ⚠️ 不能按具体的管道形态匹配（曾用 `_diag_stream | while`，
+#    后来管道改成 `tail -f | while` 就失配了）。
 if body_of "$DIAG" | grep -qF '_diag_record_flow' && \
-   body_of "$DIAG" | sed -n '/_diag_stream | while/,/^	done/p' | grep -qF '_diag_record_flow'; then
+   body_of "$DIAG" | sed -n '/while IFS=.|. read -r ip dom up st ans/,/^	done/p' \
+     | grep -B2 '_diag_record_flow' | grep -qv '_diag_is_fail'; then
 	pass "查询流水记录全部查询（含成功）"
 else
 	fail "查询流水只在失败时记录（用户看不到成功查询的完整链路）"
@@ -1312,6 +1317,69 @@ if body_of "$DIAG" | grep -qF 'chmod 644 "$DIAG_FLOW_LOG"'; then
 	pass "查询流水文件放开读权限（否则 LuCI 读不到）"
 else
 	fail "查询流水文件没 chmod 644（页面会显示空列表而数据其实在）"
+fi
+
+
+# ㉑ 自动刷新必须用 MutationObserver 等待 section 出现
+#
+#    实测踩过：直接在 readyState 后调 startAutoRefresh()，而 LuCI 的
+#    CBI 内容是异步渲染的 —— 那时 section 还没进 DOM，输入框查不到、
+#    刷新逻辑静默失效（页面看起来正常，只是永远不刷新）。
+if body_of "$JS" | grep -qF 'MutationObserver' && \
+   body_of "$JS" | grep -qF 'bootAutoRefresh'; then
+	pass "自动刷新用 MutationObserver 等 section 就绪"
+else
+	fail "自动刷新没有等 section 就绪（LuCI 异步渲染会导致它静默失效）"
+fi
+
+# ㉒ init 必须包 try/catch，否则一处抛错会拖死自动刷新
+if body_of "$JS" | grep -qF 'safeInit'; then
+	pass "init 有 try/catch 兜底（不拖死自动刷新）"
+else
+	fail "init 没有兜底（任何一步抛错都会让自动刷新不启动）"
+fi
+
+# ㉓ classList 访问必须防 undefined（SVG 元素没有 classList）
+#
+#    实测踩过：markBlockRows 对 SVG 子元素调 classList 抛
+#    "Cannot read properties of undefined (reading 'classList')"，
+#    整个 init 中断 → 自动刷新不启动，而控制台只有这一条错。
+_noclasslist_bad=""
+#    判据要点（两个坑都踩过）：
+#      ① 必须先剥掉注释行 —— 注释里写着「el.classList.contains() 会抛」
+#         这类说明文字，不剥会让断言永久误报（AGENTS.md 第 6 条）。
+#      ② 防护与调用的距离不固定（有的隔 4 行），窗口取 6 行。
+body_of "$JS" | grep -vE '^[[:space:]]*\*|^[[:space:]]*/\*|^[[:space:]]*//' \
+  | grep -nE '\.classList\.contains|\.classList\.add' | while IFS=: read -r ln rest; do
+	ctx=$(body_of "$JS" | grep -vE '^[[:space:]]*\*|^[[:space:]]*/\*|^[[:space:]]*//' | sed -n "$((ln-6)),${ln}p")
+	case "$ctx" in
+		*'!el.classList'*|*'!row.classList'*|*'!box.classList'*) ;;
+		*) echo "$ln" ;;
+	esac
+done > /tmp/.cls-bad.$$
+if [ -s /tmp/.cls-bad.$$ ]; then
+	_noclasslist_bad="yes"
+fi
+rm -f /tmp/.cls-bad.$$
+if [ -z "$_noclasslist_bad" ]; then
+	pass "classList 访问都有 undefined 防护（SVG 元素没有 classList）"
+else
+	fail "有 classList 访问缺防护（SVG 子元素会让 init 抛错）"
+fi
+
+# ㉔ 手动刷新按钮必须存在
+if body_of "$GENERAL" | grep -qE 'option\(Button, "_flow_refresh"'; then
+	pass "有「立即刷新」手动按钮"
+else
+	fail "缺手动刷新按钮（用户要求「手动刷新」）"
+fi
+
+# ㉕ 刷新间隔必须可配且传进页面
+if body_of "$GENERAL" | grep -qE 'option\(Value, "flow_refresh"' && \
+   body_of "$CFG" | grep -qE '^\s*option flow_refresh '; then
+	pass "刷新间隔可配置（flow_refresh）"
+else
+	fail "刷新间隔不可配置"
 fi
 
 echo ""

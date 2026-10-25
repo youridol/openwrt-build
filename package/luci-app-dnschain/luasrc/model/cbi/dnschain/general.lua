@@ -1263,6 +1263,12 @@ o = s:option(Value, "flow_retain_max", translate("查询流水条目上限"),
 o.datatype = "range(50,100000)"
 o.default = "1000"
 
+o = s:option(Value, "flow_refresh", translate("实时刷新间隔（秒）"),
+	translate("页面「实时查询链路」自动刷新的间隔。<b>0 = 不自动刷新</b>。" ..
+		"无论是否开启，都可以用下面的「立即刷新」按钮手动刷。"))
+o.datatype = "range(0,300)"
+o.default = "10"
+
 o = s:option(Value, "retain_sec", translate("失败记录保留（秒）"),
 	translate("失败记录量小，默认保留 1 小时 —— 超过 1 小时看也没有用了。"))
 o.datatype = "range(60,86400)"
@@ -1349,6 +1355,18 @@ function o.cfgvalue()
 	return table.concat(p)
 end
 
+-- 刷新控制：手动按钮 + 自动刷新开关提示
+--
+-- ⚠️ 按钮必须用 Button（CBI 的 input），不能用 <a href>：
+--    CBI 已把整页包在 <form method="post"> 里，<a> 会触发整页 POST，
+--    而 Button.write 是空操作，正好只做刷新不写配置。
+o = s:option(Button, "_flow_refresh", translate("立即刷新"))
+o.inputtitle = translate("刷新")
+o.description = translate("手动刷新下方「实时查询链路」。自动刷新间隔见上方配置。")
+function o.write()
+	-- 空实现：按钮只触发页面重新渲染，不需要写任何配置
+end
+
 o = s:option(DummyValue, "_client_flow", translate("实时查询链路"))
 o.rawhtml = true
 function o.cfgvalue()
@@ -1389,25 +1407,49 @@ function o.cfgvalue()
 		noquery = translate("仅查询"), servfail = translate("上游失败"),
 		noreply = translate("上游无回应"),
 	}
-	-- 段号 → 人话（ADR-0009 §3.2）
-	local SEG = {
-		["0"] = translate("—"),
-		["1"] = translate("① 未转发"),
-		["2"] = translate("② 转发后无回应"),
-		["3"] = translate("③ 上游失败"),
-	}
+	-- ── 「从哪里来 → 到哪里去」──────────────────────────────────
+	--
+	-- 用户要的是「客户机的当前行为记录」：这条查询**从哪台设备发起、
+	-- 经过哪条上游、拿到什么答案**。所以链路列不能只写「失败段」，
+	-- 必须把完整去向写出来。
+	--
+	-- 去向由 `upstream` 决定（脚本记的是 dnsmasq 的 forwarded 目标）：
+	--   127.0.0.1#5353  → 直连链（国内 dnsproxy）
+	--   127.0.0.1#5336  → 代理链（国外 dnsproxy）
+	--   空              → 未转发（缓存命中 / 并发合并 / 查询未完成）
+	local function where_to(up)
+		if up == nil or up == "" then
+			return translate("未转发")
+		end
+		-- 端口从 entry_port / foreign_port 读，不写死
+		local ep = tostring(ds.entry_port())
+		local fp = tostring(ds.foreign_port())
+		if up:find("#" .. ep) or up:find(":" .. ep) then
+			return translate("直连")
+		elseif up:find("#" .. fp) or up:find(":" .. fp) then
+			return translate("代理")
+		end
+		return up
+	end
 
 	local trs = {}
 	for _, r in ipairs(rows) do
 		local when = tonumber(r.ts) or 0
 		local st = r.state or ""
+		local dest = where_to(r.upstream)
+
+		-- 去向色调：直连=ok（绿）、代理=warn（黄）、未转发=mute（灰）
+		local dtone = "mute"
+		if dest == translate("直连") then dtone = "ok"
+		elseif dest == translate("代理") then dtone = "warn" end
+
 		trs[#trs + 1] = string.format(
 			'<tr>' ..
 			'<td>%s</td>' ..
 			'<td><code>%s</code></td>' ..
 			'<td><code>%s</code></td>' ..
 			'<td><span class="dc-badge dc-badge--%s">%s</span></td>' ..
-			'<td>%s</td>' ..
+			'<td><span class="dc-badge dc-badge--%s">%s</span></td>' ..
 			'<td><code>%s</code></td>' ..
 			'</tr>',
 			when > 0 and os.date("%H:%M:%S", when) or "—",
@@ -1415,17 +1457,17 @@ function o.cfgvalue()
 			dg.esc(r.domain or "—"),
 			TONE[st] or "mute",
 			dg.esc(TEXT[st] or st),
-			dg.esc(SEG[r.seg] or "—"),
+			dtone, dg.esc(dest),
 			dg.esc(r.answer or "—"))
 	end
 
 	head[#head + 1] = '<div class="dc-table-wrap"><table class="dc-table">' ..
 		'<thead><tr>' ..
 		'<th>' .. translate("时刻") .. '</th>' ..
-		'<th>' .. translate("客户机") .. '</th>' ..
-		'<th>' .. translate("域名") .. '</th>' ..
+		'<th>' .. translate("从哪里来") .. '</th>' ..
+		'<th>' .. translate("查什么") .. '</th>' ..
 		'<th>' .. translate("结果") .. '</th>' ..
-		'<th>' .. translate("链路") .. '</th>' ..
+		'<th>' .. translate("到哪里去") .. '</th>' ..
 		'<th>' .. translate("答案") .. '</th>' ..
 		'</tr></thead><tbody>' .. table.concat(trs) .. '</tbody></table></div>'
 

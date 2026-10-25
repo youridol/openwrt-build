@@ -76,7 +76,8 @@
 			var box = titleEl.parentNode;
 			if (!box) continue;
 			/* 排除 CBI 的 tab 标题（本页不用原生 tab，但保险） */
-			if (box.classList && box.classList.contains('cbi-section-node')) continue;
+			if (!box.classList) continue;
+			if (box.classList.contains('cbi-section-node')) continue;
 			var title = (titleEl.textContent || '').trim();
 			if (!title) continue;
 			result.push({ el: box, title: title, tab: meta.sectionTab[title] || null });
@@ -264,13 +265,22 @@
 		for (var i = 0; i < fields.length; i++) {
 			var field = fields[i];
 			var row = field.parentNode;
-			if (!row || row.classList.contains('dc-block-row')) continue;
+			if (!row || !row.classList) continue;
+			if (row.classList.contains('dc-block-row')) continue;
 
 			/* 只看直接子元素 —— 深层同名元素（比如表格里的 .dc-table）
 			 * 不该让整行变竖排 */
 			var hit = false;
 			for (var j = 0; j < field.children.length; j++) {
 				var el = field.children[j];
+				/* ⚠️ SVG 元素（<svg>/<path>/<g>）没有 classList ——
+				 *    直接 el.classList.contains() 会抛
+				 *    "Cannot read properties of undefined (reading 'classList')"，
+				 *    整个 init() 中断 → 后续 markBlockRows / bootAutoRefresh
+				 *    全都不执行，表现为「页面看起来正常但自动刷新失效」。
+				 *    实测踩过：控制台只有这一条错，却让自动刷新静默不工作。
+				 */
+				if (!el || !el.classList) continue;
 				for (var k = 0; k < BLOCK_CLASSES.length; k++) {
 					if (el.classList.contains(BLOCK_CLASSES[k])) { hit = true; break; }
 				}
@@ -368,9 +378,168 @@
 		activate(initial);
 	}
 
+	/**
+	 * 实时刷新「客户机链路诊断」区块。
+	 *
+	 * 为什么只刷这一块而不是整页：
+	 *   整页 reload 会重置 tab 位置、滚动位置、输入框里未保存的内容，
+	 *   而实时链路是**持续观察**的界面 —— 每 10 秒把你弹回顶部、
+	 *   把正在填的配置清掉，完全没法用。
+	 *
+	 * 做法：只对含「实时查询链路」的 section 发一次 GET，把返回的
+	 * 同位置 DOM 替换进去。CBI 的 DummyValue 是服务端渲染的，
+	 * 所以必须回服务端取，不能在前端算。
+	 */
+	function refreshDiag() {
+		var marker = null;
+		var secs = document.querySelectorAll('.cbi-section, fieldset');
+		for (var i = 0; i < secs.length; i++) {
+			var h = secs[i].querySelector('h3, legend');
+			if (h && h.textContent.trim() === '客户机链路诊断') { marker = secs[i]; break; }
+		}
+		if (!marker) return;
+
+		var xhr = new XMLHttpRequest();
+		xhr.open('GET', location.pathname + location.search, true);
+		xhr.setRequestHeader('X-Requested-With', 'XMLHttpRequest');
+		xhr.onload = function () {
+			if (xhr.status !== 200) return;
+			try {
+				var doc = new DOMParser().parseFromString(xhr.responseText, 'text/html');
+				var secs2 = doc.querySelectorAll('.cbi-section, fieldset');
+				var fresh = null;
+				for (var j = 0; j < secs2.length; j++) {
+					var h2 = secs2[j].querySelector('h3, legend');
+					if (h2 && h2.textContent.trim() === '客户机链路诊断') { fresh = secs2[j]; break; }
+				}
+				if (!fresh || !marker.parentNode) return;
+				/* 保留当前 tab 的可见性，替换内容后重新套用 */
+				var wasHidden = marker.hidden;
+				marker.parentNode.replaceChild(fresh, marker);
+				fresh.hidden = wasHidden;
+				/* 新节点没有绑过 CBI 的事件，但本区块全是只读展示 + 按钮，
+				   按钮由 CBI 原生处理（form 提交），无需重绑 */
+			} catch (e) { /* 解析失败保持原样，不打断用户 */ }
+		};
+		xhr.send();
+	}
+
+	/**
+	 * 按配置启动自动刷新。
+	 *
+	 * 间隔从页面上的「实时刷新间隔（秒）」输入框读 —— 用户改完保存
+	 * 即生效，不需要额外配置通道。0 表示不自动刷新。
+	 *
+	 * ⚠️ 只在「状态」tab 激活时刷：其他 tab 看不见这块，
+	 *    后台刷只是白耗路由器 CPU（N2930 是低功耗 4 核）。
+	 */
+	function startAutoRefresh() {
+		var input = null;
+		var fields = document.querySelectorAll('.cbi-value');
+		for (var i = 0; i < fields.length; i++) {
+			var lbl = fields[i].querySelector('.cbi-value-title');
+			if (lbl && lbl.textContent.indexOf('实时刷新间隔') >= 0) {
+				input = fields[i].querySelector('input');
+				break;
+			}
+		}
+		var sec = input ? parseInt(input.value, 10) : 10;
+		/* 便于排障：把实际读到的间隔写进 console，用户反馈「不刷新」时
+		   一眼能看出是配置为 0 还是没读到 */
+		if (window.console && console.info) {
+			console.info('[dnschain] 自动刷新间隔 =', sec, '秒（输入框', input ? '已找到' : '未找到，用默认 10', '）');
+		}
+		if (isNaN(sec) || sec <= 0) return;
+
+		setInterval(function () {
+			var t = document.querySelector('.dc-tab[aria-selected="true"]');
+			if (!t || t.getAttribute('data-tab') !== 'status') return;
+			if (document.hidden) return;   /* 标签页在后台不刷 */
+			refreshDiag();
+		}, sec * 1000);
+	}
+
+	/**
+	 * 等「客户机链路诊断」section 真正出现在 DOM 里再启动自动刷新。
+	 *
+	 * ⚠️ 为什么不能直接调 startAutoRefresh()：
+	 *    LuCI 的 CBI 内容是**异步渲染**的 —— 脚本执行时
+	 *    `document.readyState` 可能已是 complete，但 section 还没插进
+	 *    DOM。实测：直接调用时输入框查不到、`sec` 落到默认值，
+	 *    而 setInterval 里 refreshDiag 又因找不到 section 而 return，
+	 *    整条链路静默失效（页面看起来正常，只是永远不刷新）。
+	 *
+	 *    用 MutationObserver 等到目标 section 出现再启动，是最可靠的。
+	 *    最多等 30 秒，超时后放弃（不让一个观察器永久挂着）。
+	 */
+	function bootAutoRefresh() {
+		var started = false;
+		function tryStart() {
+			if (started) return true;
+			var secs = document.querySelectorAll('.cbi-section, fieldset');
+			for (var i = 0; i < secs.length; i++) {
+				var h = secs[i].querySelector('h3, legend');
+				if (h && h.textContent.trim() === '客户机链路诊断') {
+					started = true;
+					if (window.console && console.info) {
+						console.info('[dnschain] 找到诊断 section，启动自动刷新');
+					}
+					startAutoRefresh();
+					return true;
+				}
+			}
+			return false;
+		}
+
+		if (tryStart()) return;
+
+		var waited = 0;
+		var obs = new MutationObserver(function () {
+			if (tryStart()) obs.disconnect();
+		});
+		obs.observe(document.body, { childList: true, subtree: true });
+
+		/* 兜底：30 秒后停止观察（避免永久挂着） */
+		var iv = setInterval(function () {
+			waited += 1;
+			if (started || waited > 60) {
+				clearInterval(iv);
+				obs.disconnect();
+			}
+		}, 500);
+	}
+
+	/**
+	 * 安全地跑 init —— 它内部任何一步抛错都不能拖死自动刷新。
+	 *
+	 * ⚠️ 实测踩过：init() 里 markBlockRows 对某个元素调 classList
+	 *    抛了 TypeError，整个 init 中断，紧跟其后的 bootAutoRefresh
+	 *    根本不执行 → 页面看起来完全正常（tab 栏、表格都在，
+	 *    因为它们在抛错之前就建好了），但自动刷新永远不启动，
+	 *    用户以为「刷新功能没做」。
+	 *
+	 *    两层防护：
+	 *      ① 把 init 包进 try/catch，出错只记日志不中断
+	 *      ② bootAutoRefresh 独立调用，不依赖 init 是否成功
+	 */
+	function safeInit() {
+		try {
+			init();
+		} catch (e) {
+			/* 只记录，不让 UI 增强的失败影响自动刷新 */
+			if (window.console && console.warn) {
+				console.warn('[dnschain] init 失败（不影响自动刷新）:', e);
+			}
+		}
+	}
+
 	if (document.readyState === 'loading') {
-		document.addEventListener('DOMContentLoaded', init);
+		document.addEventListener('DOMContentLoaded', function () {
+			safeInit();
+			bootAutoRefresh();
+		});
 	} else {
-		init();
+		safeInit();
+		bootAutoRefresh();
 	}
 })();

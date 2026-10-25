@@ -271,6 +271,9 @@ config client_diag 'client_diag'
 	option flow_retain_sec '600'
 	# 流水条目上限。超过时丢最旧的
 	option flow_retain_max '1000'
+	# 页面「实时查询链路」的自动刷新间隔（秒）。0 = 不自动刷新。
+	# 无论是否开启，页面上都有「立即刷新」按钮可手动刷。
+	option flow_refresh '10'
 	# 自动自愈的最小间隔（秒）。默认 1 小时 —— 用户明确要求
 	# 「默认 1 个小时自动自愈一次」。
 	#
