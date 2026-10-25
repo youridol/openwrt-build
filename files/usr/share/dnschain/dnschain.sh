@@ -576,6 +576,61 @@ dc_flush_cache() {
 }
 
 # ------------------------------------------------------------
+# 强制直连的 CIDR（v0.23.1）
+#
+# 为什么需要这个：
+#   SSR-Plus 用 chnroute 生成的 `china` / `whitelist` 集合判断「是否国内」。
+#   该数据不完整 —— 实测 `47.239.100.208`（阿里云上海）不在其中，
+#   于是被判为国外 → 走 v2ray 代理 → 代理出站到国内阿里云失败
+#   → TLS 被关闭。
+#
+#   后果极隐蔽：`cdn.staticsfile.org` 解析到该 IP，它是 jQuery 的 CDN。
+#   jQuery 加载失败 → 页面 $(function(){...}) 不执行 → iframe 的 src
+#   永远不设置 → **白屏**。而 DNS 查询全部返回 ok，日志里看不出任何异常。
+#
+#   实测对照（2026-10-25）：
+#     走代理：ERR_CONNECTION_CLOSED / TLS 握手失败
+#     直连  ：200，0.5 秒
+#
+# 做法：把这些网段写进 SSR-Plus 的 `whitelist` 集合（命中即 return 直连）。
+# 该集合是运行时 nft set，重启会重建，故每次收敛都要重新写。
+#
+# 配置：uci dnschain.main.direct_cidr（可重复）
+# ------------------------------------------------------------
+dc_apply_direct_cidr() {
+	local list
+
+	# ⚠️ list 类型不能用 `uci get` —— 它对多值选项返回 rc=1，
+	#    表现为「配置明明写了却读不到」。实测踩过：函数静默返回 0，
+	#    whitelist 一条都没写进去，白屏照旧。
+	#    正确写法是 `uci show` 后按 key 前缀过滤。
+	list=$(uci -q show dnschain.main 2>/dev/null \
+		| sed -n "s/^dnschain\.main\.direct_cidr='\(.*\)'$/\1/p" \
+		| tr '\n' ' ')
+	[ -n "$list" ] || return 0
+
+	# 集合不存在说明 SSR-Plus 没接管，无需处理
+	dc_nftset_exists whitelist || return 0
+
+	local cidr added
+	added=0
+	for cidr in $list; do
+		# 只接受 IPv4 CIDR 或单 IP，防止拼进 nft 语法
+		case "$cidr" in
+			*[!0-9./]*) continue ;;
+		esac
+		[ -n "$cidr" ] || continue
+
+		if nft add element inet ss_spec whitelist { "$cidr" } 2>/dev/null; then
+			added=$((added + 1))
+		fi
+	done
+
+	[ "$added" -gt 0 ] && dnschain_log "强制直连：已写入 $added 条 CIDR 到 whitelist"
+	return 0
+}
+
+# ------------------------------------------------------------
 # 读取运行时 ss_spec_output 的 TCP 端口集（用于上游端口校验）
 # 输出形如 "22 80 143 443 465 587 853 993 995 9418"
 # ------------------------------------------------------------

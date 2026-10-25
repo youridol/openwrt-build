@@ -318,6 +318,87 @@ iframe 地址写在混淆代码里：
 下一步需要用户提供：白屏发生时的**具体时间**与**设备**，以便回查
 当时的 `client-flow.log`（保留 10 分钟，需及时取）。
 
+### 修复 — 国内 IP 被误判走代理导致 CDN 加载失败（白屏）
+
+用户报告「主域名通了 CDN 不加载，白屏无法自愈，**经该路由器的客户机
+都白屏，手机移动网络正常**」。示例 `cc.sefan.pw`，客户机 `192.168.3.238`。
+
+#### 根因
+
+页面依赖 `cdn.staticsfile.org` 的 jQuery，该域名解析到
+**`47.239.100.208`（阿里云上海）**。这个 IP **不在 SSR-Plus 的
+`china` / `whitelist` 集合里**（集合里只有 `47.246.x.x`），
+于是被判为国外 → 走 v2ray 代理 → **代理出站到国内阿里云失败**。
+
+完整链条：
+
+```
+cdn.staticsfile.org → 47.239.100.208（阿里云上海，不在 china 集合）
+  → 误判为国外 → redirect to :1234（v2ray）
+  → 代理出站到国内失败 → TLS 被关闭（ERR_CONNECTION_CLOSED）
+  → jQuery 加载失败
+  → 页面 $(function(){...}) 不执行
+  → iframe 的 src 永远不设置
+  → 白屏
+```
+
+**这解释了「手机移动网络正常」**——移动网络不经这台路由器，
+不会有这个误判。
+
+#### 实测证据
+
+| 检查 | 结果 |
+|---|---|
+| 客户机 conntrack | `192.168.3.238 → 47.239.100.208:443 → 192.168.3.254:1234`（进代理） |
+| `china` 集合 | **不含** `47.239.x.x` |
+| 走代理 curl | `ERR_CONNECTION_CLOSED` / TLS 握手失败 |
+| 直连 curl | **200**，0.15 秒 |
+| 加入 whitelist 后浏览器 | **3/3 正常**，截图 93031 字节 |
+
+#### 修复
+
+新增配置 `dnschain.main.direct_cidr`（可重复的 CIDR 列表），
+收敛时自动写入 SSR-Plus 的 `whitelist` 集合（命中即直连）。
+
+```sh
+# files/etc/config/dnschain
+config dnschain 'main'
+    ...
+    list direct_cidr '47.239.0.0/16'
+```
+
+`dc_apply_direct_cidr()` 在 `dnschain-reconcile` **末尾**调用。
+
+#### 施工中踩的三个坑
+
+**(a) `uci get` 读不到 `list` 类型** —— `uci -q get dnschain.main.direct_cidr`
+对多值选项返回 rc=1，表现为「配置明明写了却读不到」。必须用
+`uci show` 后按 key 前缀过滤。
+
+**(b) 配置写错了 section** —— 我先把 `direct_cidr` 放在 `client_diag`
+section 里（因为它跟在 `flow_retain_max` 后面），而代码读的是
+`dnschain.main`。已移到 `main`。
+
+**(c) 调用位置太早** —— 放在 reconcile 开头时，`whitelist` 集合
+可能还不存在（由 SSR-Plus 创建），写入**静默失败**：函数返回 0、
+uci 能读到配置，但集合里一条都没有。必须放在末尾。
+
+#### 已排除的假设
+
+排查过程中逐一排除了这些（都做过实测，不是推测）：
+
+| 假设 | 排除依据 |
+|---|---|
+| DNS 污染 | 三个 DNS 源答案一致 |
+| IP 被墙 | TCP 通、ping 176ms |
+| 端口 65533 不在代理列表 | 确实是，但加上后客户机从「超时 25 秒」变成「TLS 立即失败」，路由器本机原本能通也变不通，已回滚 |
+| flow offloading 破坏连接 | 关闭后仍白屏 |
+| MTU 不匹配（1500 vs 1492） | 客户机改 1492 后仍白屏 |
+| 服务器 h2 实现有缺陷 | Node 的 http2 模块 3/3 成功，114541 字节 |
+| 浏览器缓存 | 全新 profile + 禁用缓存仍白屏 |
+| 页面 JS 导致 | 禁用 JS 后仍白屏（因为 iframe 的 src 由 JS 设置，属预期） |
+| Referer / UA 过滤 | curl 带 Chrome UA + Referer 稳定 200，10/10 成功 |
+
 ### 新增 — 解析回归测试 `tools/test-client-diag-parse.sh`
 
 24 条断言，用**真实日志样本**覆盖上面 (b)(c)(d)(e) 四个缺陷，
