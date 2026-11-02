@@ -123,10 +123,14 @@ for t in material openwrt openwrt-2020 argon design; do
 	echo "# CONFIG_PACKAGE_luci-theme-$t is not set" >> .config
 done
 
-# ALL_DOH: dnsproxy + luci-app-dnsproxy + CA 证书（https-dns-proxy 已彻底移除）
+# ALL_DOH: dnsproxy 二进制 + CA 证书（https-dns-proxy 已彻底移除）
 # 二进制来自 helloworld feed(0.83.0)，init/config 来自 openwrt-build/files
+#
+# ⚠️ v0.25.0：**不再**编入 luci-app-dnsproxy。
+#   该包的 Web UI 已由 luci-app-dnschain 接管（DNS 分流页的
+#   「dnsproxy 实例参数」section + 「上游」tab）。
+#   二进制仍然需要 —— 框架自己托管两个 dnsproxy 实例。
 echo "CONFIG_PACKAGE_dnsproxy=y" >> .config
-echo "CONFIG_PACKAGE_luci-app-dnsproxy=y" >> .config
 echo "CONFIG_PACKAGE_ca-bundle=y" >> .config
 echo "CONFIG_PACKAGE_ca-certificates=y" >> .config
 

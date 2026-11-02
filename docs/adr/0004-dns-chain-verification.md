@@ -97,7 +97,7 @@ done
 
 | 期望 | 失败含义 |
 |---|---|
-| `opkg` 有 `luci-app-dnschain` 与 `luci-i18n-dnschain-zh-cn` | 包未编入 → CI 的 `Add luci-app-dnschain` 步骤缺失，或 `.config` 里符号被依赖求解丢弃（查 CI 日志 `=== dnschain 本体与中文语言包都必须入配置 ===`，`.github/workflows/build-openwrt.yml:614-642`） |
+| `opkg` 有 `luci-app-dnschain` 与 `luci-i18n-dnschain-zh-cn` | 包未编入 → CI 的 `Add luci-app-dnschain` 步骤缺失，或 `.config` 里符号被依赖求解丢弃（查 CI 日志 `=== dnschain 本体与中文语言包都必须入配置 ===`，`.github/workflows/build-openwrt.yml:664-691`） |
 | 5 个文件全 `OK` | 有 `MISS` → 包装了但内容不全，检查 `package/luci-app-dnschain/` 的 `root/` 与 `luasrc/` 布局 |
 
 **关于 `.lmo`（中文翻译二进制）：本页不需要它。** 本页 `translate()` 里直接写中文
@@ -142,7 +142,7 @@ ls -l /etc/init.d/dnschain \
   `etc/init.d/dnschain`）是 `100644`。
   验证方式：`git ls-files -s files/usr/bin/dnschain-* files/usr/share/dnschain/dnschain.sh files/etc/init.d/dnschain`
 - 执行位完全依赖 CI 的 `chmod +x` 清单兜住：
-  `.github/workflows/build-openwrt.yml:778-784`
+  `.github/workflows/build-openwrt.yml:752-758`
 - 因此**若 CI 那一步被跳过或改动，固件里的脚本不可执行**。这条属已知脆弱点
   （ADR-0003 §14 R-8）。
 
@@ -160,8 +160,8 @@ opkg list-installed | grep -E 'luci-app-dnschain|luci-i18n-dnschain|dnsproxy|dns
 **【已更正】** 原文要求「`chinadns-ng` 存在（版本 `2025.06.20-1`）」。
 **该要求已作废**：框架不依赖 chinadns-ng，`:5335` 必须无监听（§2.1）。
 
-⚠️ 注意仓库里仍有一处矛盾：`.github/workflows/build-openwrt.yml:601` 仍写
-`CONFIG_PACKAGE_chinadns-ng=y`，而同文件 `:864-867` 明确写「不再要求」。
+⚠️ 注意仓库里仍有一处矛盾：`tools/gen-openwrt-config.sh:98` 仍写
+`CONFIG_PACKAGE_chinadns-ng=y`，而 `build-openwrt.yml:671-674` 明确写「不再要求」。
 两者并存说明该 `=y` 是残留（SSR-Plus 的 `INCLUDE_ChinaDNS_NG` 本来也会带入二进制）。
 **二进制在不在都不影响框架**，但不要因此以为框架需要它。
 
@@ -554,7 +554,7 @@ cat /var/run/dnschain/lists.fingerprint
 1. **`upstreams-domains.txt` 不再生成，无消费者。** 它是 v0.9.x 单实例方案的产物。
    路由器上该文件可能存在（上一次运行残留），但 dnsproxy 参数里没有它。
    CI 反向断言禁止库脚本再生成 `[/域名/]` 形式
-   （`.github/workflows/build-openwrt.yml:856-864`）。
+   （`.github/workflows/build-openwrt.yml:830-838`）。
 2. **`idna-bypass.conf` 不再生成**（`dnschain.lua:12` 的注释记录了该删除）。
    v0.10.0 起 `xn--` 域名并入主分流、**不过滤**（`files/usr/share/dnschain/dnschain.sh:299-308`）。
 3. 分流形式的权威判据是 `dnschain-split.conf` 的 `server=/域名/127.0.0.1#5336`。
@@ -1037,7 +1037,7 @@ n=$(grep -c 'dnschain' "$LIST" || true)
 
 任一项缺失 → 不要刷机，先查 CI 日志的
 `=== dnschain 本体与中文语言包都必须入配置 ===` 与 `Add luci-app-dnschain` 两段
-（`.github/workflows/build-openwrt.yml:614-642`）。
+（`.github/workflows/build-openwrt.yml:664-691`）。
 
 ---
 

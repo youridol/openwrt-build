@@ -137,7 +137,12 @@ config dnsproxy 'servers'
 	# 客户端立刻失败、不缓存污染答案，自检第 6/10/11 项能明确指出原因。
 	# 这是诚实信号，优于「看起来能解析但地址是错的」（ADR §10.2）。
 	#
-	# 若确实需要 fallback，请在 dnschain 页面开启对应开关（默认关）。
+	# ⚠️ 更正（v0.25.0）：本段原写「若确实需要 fallback，请在 dnschain 页面
+	#    开启对应开关（默认关）」—— **那个开关从未存在过**。
+	#    框架自 v0.21.0 起无条件写 `--fallback 127.0.0.1:<foreign_port>`
+	#    （见 dnschain.sh 的 dc_gen_dnsproxy_args），页面上没有 fallback 控件。
+	#    留一句指向不存在功能的注释，会让排障的人反复去找它。
+	#    框架启用时本文件的 fallback 键无意义；框架关闭时才由 init.d/dnsproxy 读取。
 
 config dnsproxy 'tls'
 	# 对客户机提供 DoH/DoT 服务端：默认关闭。

@@ -20,11 +20,9 @@
 | `tools/check-dnschain-lua.py` | 用 lupa（真实 Lua）跑语法 + 模型 + **真实渲染页面每个 `cfgvalue()`** | 直接用 |
 | `tools/render-dnschain-diagrams.py` | 两张思维导图的纯几何校验 + 输出可打开的 HTML 预览 | 直接用 |
 | `tools/extract-dnschain-i18n.py` | 提取 `translate()` 中文并比对 PO（`--write` 追加缺失） | 直接用 |
-| `patches/luci-app-dnsproxy/*.patch` | 上游 `adm1n5ky/luci-app-dnsproxy` 的**改动以 patch 形式**维护 | **禁止**改上游；只改 patch |
 | `files/` | rootfs overlay（`files/etc/...` 合并进固件），**不是**上游源码 | 直接改 |
 | `CHANGELOG.md` | 变更的唯一权威记录；版本判型 PATCH/MINOR/MAJOR | 每次功能改动必须追加 |
 | `.gitattributes` | 强制关键文件 LF 行尾 —— **极其重要，见红线 1** | 按需扩规则 |
-| `patches/luci-app-dnsproxy/README.md` | patch 维护规范（单一职责/最小修改/幂等） | — |
 | `docs/` | 分层文档。**入口 `docs/README.md`（按任务找文档）；`docs/routes.md` 是全部 LuCI 路由的唯一登记处**。其余：`docs/packages/`（每个 LuCI 包）、`docs/runtime/`（DNS 分流与 overlay 清单）、`docs/build/ci.md`、`docs/operations/verification.md`、`docs/adr/`（架构决定） | 改代码后按 `docs/README.md` §5 联动更新 |
 | `GLOSSARY.md` | 易混术语（归属/首选/当前、分流、nftset、fallback…），每条带代码落点 | 新增术语时同步 |
 
@@ -94,7 +92,7 @@
   编译失败（libstdc++-12 ranges 不全），CI 装 gcc-13 并预生成 `.built` stamp。
 - patch 应用时必须**先转绝对路径**：在 `(cd package/... )` 子 shell 内相对路径会失效。
 - 启用的关键 CONFIG：`luci-app-ssr-plus`（含 Iptables 透明代理、Xray、ChinaDNS-NG、MosDNS 等）、
-  `luci-app-dnschain` + `luci-i18n-dnschain-zh-cn`、`dnsproxy` + `luci-app-dnsproxy` + CA 证书、
+  `luci-app-dnschain` + `luci-i18n-dnschain-zh-cn`、`dnsproxy`（**二进制**，框架托管两个实例）+ CA 证书、
   `kmod-tcp-bbr`、`iptables-mod-fullconenat`。
 
 ---
@@ -652,7 +650,10 @@ MosDNS 的 `reject 0` 返回的是 `rcode=0` + `ancount=0`（合法答复：明�
 
 1. **先读** `CHANGELOG.md` 尾部与相关 `files/`、`patches/` 的注释——大量约束写在注释里。
 2. 判断改动归属：
-   - dnsproxy 的 LuCI 改动 → 新增 `patches/luci-app-dnsproxy/000N-*.patch`（单一职责、递增编号）。
+   - dnsproxy 的 LuCI 改动 → **v0.25.0 起不再有该包**。dnsproxy 的 Web UI 已
+     并入 `luci-app-dnschain`（「上游」tab 的「dnsproxy 实例参数」section）。
+     要加/改 dnsproxy 相关配置项，改 `package/luci-app-dnschain/` 与
+     `files/usr/share/dnschain/dnschain.sh` 的参数生成函数。
    - 固件运行时配置 → 改 `files/` overlay；**首次开机默认值**改 `files/etc/uci-defaults/99-gaming-optimize`。
    - 编译流程/依赖 → 改 `.github/workflows/build-openwrt.yml`。
 3. 本地**无法**完整编译（需 lede 全量环境）；至少做静态检查：

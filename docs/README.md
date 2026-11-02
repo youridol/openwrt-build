@@ -18,13 +18,12 @@
 
 ## 1. 概览
 
-本仓库编译一台 x86_64 家用路由器的 OpenWrt 固件。它**不含** OpenWrt 主源码，只含四类东西：
+本仓库编译一台 x86_64 家用路由器的 OpenWrt 固件。它**不含** OpenWrt 主源码，只含三类东西：
 
 | 类别 | 路径 | 作用 |
 |---|---|---|
 | 构建配方 | `.github/workflows/` | 拉 lede → 装包 → 编译 → 上传产物 / 发版 |
-| 本地 LuCI 包 | `package/luci-app-dnschain/` | 随固件编译的页面与后端 |
-| 上游包的 patch | `patches/luci-app-dnsproxy/` | 以差分形式记录对上游的改动 |
+| 本地 LuCI 包 | `package/luci-app-dnschain/` | 随固件编译的页面与后端（DNS 配置的唯一入口） |
 | rootfs overlay | `files/` | 直接合并进固件的运行时配置与脚本（20 个文件） |
 
 固件产物：`lede/bin/targets/x86/64/*.img.gz`，artifact 名 `openwrt-x86-64-ssrplus`。
@@ -46,8 +45,7 @@
 | 文档 | 回答什么问题 | 主要读者 |
 |---|---|---|
 | `docs/routes.md` | 仓库里有哪些 LuCI 路由？各自落到哪个视图、哪个后端、哪个 ACL？ | 要定位「点这个按钮会发生什么」的人 |
-| `docs/packages/luci-app-dnschain.md` | DNS 分流页怎么组成？7 个 tab、21 个 section（20 个有标题）、8 个后端子命令各自是什么？ | 改 dnschain 页面或脚本的人 |
-| `docs/packages/luci-app-dnsproxy.md` | DNS Proxy 页是本仓库改的哪几处？LAN 拦截真的生效吗？ | 改 dnsproxy patch 或排查 DNS 劫持的人 |
+| `docs/packages/luci-app-dnschain.md` | DNS 分流页怎么组成？4 个 tab、19 个 section（19 个有标题 + 1 个元数据）、后端脚本子命令各自是什么？ | 改 dnschain 页面或脚本的人 |
 | `docs/runtime/dns-chain.md` | 运行时 DNS 分流长什么样？两个 dnsproxy 实例的参数、分流片段、改道通道、20 项自检 | 改 DNS 行为或排查解析故障的人 |
 | `docs/runtime/overlay-inventory.md` | `files/` 里 20 个文件各自干什么？执行位从哪来？uci-defaults 谁覆盖谁？ | 改固件落地文件的人 |
 | `docs/build/ci.md` | CI 按什么顺序做什么？有哪些契约断言？发版怎么取 notes？ | 改 CI、发版、排查构建失败的人 |
@@ -69,7 +67,7 @@
 | 改页面 tab 结构 / section 归属 | `docs/adr/0007-tab-structure.md`（含**文档联动清单**，改结构必读） | `docs/packages/luci-app-dnschain.md` 的 section 清单 |
 | 改客户机链路诊断 / 分级自愈 | `docs/adr/0009-client-link-diagnosis.md`（含四段链路、不算失败的四类、L1–L4 分级） | `GLOSSARY.md` 的「客户机链路诊断」「分级自愈」 |
 | 改自动补全（学习域名归属 / IP 段） | `docs/adr/0010-auto-learn-domain-cidr.md`（含**被推翻的三个方案**与实测证据） | `GLOSSARY.md` 的「自动补全」一节（7 条） |
-| 改 DNS 拦截行为 | `docs/packages/luci-app-dnsproxy.md` | `files/etc/init.d/dnsproxy` 的 `dnschain_takes_over` |
+| 改 DNS 拦截行为 | `docs/packages/luci-app-dnschain.md` | `files/etc/init.d/dnsproxy` 的 `dnschain_takes_over` |
 | 排查「客户机解析不了」 | `docs/operations/verification.md` 的排障顺序 | `docs/runtime/dns-chain.md` |
 | 排查「构建绿了但没产物」 | `docs/build/ci.md` 的「已知问题」 | `docs/operations/verification.md` |
 | 发版 | `docs/build/ci.md` §发版 | `CHANGELOG.md` 顶部格式 |

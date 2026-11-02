@@ -2,9 +2,9 @@
 
 本文件是本仓库**全部 LuCI 路由的唯一登记处**。凡涉及「哪个 URL 由哪个包提供、落到哪个视图、调哪个后端」，以本表为准。
 
-- 登记范围：仓库内 `package/` 下的本地包（`luci-app-dnschain`）以及以 patch 形式改动的上游包（`luci-app-dnsproxy`）。
+- 登记范围：仓库内 `package/` 下的本地包（`luci-app-dnschain`）。v0.25.0 起 `luci-app-dnsproxy` 的 Web UI 已移除，`patches/luci-app-dnsproxy/` 亦随之删除，本表不再登记它。
 - 每条路由给出：路径、菜单标题、排序、action 类型与目标、ACL、声明位置、后端落点。
-- 路由的**逐条请求走向**写在各自的包文档里：`docs/packages/luci-app-dnschain.md`、`docs/packages/luci-app-dnsproxy.md`。
+- 路由的**逐条请求走向**写在包文档里：`docs/packages/luci-app-dnschain.md`。
 
 ---
 
@@ -56,24 +56,29 @@ LuCI 的路由有两个来源，二者在启动时被**一起**加载、按路�
 |---|---|---|---|---|---|---|
 | `admin/services/dns_chain` | DNS 分流 | 20 | `cbi` | `dnschain/general` | `luci-app-dnschain` | `package/luci-app-dnschain/root/usr/share/luci/menu.d/luci-app-dnschain.json:2-11`；同路径另在 `package/luci-app-dnschain/luasrc/controller/dnschain.lua:37-40` 用 `entry()` 声明 |
 
-后端落点：CBI 模型 `package/luci-app-dnschain/luasrc/model/cbi/dnschain/general.lua`（1980 行，7 个 tab）。**该包不注册任何 ubus 对象** —— 所有动作经 `luci.sys.exec` 直接执行 `/usr/bin/dnschain-*` 脚本（详见包文档）。
+后端落点：CBI 模型 `package/luci-app-dnschain/luasrc/model/cbi/dnschain/general.lua`（2932 行，4 个 tab）。**该包不注册任何 ubus 对象** —— 所有动作经 `luci.sys.exec` 直接执行 `/usr/bin/dnschain-*` 脚本（详见包文档）。
 
-### 1.2 luci-app-dnsproxy（上游包 + 本地 patch）
+### 1.2 ~~luci-app-dnsproxy~~（v0.25.0 已移除 Web UI）
 
-路由由**上游**的 `menu.d` 提供，本仓库不改路由表，只通过 patch 往已有页面加控件。
+> **v0.25.0：`luci-app-dnsproxy` 的 Web UI 已从固件中移除**，本节保留用于记录
+> 「曾经有哪些路由」以及「它们现在由谁承担」，**不再有实际路由**。
 
-| 路由路径 | 菜单标题 | order | action 类型 | action 目标 | 声明位置 |
-|---|---|---|---|---|---|
-| `admin/services/dnsproxy` | DNS Proxy | 60 | `view` | `dnsproxy/main` | 上游 `menu.d`（本仓库不含该文件） |
-| `admin/services/dnsproxy/settings` | Settings | 10 | `view` | `dnsproxy/main` | 同上 |
-| `admin/services/dnsproxy/file` | Configuration File | 20 | `view` | `dnsproxy/file` | 同上 |
-| `admin/services/dnsproxy/diagnostics` | Diagnostics | 30 | `view` | `dnsproxy/diagnostics` | 同上 |
-| `admin/services/dnsproxy/logread` | System Log | 40 | `view` | `dnsproxy/logread` | 同上 |
-| `admin/services/dnsproxy/help` | Help | 50 | `view` | `dnsproxy/help` | 同上 |
+原路由 6 条（`admin/services/dnsproxy` 及其 5 个子页，order 60），全部由上游
+`menu.d` 提供，本仓库不含该文件。移除原因见
+[`docs/packages/luci-app-dnschain.md`](packages/luci-app-dnschain.md) 的
+「dnsproxy 接管」一节：用户要求 DNS 配置只有一个入口。
 
-本仓库对它的改动全部落在 `patches/luci-app-dnsproxy/*.patch`，见 `docs/packages/luci-app-dnsproxy.md`。
+| 原路由 | 原菜单标题 | 现状（v0.25.0 起） |
+|---|---|---|
+| `admin/services/dnsproxy` | DNS Proxy | **不存在** —— 配置改在「服务 → DNS 分流」的「上游」tab |
+| `admin/services/dnsproxy/settings` | Settings | **不存在** —— 同上（`dnsproxy 实例参数` section） |
+| `admin/services/dnsproxy/file` | Configuration File | **不存在** —— `/etc/config/dnsproxy` 不再是配置来源 |
+| `admin/services/dnsproxy/diagnostics` | Diagnostics | **不存在** —— 诊断在「DNS 分流」的「状态」tab |
+| `admin/services/dnsproxy/logread` | System Log | **不存在** —— 用「系统 → 系统日志」 |
+| `admin/services/dnsproxy/help` | Help | **不存在** |
 
-> 路由器实测（只读）：`/usr/share/luci/menu.d/luci-app-dnsproxy.json` 与上表逐字一致；`/www/luci-static/resources/view/dnsproxy/` 下有 `main.js`、`file.js`、`diagnostics.js`、`logread.js`、`help.js` 五个视图，`/www/luci-static/resources/tools/dnsproxy/settings.js` 一个表单模块。
+**现在唯一的 DNS 配置入口**是 `admin/services/dns_chain`（§1.1，order 20）。
+`dnsproxy` 二进制本身仍在固件里 —— 框架自己托管两个实例，只是不再有独立的 Web UI。
 
 ---
 
@@ -120,9 +125,9 @@ LuCI 的路由有两个来源，二者在启动时被**一起**加载、按路�
 `menu.d` 里每个节点都带 `depends.acl`，它决定**当前会话能不能看到这个节点**：
 
 - `check_acl_depends()`（`/usr/share/ucode/luci/dispatcher.uc:312-331`）返回 `null` → 节点 `satisfied = false`（不可见）；返回 `false` → 节点 `readonly = true`（可见但只读）；返回 `true` → 可写。
-- 两个 ACL 文件位置：
+- ACL 文件位置（v0.25.0 起只剩一个）：
   - `package/luci-app-dnschain/root/usr/share/rpcd/acl.d/luci-app-dnschain.json`
-  - dnsproxy 的 ACL 由 patch 0002 追加 `/usr/lib/opkg/status` 只读（`patches/luci-app-dnsproxy/0002-fix-version-detect-for-opkg.patch`）
+  - ~~dnsproxy 的 ACL~~ —— v0.25.0 起该包不再编入固件，其 ACL 随之消失
 
 各 ACL 的逐项内容与已知缺口写在各包文档的「ACL 与权限面」一节。
 
@@ -144,8 +149,7 @@ LuCI 的路由有两个来源，二者在启动时被**一起**加载、按路�
 
 | 文档 | 内容 |
 |---|---|
-| `docs/packages/luci-app-dnschain.md` | DNS 分流页：7 个 tab、21 个 section（20 个有标题）、页面元素→脚本命令全表、8 个 `dnschain-health` 子命令 |
-| `docs/packages/luci-app-dnsproxy.md` | DNS Proxy 页（上游 + 3 个 patch）、LAN 拦截的真实生效路径 |
+| `docs/packages/luci-app-dnschain.md` | DNS 分流页：4 个 tab、19 个 section、页面元素→脚本命令全表、8 个 `dnschain-health` 子命令（v0.22.0 后仅存 3 个，见该文档 §5.1） |
 | `docs/runtime/dns-chain.md` | DNS 分流的运行时形态：两个 dnsproxy 实例、分流片段、改道通道 |
 | `docs/runtime/overlay-inventory.md` | `files/` overlay 全部 20 个文件、执行位来源、uci-defaults 执行顺序 |
 | `docs/build/ci.md` | 构建流水线与契约断言 |

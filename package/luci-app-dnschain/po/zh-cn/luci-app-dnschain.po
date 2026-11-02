@@ -2487,3 +2487,39 @@ msgstr "— 未运行过"
 
 msgid "学到的 IP 段已在直连豁免集合里生效（已命中 %s 个包）"
 msgstr "学到的 IP 段已在直连豁免集合里生效（已命中 %s 个包）"
+
+msgid "dnsproxy 实例参数"
+msgstr "dnsproxy 实例参数"
+
+msgid "框架自己托管两个 dnsproxy 实例，参数由 <code>/var/etc/dnschain/dnsproxy*.args</code> 生成。这里的三项<b>同时作用于两个实例</b> —— 两侧必须一致，否则 fallback（:5353 → :5336）的触发时机会出现偏斜。"
+msgstr "框架自己托管两个 dnsproxy 实例，参数由 <code>/var/etc/dnschain/dnsproxy*.args</code> 生成。这里的三项<b>同时作用于两个实例</b> —— 两侧必须一致，否则 fallback（:5353 → :5336）的触发时机会出现偏斜。"
+
+msgid "上游查询超时"
+msgstr "上游查询超时"
+
+msgid "dnsproxy 的 <code>--timeout</code>，默认 <code>8s</code>。<br/>太小：跨境 DoH 首包常 &gt; 3s，会被判超时并误触发 fallback。<br/>太大：直连真的不通时要等很久才切到代理链。"
+msgstr "dnsproxy 的 <code>--timeout</code>，默认 <code>8s</code>。<br/>太小：跨境 DoH 首包常 &gt; 3s，会被判超时并误触发 fallback。<br/>太大：直连真的不通时要等很久才切到代理链。"
+
+msgid "不能为空"
+msgstr "不能为空"
+
+msgid "格式应为 8s / 500ms / 2m（数字 + 可选单位）"
+msgstr "格式应为 8s / 500ms / 2m（数字 + 可选单位）"
+
+msgid "bootstrap 服务器"
+msgstr "bootstrap 服务器"
+
+msgid "仅用于解析<b>加密上游的主机名</b>（DoH 的 SNI/Host 需要）。明文是它唯一且应有的用途。<br/>留空时回落到内置的 <code>223.5.5.5</code> / <code>223.6.6.6</code>。"
+msgstr "仅用于解析<b>加密上游的主机名</b>（DoH 的 SNI/Host 需要）。明文是它唯一且应有的用途。<br/>留空时回落到内置的 <code>223.5.5.5</code> / <code>223.6.6.6</code>。"
+
+msgid "详细日志"
+msgstr "详细日志"
+
+msgid "给两个实例加 <code>--verbose</code>。排障时打开，日常保持关闭 —— 它会让 logread 被 DNS 查询刷屏。"
+msgstr "给两个实例加 <code>--verbose</code>。排障时打开，日常保持关闭 —— 它会让 logread 被 DNS 查询刷屏。"
+
+msgid "当前生效参数"
+msgstr "当前生效参数"
+
+msgid "参数文件：/var/etc/dnschain/dnsproxy.args 与 dnsproxy-foreign.args"
+msgstr "参数文件：/var/etc/dnschain/dnsproxy.args 与 dnsproxy-foreign.args"

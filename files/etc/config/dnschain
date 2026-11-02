@@ -50,6 +50,23 @@ config dnschain 'main'
 	option foreign_port '5336'
 	# 拒绝 LAN 出向 853（让自带 DoT 的客户端快速失败并回落明文）
 	option intercept_dot '1'
+
+	# ── dnsproxy 实例参数（v0.25.0 起由本页统一管理）──────────────
+	# luci-app-dnsproxy 的 Web UI 已从固件移除，这两个键原先只能在那个
+	# 页面改，现在收敛到这里。框架把它们写进
+	# /var/etc/dnschain/dnsproxy.args 与 dnsproxy-foreign.args。
+	#
+	# 单次上游查询硬超时（dnsproxy --timeout）。默认 8s。
+	# 太小会让跨境 DoH 首包被判超时（实测跨境 TLS 握手常 > 3s），
+	# 太大则直连不通时要等很久才触发 --fallback。
+	option dnsproxy_timeout '8s'
+	# bootstrap 仅用于解析加密上游的**主机名**（DoH 的 SNI/Host 需要）。
+	# 明文是它唯一且应有的用途，不要填成公共 DNS 当默认上游用。
+	# 留空时脚本回落到内置的 223.5.5.5 / 223.6.6.6。
+	list dnsproxy_bootstrap '223.5.5.5'
+	list dnsproxy_bootstrap '223.6.6.6'
+	# 打开 dnsproxy 的 --verbose 日志（排障用，日常保持 0）
+	option dnsproxy_verbose '0'
 	# 尽力而为地阻断已知公共 DoH（443 无法可靠区分，仅标注）
 	option intercept_doh '0'
 	# ── 分诊三键已删除（v0.22.0）────────────────────────────────

@@ -66,7 +66,7 @@
 | `dnschain-reconcile`（每轮强制） | `'0'` | `files/usr/bin/dnschain-reconcile:97-98` |
 
 `uci-defaults` 按文件名做 C 排序执行，`99-gaming-optimize` 先于 `99-zz-dnschain`；
-这条顺序本身有 CI 断言（`.github/workflows/build-openwrt.yml:895-906`）。
+这条顺序本身有 CI 断言（`.github/workflows/build-openwrt.yml:1038-1049`）。
 所以 `99-gaming-optimize` 写的 `'1'` **每次刷机都会被后一个脚本覆盖成 `'0'`**，
 之后由收敛器每轮重放（`dnschain-reconcile` 的 `reconcile_invariants`，
 `files/usr/bin/dnschain-reconcile:51-113`）。
@@ -169,7 +169,7 @@ dhcp.@dnsmasq[0].filter_aaaa          ← 实际生效值，必须为 '0'
 |---|---|
 | `99-gaming-optimize` 仍写 `'1'` | `files/etc/uci-defaults/99-gaming-optimize:796` |
 | `99-zz-dnschain` 写 `'0'` 并覆盖前者 | `files/etc/uci-defaults/99-zz-dnschain:45-50`（`pdnsd_enable` 同一套覆盖逻辑）、`:75-80` |
-| 排序由 CI 断言 | `.github/workflows/build-openwrt.yml:895-906` |
+| 排序由 CI 断言 | `.github/workflows/build-openwrt.yml:1038-1049` |
 | 收敛器强制 `'0'` | `files/usr/bin/dnschain-reconcile:97-98` |
 | 实际生效键是 `dnsmasq` 的 | `files/usr/bin/dnschain-selftest:244-252`、`general.lua:1444-1454` |
 | `aaaa.policy` 为 keep/keep | `files/etc/config/dnschain:74-82` |

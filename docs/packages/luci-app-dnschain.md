@@ -47,12 +47,12 @@ package/luci-app-dnschain/
 ├── luasrc/
 │   ├── controller/dnschain.lua            ← 路由 + 前置守卫
 │   └── model/cbi/dnschain/
-│       ├── general.lua                    ← 页面本体（18 个可见 section + 1 个元数据 section）
+│       ├── general.lua                    ← 页面本体（19 个可见 section + 1 个元数据 section）
 │       ├── dnschain.lua                   ← 数据层：读运行时状态、调脚本
 │       ├── diagrams.lua                   ← SVG 导图（4 张）
 │       └── diagnosis.lua                  ← 归组规则 + 证据→症状推导（v0.18.0）
 ├── htdocs/luci-static/resources/dnschain/
-│   ├── dnschain.js                        ← 把 section 收拢成 6 个 tab
+│   ├── dnschain.js                        ← 把 section 收拢成 4 个 tab
 │   └── dnschain.css                       ← shadcn 视觉语言的语义色令牌
 ├── root/usr/share/luci/menu.d/luci-app-dnschain.json     ← 路由（JSON 通道）
 ├── root/usr/share/rpcd/acl.d/luci-app-dnschain.json      ← ACL
@@ -157,7 +157,7 @@ flowchart LR
 6. dispatcher 按 `parameters=[dnschain/general]` 载入 CBI 模型 `package/luci-app-dnschain/luasrc/model/cbi/dnschain/general.lua`。
 7. 模型顶部建 `Map("dnschain", translate("DNS 分流"), ...)`（`general.lua:41`），并 `require` 数据层与图示层（`general.lua:36-37`）。
 8. 覆写 `m.state_handler`，把按钮 `write()` 里登记的消息在 parse 结束后写到 `self.message`（`general.lua:65-79`）。这一步是按钮结果能显示到页面上的唯一原因 —— 注释 `general.lua:48-62` 记录了原来的三层失效原因（Button 需要非空 formvalue、`res:parse()` 返回值被丢弃、Map 模板读的是 `map.message` 而不是 `m.message`）。
-9. 依次渲染 18 个可见 section（行号见 §4.1）与 1 个空标题元数据 section。
+9. 依次渲染 19 个可见 section（行号见 §4.1）与 1 个空标题元数据 section。
 10. 元数据 section 由 `emit_tab_meta(m)` 在**最后**创建（`general.lua:173-190`，调用点 `general.lua:2023`）。它的 `cfgvalue()` 输出一段 `rawhtml`：`<link>` 引 CSS、`<script defer>` 引 JS、`<span data-dc-meta="1">` 带两个 JSON 属性 `data-dc-section-tab` 与 `data-dc-labels`（`general.lua:182-188`）。属性值必须用**单引号**包裹，否则 JSON 里的双引号会截断属性（注释 `general.lua:172-179`）。
 11. 浏览器加载 `dnschain.js`（`general.lua:184`），它在 `DOMContentLoaded` 或立即执行 `init()`（`dnschain.js:348-352`）。
 12. `init()` 依次：读元数据（`dnschain.js:50-61`）→ 移除空的 CBI tabmenu（`:302`，函数 `:203-216`）→ 给整块内容行加竖排类（`:303`，函数 `:239-258`）→ 绑定「单域名解释」输入行（`:304`，函数 `:272-296`）→ 收起元数据容器（`:310-315`）→ 按 `<h3>` 文本找到所有 section（`:317`，函数 `:70-85`）→ 统计每个 tab 的红徽标数（`:323-327`，`countBadges` 在 `:87-89`）→ 建 tab 栏（`:331`，`buildBar` 在 `:105-135`）→ 按 `localStorage['dnschain.activeTab']` 恢复上次 tab，否则取第一个（`:342-345`）。
@@ -303,7 +303,7 @@ BusyBox 每次 fork 约 5–8ms，**命令次数本身就是主要成本**。
 
 ## 4. 页面元素 → 后端调用对照
 
-### 4.1 4 个 tab 与 15 个 section
+### 4.1 4 个 tab 与 19 个 section
 
 > 🚨 **v0.22.0：section 18 → 15，按钮 3 → 2。以下是**当前**权威清单，
 > 下面所有 v0.15/v0.18/v0.19 的历史说明块仅作沿革参考。**
@@ -323,13 +323,13 @@ BusyBox 每次 fork 约 5–8ms，**命令次数本身就是主要成本**。
 > **两档（走直连 / 走代理）**。它现在显示的是「**我录入的**域名各自走哪条链」，
 > 不依赖任何探测。
 >
-> **当前 17 个 section 的 tab 归属**：
+> **当前 19 个 section 的 tab 归属**（v0.25.0 新增「dnsproxy 实例参数」，18 → 19）：
 >
 > | tab | section |
 > |---|---|
 > | 状态 | 当前状态、**DNS 分流去向**、**客户机链路诊断**、自检、操作 |
-> | 域名 | 自定义域名 · 国内、自定义域名 · 国外、已录入清单、单域名解释 |
-> | 上游 | 国内上游、国外上游、双栈策略、端口与实例、缓存、SSR-Plus 兼容、拦截与框架开关、DHCP 下发 DNS |
+> | 域名 | 自定义域名 · 国内、自定义域名 · 国外、已录入清单、自动补全 |
+> | 上游 | 国内上游、国外上游、双栈策略、端口与实例、缓存、**dnsproxy 实例参数**、SSR-Plus 兼容、拦截与框架开关、DHCP 下发 DNS |
 > | 名单 | 名单规模 |
 >
 > **当前 2 个按钮**：「立即重新自检」（状态/自检）、「清空全部缓存」（上游/缓存）。
@@ -518,9 +518,9 @@ tab 定义在 `general.lua` 的 `TAB_LABELS`，前端顺序常量在 `dnschain.j
 > 「共 N 条 / 已入库 M」+ 分档计数，并提示明细在域名 tab。这样点完
 > 「立即分诊未知目标」就地能看到数字变化，而 200+ 行的明细表不会把链路图挤下去。
 
-合计 **18 个有标题的可见 section**，加 1 个空标题元数据 section（标题参数是空串，`anonymous = true`），共 19 次 `m:section()` 调用。
+合计 **19 个有标题的可见 section**，加 1 个空标题元数据 section（标题参数是空串，`anonymous = true`），共 20 次 `m:section()` 调用。
 
-未归组的 section 始终显示（`dnschain.js:162-164`）—— 这是「新增 section 后不会莫名消失」的保护。当前 18 个全部已归组，所以这条兜底没有实际生效对象。
+未归组的 section 始终显示（`dnschain.js:162-164`）—— 这是「新增 section 后不会莫名消失」的保护。当前 19 个全部已归组，所以这条兜底没有实际生效对象。
 （`tools/verify-dnschain-domains.sh` §13 有断言核对「SECTION_TAB 里每个标题都有 m:section 声明」。）
 
 ```mermaid
@@ -578,6 +578,9 @@ flowchart TB
 | `watch` | `health`（1179） | `dnschain.health.watch`（list） | `:depends("enabled","1")`（`:1183`） |
 | `timeout` | `health`（1185） | `dnschain.health.timeout` | `range(1,10)`，默认 2（`:1188-1189`） |
 | `retries` | `health`（1192） | `dnschain.health.retries` | `range(0,5)`，默认 2（`:1195-1196`） |
+| `dnsproxy_timeout` | `main` | `dnschain.main.dnsproxy_timeout` | v0.25.0 从已移除的 dnsproxy UI 接管；默认 `8s`，validate 限定「数字+可选单位」 |
+| `dnsproxy_bootstrap` | `main` | `dnschain.main.dnsproxy_bootstrap`（list） | v0.25.0 同上；留空回落内置 `223.5.5.5`/`223.6.6.6` |
+| `dnsproxy_verbose` | `main` | `dnschain.main.dnsproxy_verbose` | v0.25.0 同上；`Flag`，默认 `0` |
 | `fail_threshold` | `health`（1199） | `dnschain.health.fail_threshold` | `range(1,10)`，默认 2（`:1201-1202`） |
 | `recover_threshold` | `health`（1205） | `dnschain.health.recover_threshold` | `range(1,20)`，默认 3（`:1207-1208`） |
 | `min_dwell` | `health`（1211） | `dnschain.health.min_dwell` | `range(0,3600)`，默认 120（`:1213-1214`） |
@@ -803,13 +806,13 @@ ACL 组名 `luci-app-dnschain`，文件 `package/luci-app-dnschain/root/usr/shar
 | 链路图几何 | 从 `general.lua` 抽 `W/H`、`X4`、`NW`、`GAP`，断言 `W > X4 + NW + GAP + NW` | `build-openwrt.yml:369-387` |
 | 链路图形制 | 必须有贝塞尔 `C` 指令、`local cap = math.floor((x2 - x1) / 2)`、节点 `fill="var(--dc-surface)"`；**不得有 `<marker>` 或 `marker-end`**（v0.15.0 移除箭头）、必须有 `data-dc-figure` | `build-openwrt.yml:389-437` |
 | 域名契约 | 调 `sh ../openwrt-build/tools/verify-dnschain-domains.sh`，失败即 `exit 1` | `build-openwrt.yml:427-444` |
-| 配置符号 | `CONFIG_PACKAGE_luci-app-dnschain=y` 与 `CONFIG_PACKAGE_luci-i18n-dnschain-zh-cn=y` 必须进 `.config` | `build-openwrt.yml:592-596`、`:753-780` |
+| 配置符号 | `CONFIG_PACKAGE_luci-app-dnschain=y` 与 `CONFIG_PACKAGE_luci-i18n-dnschain-zh-cn=y` 必须进 `.config` | `build-openwrt.yml:664-691` |
 
-注意 `.config` 里仍有一条 `CONFIG_PACKAGE_chinadns-ng=y`（`build-openwrt.yml:601`），而同文件 `:760-763` 又写明「v0.10.0：不再要求 `CONFIG_PACKAGE_chinadns-ng`，故不作为硬断言」。这两处描述互相矛盾，见 §8 第 8 条。
+注意 `.config` 里仍有一条 `CONFIG_PACKAGE_chinadns-ng=y`（`tools/gen-openwrt-config.sh:98`），而 `build-openwrt.yml:671-674` 又写明「v0.10.0：不再要求 `CONFIG_PACKAGE_chinadns-ng`，故不作为硬断言」。这两处描述互相矛盾，见 §8 第 8 条。
 
 ### 7.3 执行位与行尾
 
-`files/` overlay 的执行位由 CI 的 `chmod +x` 清单保证（`build-openwrt.yml:776-784` 共 5 条 `if [ -f … ]; then chmod +x`），**不使用 `|| true`** —— 文件缺失必须让 CI 明确失败（注释 `:777`）。
+`files/` overlay 的执行位由 CI 的 `chmod +x` 清单保证（`build-openwrt.yml:806-827`），**不使用 `|| true`** —— 文件缺失必须让 CI 明确失败（注释 `:808-809`、`:816`）。
 
 无扩展名脚本的行尾由 `.gitattributes` 强制 LF：
 
@@ -826,7 +829,86 @@ ACL 组名 `luci-app-dnschain`，文件 `package/luci-app-dnschain/root/usr/shar
 
 ### 7.4 中文语言包
 
-`luci.mk` 由 `LUCI_BASENAME=dnschain` 推导出语言包符号 `luci-i18n-dnschain-zh-cn`（CI 注释 `build-openwrt.yml:593-594`、`:757-758`）。PO 共 475 组 msgid/msgstr，其中 4 组 msgstr 为空（文件头与多行续行）。v0.15.0 新增 8 条（「概览与诊断」「实时诊断链路」+ 6 个链路阶段名），由 `python tools/extract-dnschain-i18n.py --write` 追加。图示模块的文案也在提取范围内（`tools/extract-dnschain-i18n.py:19-27`），漏掉它会让「域名」tab 的 SVG 内文字中英混排。
+`luci.mk` 由 `LUCI_BASENAME=dnschain` 推导出语言包符号 `luci-i18n-dnschain-zh-cn`（CI 注释 `build-openwrt.yml:668-669`）。PO 共 475 组 msgid/msgstr，其中 4 组 msgstr 为空（文件头与多行续行）。v0.15.0 新增 8 条（「概览与诊断」「实时诊断链路」+ 6 个链路阶段名），由 `python tools/extract-dnschain-i18n.py --write` 追加。图示模块的文案也在提取范围内（`tools/extract-dnschain-i18n.py:19-27`），漏掉它会让「域名」tab 的 SVG 内文字中英混排。
+
+### 7.5 dnsproxy Web UI 的接管（v0.25.0）
+
+用户要求：「luci-app-dnsproxy 合并到 luci-app-dnschain 并为一个独立插件，
+不再需要 luci-app-dnsproxy 的 Web UI，全部由 luci-app-dnschain 管理」。
+
+#### 做了什么
+
+| 项 | v0.25.0 之前 | v0.25.0 之后 |
+|---|---|---|
+| 编入固件的 LuCI 包 | `luci-app-dnschain` + `luci-app-dnsproxy` | **只有 `luci-app-dnschain`** |
+| DNS 配置入口 | 「服务 → DNS 分流」(order 20) + 「服务 → DNS Proxy」(order 60) | **只有「服务 → DNS 分流」** |
+| `patches/luci-app-dnsproxy/` | 3 个 patch（改上游 Web UI） | **已删除** —— 上游包不再编入，patch 无处可打 |
+| `CONFIG_PACKAGE_luci-app-dnsproxy` | `=y` | **不再写入** |
+| `CONFIG_PACKAGE_dnsproxy`（二进制） | `=y` | **仍是 `=y`** —— 框架托管两个实例，删不得 |
+| `/etc/config/dnsproxy` | 两个页面都读写 | 框架关闭时才决定行为（见 §7.5.3） |
+| `/etc/init.d/dnsproxy` | 保留（含让位逻辑） | **不变** —— 框架启用时让位，关闭时兜底 |
+
+#### 7.5.1 只接管了三项，其余刻意不接管
+
+dnsproxy 的 Web UI 有 **48 个字段**。逐个核对后，只有 **3 项**是「框架真的会用
++ 原先只能去那个页面改」的，它们收敛到本页「上游」tab 的
+「dnsproxy 实例参数」section：
+
+| 新键（`dnschain.main.*`） | 对应 dnsproxy 参数 | 为什么必须接管 |
+|---|---|---|
+| `dnsproxy_timeout` | `--timeout` | 框架原先写死 `8s`。跨境 DoH 首包常 > 3s，用户需要能调 |
+| `dnsproxy_bootstrap` | `--bootstrap` | 框架原先写死 `223.5.5.5`/`223.6.6.6`，换环境时需要能改 |
+| `dnsproxy_verbose` | `--verbose` | 排障时需要 dnsproxy 自己的日志 |
+
+其余 **45 项刻意不接管**，分两类：
+
+**① 框架硬约束决定，做成开关就是误导**（本页 v0.19.0 已删过一批同类假开关）：
+
+| dnsproxy 字段 | 为什么不接管 |
+|---|---|
+| `cache.enabled` / `cache.size` | 约束 #1「缓存只在 dnsmasq 一层」。dnsproxy 缓存必须**恒关** |
+| `ipv6_disabled` | 必须恒 `0`，否则连国内 AAAA 一起砍（约束 #12） |
+| `servers.fallback` | 框架自己写死 `--fallback 127.0.0.1:<foreign_port>`，不能与页面抢 |
+| `servers.upstream` | 已由本页「国内上游」「国外上游」两个 section 管理 |
+
+**② 框架从不消费**（`dc_gen_dnsproxy_args` / `dc_gen_foreign_args` 里没有对应参数）：
+
+`tls.*`（对客户机提供 DoH/DoT 服务端）、`dns64.*`、`edns.*`、`private_rdns.*`、
+`bogus_nxdomain.*`、`hosts.*`、`global.{http3,insecure,log_file,max_go_routines,
+rate_limit,refuse_any,udp_buf_size,ratelimit_subnet_len_*}`、`cache.{cache_optimistic,
+min_ttl,max_ttl,optimistic_*}`、`pending_requests_enabled`、`pprof`。
+
+接管它们等于把「改了也不生效的假开关」搬过来 —— 那正是本页 v0.19.0
+批量删除假开关时定下的判据（见 §4.1 各 `⚠️ … 开关已删除` 注释）。
+
+#### 7.5.2 两个实例共用同一份参数段
+
+`dnsproxy_timeout` / `dnsproxy_bootstrap` / `dnsproxy_verbose` 由
+`dc_gen_dnsproxy_common_args()`（`files/usr/share/dnschain/dnschain.sh`）
+统一生成，**国内与国外两个实例都调用它**（2 处调用点）。
+
+为什么必须共用：`--fallback` 是 `:5353 → :5336`。若两侧 timeout 不同，
+「直连超时 → 切代理」的判定时机会偏斜 —— 表现为「有时切得早、有时不切」，
+而且极难定位。CI 与 `tools/verify-dnschain-domains.sh` 都有断言守着
+「调用点 ≥ 2 处」。
+
+bootstrap 留空时回落到内置 `223.5.5.5`/`223.6.6.6`，不会生成空的
+`--bootstrap`（dnsproxy 会当成空地址拒绝启动）。
+
+#### 7.5.3 框架关闭时怎么办
+
+框架关闭（`dnschain.main.enabled=0`）时由 `init.d/dnsproxy` 按
+`/etc/config/dnsproxy` 启动。**那个文件仍然保留**，但**没有 Web UI 了** ——
+要改只能 `uci set` 或直接编辑文件。
+
+这是刻意取舍：保留一个「可回退的旧链路」比删掉它安全（框架故障时还能退回），
+但不再为它维护第二套 UI。`/etc/config/dnsproxy` 的取值与框架默认值保持一致，
+由 CI 契约断言守着（`dnsproxy cache.enabled=0`、无 `list fallback`、
+`ipv6_disabled=0`）。
+
+⚠️ `/etc/config/dnsproxy` 里原有一句注释「若确实需要 fallback，请在 dnschain
+页面开启对应开关（默认关）」—— 那个开关**从未存在过**（页面没有 fallback
+控件，框架 v0.21.0 起无条件写 `--fallback 127.0.0.1:5336`）。该注释已更正。
 
 ---
 
@@ -851,7 +933,7 @@ ACL 组名 `luci-app-dnschain`，文件 `package/luci-app-dnschain/root/usr/shar
 | 13 | `foreign_port` 与 `entry_port` 相同会让两个 dnsproxy 实例抢同一端口，`preflight` 会拒绝启动 | `init.d/dnschain:186-191`；页面对两个值都只做 `datatype=port`，**不做「不相等」的页面校验**（`general.lua:1591`、`:1599`） |
 | 14 | 自定义域名同时出现在国内与国外两个列表时，归属无法确定，脚本会判 `FAIL`，但页面**保存时不拦** | 脚本侧：`dnschain-health:156-172`（`grep -Fxf` 求交集）；页面侧 `validate_domain`（`general.lua:760-833`）只校验单个域名格式，不查跨列表冲突 |
 | 15 | 域名格式有两道闸，但**页面拒绝集合与脚本拒绝集合并不完全等价**（页面注释自认「不追求完全等价」） | 页面：`general.lua:756-759`；脚本：`dnschain.sh:649-693`。页面已补齐四条以缩小差距（`general.lua:796-825`） |
-| 16 | **`shadowsocksr.filter_aaaa` 有四个写入点，页面那个会被静默推翻。** 页面「抑制国外 AAAA」开关写 0/1（`general.lua:1542-1562`），但收敛器每轮强制写回 `0`（`files/usr/bin/dnschain-reconcile:97-98`），`uci-defaults` 也写 `0`（`files/etc/uci-defaults/99-zz-dnschain:76-80`）。只有 `files/etc/uci-defaults/99-gaming-optimize:796` 写 `1`，且它在排序上先执行（`99-gaming` < `99-zz-dnschain`，CI 断言见 `build-openwrt.yml:999-1010`），因此是**死写入**。用户在页面选「开启 —— 抑制国外 AAAA」后，下一次收敛即被改回 0，页面读 `ds.ssr_filter_aaaa()` 又会显示「关闭」 | `general.lua:1542-1562` vs `dnschain-reconcile:97-98` vs `99-zz-dnschain:76-80` vs `99-gaming-optimize:796` |
+| 16 | **`shadowsocksr.filter_aaaa` 有四个写入点，页面那个会被静默推翻。** 页面「抑制国外 AAAA」开关写 0/1（`general.lua:1542-1562`），但收敛器每轮强制写回 `0`（`files/usr/bin/dnschain-reconcile:97-98`），`uci-defaults` 也写 `0`（`files/etc/uci-defaults/99-zz-dnschain:76-80`）。只有 `files/etc/uci-defaults/99-gaming-optimize:796` 写 `1`，且它在排序上先执行（`99-gaming` < `99-zz-dnschain`，CI 断言见 `build-openwrt.yml:1038-1049`），因此是**死写入**。用户在页面选「开启 —— 抑制国外 AAAA」后，下一次收敛即被改回 0，页面读 `ds.ssr_filter_aaaa()` 又会显示「关闭」 | `general.lua:1542-1562` vs `dnschain-reconcile:97-98` vs `99-zz-dnschain:76-80` vs `99-gaming-optimize:796` |
 | 17 | 页面「双栈策略」的实际生效值提示只解释「`ipv6_support=1` 时被 SSR-Plus 覆盖」，**没有提到收敛器也会覆盖**，且覆盖方向相反（收敛器把用户偏好改成 0） | `general.lua:1518-1522`（提示文案）vs `dnschain-reconcile:97-98` |
 
 ### 8.1 页面对「链路不健康」的判定链

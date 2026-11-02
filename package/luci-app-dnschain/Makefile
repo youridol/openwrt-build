@@ -7,7 +7,7 @@
 include $(TOPDIR)/rules.mk
 
 PKG_NAME:=luci-app-dnschain
-PKG_VERSION:=1.10.0
+PKG_VERSION:=1.11.0
 PKG_RELEASE:=1
 
 PKG_LICENSE:=Apache-2.0
@@ -39,6 +39,9 @@ define Package/luci-app-dnschain/description
  表格带序号、时间戳与 IP 段，已入库的行折叠留档。
  v0.24.0 起含「自动补全」：从客户机实际收发学出域名归属与 IP 段，
  补上数据库覆盖不到的 70%（ADR-0010）。
+ v0.25.0 起接管 dnsproxy 的 Web UI：luci-app-dnsproxy 不再编入固件，
+ 其 timeout / bootstrap / verbose 三项收敛到「上游」tab 的
+ 「dnsproxy 实例参数」section，DNS 配置只剩本页一个入口。
 endef
 
 include $(TOPDIR)/feeds/luci/luci.mk
