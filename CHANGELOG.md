@@ -3,6 +3,88 @@
 本仓库所有功能/配置改动均记录于此。版本判型遵循全局规范（PATCH / MINOR / MAJOR）。
 
 
+## [v0.25.1] - 2026-11-02
+
+### 修复 — `cache-deps` 预热工具链在「还原缓存后仍要重编」时必挂（exit 2）
+
+用户请求：「检查 ci/cd 编译不过的 bug」。**固件编译本身没挂**（run `41442544754`
+成功并上传 268 MB 产物），挂的是预热工作流 `Cache deps (dl + toolchain warmup)`
+的 `warm-toolchain` job（run `41442544890` / job `125267693362`）。该 job 自
+10-25 起间歇失败（`40238883756`、`40419842093`、`40601336617`、`40974922309`
+失败；`40789260697`、`41143944532`、`41361076583` 成功），**与本次改动无关**，
+是既有 flaky。
+
+#### ① 根因（带日志证据）
+
+失败步骤「Build host tools and toolchain only」的真实报错（非猜测）：
+
+```
+libtool: link: .../staging_dir/host/bin/gcc ... -o as-new app.o ...    ../bfd/.libs/libbfd.a -L.../toolchain-x86_64_gcc-13.3.0_musl/lib    ../libiberty/libiberty.a -lz -lzstd -pthread
+/usr/bin/ld: ../libiberty/libiberty.a(cp-demangle.o):
+   undefined reference to `__sprintf_chk'
+/usr/bin/ld: ../libbfd.a(bfdio.o): undefined reference to `fopen64'
+/usr/bin/ld: ../libbfd.a(bfdio.o): undefined reference to `fseeko64` / `ftello64`
+make[7]: *** [Makefile:1313: as-new] Error 1
+make[2]: *** [Makefile:104: .../binutils-2.42/.built] Error 2
+    ERROR: toolchain/binutils failed to build.
+make: *** [.../include/toplevel.mk:231: toolchain/compile] Error 2
+##[error]Process completed with exit code 2.
+```
+
+机理：**「目标 sysroot 已就绪」+「工具链仍要重编」同时成立**。
+
+- 还原工具链缓存**成功**（197096 个文件，含已安装的 musl sysroot
+  `staging_dir/toolchain-x86_64_gcc-13.3.0_musl/include`）；
+- 但 lede 判定 stamp 过期，仍要重编 `toolchain/binutils`；
+- 于是宿主 gcc 编译 gas 时**同时**吃到 `-I <musl sysroot>/include`
+  与宿主自带 glibc 的 `-D_FORTIFY_SOURCE=2`；
+- 目标文件混用两套 libc 语义 → `__*_chk` / `*64` 符号无人提供 → 链接失败。
+
+**全新克隆不会这样**，因为干净树里 `toolchain/binutils` 编译时该 sysroot
+目录还是空的（musl 在后面才安装）。实测成功 run 的编译顺序就是
+`binutils/compile`（日志 72771 行）早于 `musl/compile`（92810 行）。
+
+对照证据（任取其一即可证伪）：用 `grep -c 'musl/include/endian.h'` 统计
+「musl 头泄漏进宿主编译」的告警数——
+
+| run | 日期 | 还原了工具链资产 | 泄漏告警 | 结果 |
+|---|---|---|---|---|
+| `121306212326` | 10-25 | 是 | **465** | 失败 |
+| `125267693362` | 11-02 | 是 | **465** | 失败 |
+| `124364502482` | 10-30 | 否 | 0 | 成功 |
+| `125011369755` | 11-01 | 否 | 0 | 成功 |
+
+失败/成功两次的 `as-new` 链接命令逐 token `diff` 为空 —— 故**不是**
+编译选项差异，纯粹取决于「链接那一刻 sysroot 在不在」。
+
+已排除：OOM、超时、磁盘。失败发生在 28 分钟时，step 预算 200 分钟；
+全日志无 `Killed` / `Cannot allocate` / `No space left`。
+
+#### ② 修复（只改仓库自有文件，无 `|| true`）
+
+| 文件 | 改动 |
+|---|---|
+| `tools/verify-toolchain-reuse.sh` | **新增**。判定「会不会被复用」与「重编是否安全」：exit 0 可复用 / 11 危险（sysroot 在但工具链要重编）/ 12 无 sysroot 可原地重编 / 2 用法错 |
+| `cache-deps.yml` | `Restore` 之后新增 `Decide whether the restored tree is safe to compile on`：exit 11 时删 `staging_dir/toolchain-*` 与 `build_dir/toolchain-*`（**保留** `staging_dir/host`，宿主缓存与本次危险无关），并断言确实删净 |
+| `cache-deps.yml` | 新增 `Verify toolchain cache content before trusting it`：内容不完整 → 回退为完整编译（本 job 的产物就是一份好缓存，不该整轮白跑；但诊断信息全打印、重编失败照样红） |
+| `cache-deps.yml` | 新增 `Assert toolchain build did not mix musl headers into host objects`：断言 `x86_64-openwrt-linux-musl-as` / `-ld` 能执行且 `as` 能真汇编 —— 历史失败点就是 gas 链接不出 as-new，可在打包**之前**几秒内暴露 |
+| `build-openwrt.yml` | 同一 bug 的第二现场：原先「toolchain 有新文件 → 打印警告、`hit=false`、**构建继续**」，现在改为回退为干净树；「找不到 stamp」原先按**命中**处理（`hit=true`），改为回退 |
+| `tools/lede-fingerprint.sh` | 指纹补入宿主环境身份（`/etc/os-release` 的 `VERSION_ID`、`ldd --version`、`gcc -dumpmachine` / `-dumpfullversion`）。原先指纹只覆盖 lede 源码内容与 `.config` 切片，**完全不含**宿主编译器/glibc —— 用别的宿主环境编出的缓存会被判命中 |
+
+#### ③ 文档联动
+
+- `docs/build/ci.md` §8.3 补「为什么必须判『会不会被复用』而不只是『内容完整吗』」，
+  §8.4 的退出码表补 `verify-toolchain-reuse.sh` 的 0/11/12。
+
+#### ④ 验证
+
+- `python3 tools/verify-workflow-scripts.py --dash /tmp/dashwrap`：56 个 run 块，0 语法错误
+- `dash -n` 覆盖全部 `tools/*.sh`：通过
+- `tools/verify-toolchain-reuse.sh` 四个分支各自构造目录树实测：0 / 11 / 12 / 2 全部符合预期
+- 指纹确定性：同一棵树连跑两次输出一致；宿主环境不同则指纹不同
+- **未验证**：真实的 240 分钟 cache-deps 全流程需跑一次才能确认
+
+
 ## [v0.25.0] - 2026-11-02
 
 ### 移除 — `luci-app-trafficctl` 整包及其构建/文档联动

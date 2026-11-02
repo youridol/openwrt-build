@@ -1469,13 +1469,38 @@ jobs:
               else
                 echo ">>> ⚠️ toolchain/ 里有比 stamp 更新的文件 → lede 仍会重编工具链："
                 printf '      %s\n' $NEWER
-                echo "    多半是 mtime 归一漏了目录。构建继续（正确性不受影响），"
-                echo "    但本轮不会节省时间；请检查 tools/normalize-mtime.sh 的排除列表。"
+                # ⚠️ 这里**不能**「构建继续」。这正是 2026-11-02 CI 失败的成因：
+                #    目标 sysroot（staging_dir/toolchain-*/include）已从缓存还原，
+                #    而工具链仍要重编 → 宿主 gcc 编译 gas 时同时吃到 musl 头与
+                #    宿主 glibc 的 -D_FORTIFY_SOURCE=2，链接 as-new 时报
+                #      undefined reference to `__sprintf_chk' / `fopen64' / `ftello64'
+                #    → ERROR: toolchain/binutils failed to build.
+                #    全新克隆不会这样（那时 sysroot 还是空的，musl 后装）。
+                # 故必须回退为干净树，回到全新克隆的编译顺序。
+                echo ">>> 回退为干净树：删除 staging_dir/toolchain-* 与 build_dir/toolchain-*"
+                rm -rf lede/staging_dir/toolchain-* lede/build_dir/toolchain-*
+                if [ -n "$(find lede/staging_dir -maxdepth 1 -name 'toolchain-*' 2>/dev/null | head -1)" ]; then
+                  echo "!!! 清理后仍存在 staging_dir/toolchain-*" >&2
+                  exit 1
+                fi
+                echo ">>> 已回退，将完整编译工具链（本轮不会节省时间）"
                 echo "hit=false" >> "$GITHUB_OUTPUT"
               fi
             else
-              echo ">>> 找不到 .toolchain_compile stamp，无法复核（按命中处理）"
-              echo "hit=true" >> "$GITHUB_OUTPUT"
+              # 没有 .toolchain_compile stamp 时**不能**按命中处理：
+              # 缺 stamp 正是 lede 判定「工具链没编完」的条件，它会重编。
+              # 而目标 sysroot 已从缓存还原 → 落入 2026-11-02 的危险组合
+              # （宿主 gas 混用 musl 头与 glibc fortify → as-new 链接失败）。
+              # 故同样回退为干净树。
+              echo ">>> 找不到 .toolchain_compile stamp → lede 会重编工具链"
+              echo ">>> 回退为干净树：删除 staging_dir/toolchain-* 与 build_dir/toolchain-*"
+              rm -rf lede/staging_dir/toolchain-* lede/build_dir/toolchain-*
+              if [ -n "$(find lede/staging_dir -maxdepth 1 -name 'toolchain-*' 2>/dev/null | head -1)" ]; then
+                echo "!!! 清理后仍存在 staging_dir/toolchain-*" >&2
+                exit 1
+              fi
+              echo ">>> 已回退，将完整编译工具链（本轮不会节省时间）"
+              echo "hit=false" >> "$GITHUB_OUTPUT"
             fi
           else
             # 缓存不可用：清掉解包出来的东西，回退到完整编译。

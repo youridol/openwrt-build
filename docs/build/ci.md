@@ -78,7 +78,7 @@
 21. **算缓存指纹**（`:1338-1356`）：`tools/lede-fingerprint.sh` 输出 `TOOLCHAIN_FP` / `HOST_FP`，见 §8.2
 22. **归一源码 mtime**（`:1357-1372`）：`tools/normalize-mtime.sh`，工具链缓存能否被复用全看这一步，见 §8.3
 23. **恢复 dl 镜像**（`:1373-1404`）：`tools/cache-release.sh restore … 'dl.*'` + `dir-mirror.sh unpack`；退出码 10 视为「首次运行」
-24. **恢复工具链缓存**（`:1405-1488`）：按指纹取 `toolchain-*` / `host-*` 资产，解包后过 `tools/verify-toolchain-cache.sh`，再复核 stamp 是否比源码新；任一不满足即回退完整编译
+24. **恢复工具链缓存**（`:1405-1496`）：按指纹取 `toolchain-*` / `host-*` 资产，解包后过 `tools/verify-toolchain-cache.sh`，再复核 stamp 是否比源码新；recheck 不通过即**回退为干净树**（删 `staging_dir/toolchain-*` 与 `build_dir/toolchain-*`），见 §8.4.1
 25. **下载软件包源码**（`:1489-1576`）：设 `DOWNLOAD_MIRROR` 与 `CURL_OPTIONS --max-time 300`，调 `tools/make-download.sh`（内含硬超时 + 哈希不一致自愈）
 26. **用 gcc-13 预编译 gn**（`:1577-1602`）：装 `gcc-13 g++-13`，`make tools/ninja/compile`，再 `CC=gcc-13 CXX=g++-13 make package/feeds/helloworld/gn/host/compile`
 27. **编译**（`:1603-1620`）：`make -j${{ env.JOBS }} V=s`
@@ -377,6 +377,14 @@ Release 资产两个问题都没有，代价是需要自己管分片与清理。
 
 `.config` 只取切片而非整份：加一个普通包（如 `luci-app-xxx`）不应让工具链缓存失效。
 
+**宿主环境身份也进指纹（v0.25.1 起）**：`/etc/os-release` 的 `VERSION_ID`、
+`ldd --version` 首行、`gcc -dumpmachine` 与 `gcc -dumpfullversion`。
+理由是 `staging_dir/host` 里的宿主工具**是用系统 gcc 编的**，其 fortify / LFS
+符号（`__sprintf_chk`、`fopen64` …）由**系统 glibc** 在链接期提供；而原指纹只覆盖
+lede 源码内容与 `.config` 切片，完全不含「这台机器上的宿主工具链长什么样」，
+于是用别的宿主环境编出的缓存会被误判命中。并入后，宿主环境变化会直接变成
+**缓存未命中**，而不是还原一份 ABI 不匹配的树。
+
 ### 8.3 mtime 归一 —— 工具链缓存能否被复用全看这一步
 
 `tools/normalize-mtime.sh` 把源码树 mtime 固定为 `2000-01-01 00:00:00`。
@@ -416,6 +424,47 @@ Release 资产两个问题都没有，代价是需要自己管分片与清理。
    只检查文件存在是抓不到「二进制在但依赖的 .so 缺失」的。
 2. 复核 `toolchain/` 里没有比 `.toolchain_compile` stamp 更新的文件
    （mtime 归一漏了目录时，这里会失败并打印是哪几个文件）。
+
+#### 8.4.1 「内容完整」≠「会被复用」—— 为什么还要判一次
+
+2026-11-02 的 `cache-deps` 失败（run `41442544890` / job `125267693362`）
+证明这两件事必须**分开问**，两个都成立才安全：
+
+| 问题 | 由谁回答 | 只看这个会怎样 |
+|---|---|---|
+| 缓存**内容**完整吗？ | `tools/verify-toolchain-cache.sh` | 完整但 lede 仍要重编 → 踩下方危险组合 |
+| lede 会**跳过**它吗？ | `tools/verify-toolchain-reuse.sh` | 会跳过但内容残缺 → 下游随机 undefined reference |
+
+**危险组合：目标 sysroot 已就绪 + 工具链仍要重编。**
+
+- 还原的 `staging_dir/toolchain-*/include` 里已有 musl 头；
+- 而 `toolchain/binutils`（宿主 gas）又要重编；
+- 于是宿主 gcc 编译 gas 时同时吃到该 `-I`（musl 头）与宿主自带 glibc 的
+  `-D_FORTIFY_SOURCE=2`，目标文件混用两套 libc 语义；
+- 链接 `as-new` 时报 `undefined reference to __sprintf_chk` /
+  `fopen64` / `ftello64` → `ERROR: toolchain/binutils failed to build.`
+
+**全新克隆不会这样**：干净树里 `toolchain/binutils` 编译时该目录还是空的，
+musl 在后面才安装。实测成功 run 的顺序是 `binutils/compile`（日志 72771 行）
+早于 `musl/compile`（92810 行）。
+
+可证伪的判据：统计「musl 头泄漏进宿主编译」告警数
+（`grep -c 'musl/include/endian.h'`）——还原了工具链资产的两轮都是 **465**，
+没还原的两轮都是 **0**，且与成功/失败严格对应。
+
+`tools/verify-toolchain-reuse.sh` 的退出码（调用方必须穷举，不得 `|| true`）：
+
+| 退出码 | 含义 | 调用方动作 |
+|---|---|---|
+| `0` | sysroot 已就绪且工具链会被跳过 | 直接增量编译 |
+| `11` | **危险**：sysroot 在，但工具链要重编 | 删 `staging_dir/toolchain-*` 与 `build_dir/toolchain-*` 后重编（保留 `staging_dir/host`） |
+| `12` | 无 sysroot（等同全新克隆） | 原地重编即可，不需删 |
+| `2` | 用法/前置错误 | 必须显式失败 |
+
+同理，`build-openwrt.yml` 里「toolchain 有新文件 → `hit=false` 但**构建继续**」
+的旧策略也是错的（它只当作「慢一点」），现已改为回退干净树；
+「找不到 stamp → 按命中处理」也改为回退——缺 stamp 正是 lede 判定要重编的条件。
+
 
 ### 8.5 `dl/` 的双写：定时预热 + 构建后回写
 
@@ -488,6 +537,20 @@ sh tools/cache-release.sh purge cache-build-v1          # 整体删除（下次�
 
 `warm-toolchain` 只编 `make tools/compile` + `make toolchain/compile`，**不出固件**，
 并断言 `staging_dir/toolchain-*/bin` 里真有交叉 gcc（否则缓存的是空目录）。
+
+还原缓存之后、真正编译之前，`warm-toolchain` 还要过两道判定（见 §8.4.1）：
+
+1. `tools/verify-toolchain-reuse.sh` ——「会不会被复用、重编安不安全」。
+   若落入「sysroot 已就绪但工具链仍要重编」的危险组合（exit 11），
+   先删 `staging_dir/toolchain-*` 与 `build_dir/toolchain-*` 回到全新克隆的编译顺序，
+   **保留** `staging_dir/host`（危险只来自目标 sysroot，宿主缓存无关）。
+2. `tools/verify-toolchain-cache.sh` ——「内容完整吗」。不完整则回退为完整编译
+   （本 job 的产物就是一份好缓存，不该整轮白跑；但诊断全打印、重编失败照样红）。
+
+编完之后还有一道**可证伪**的守卫 `Assert toolchain build did not mix musl headers
+into host objects`：断言 `x86_64-openwrt-linux-musl-as` / `-ld` 能执行、
+且 `as` 能真的汇编一段最小输入。历史失败点正是 gas 链接不出 `as-new`，
+这道断言能在**打包上传之前**几秒内暴露问题，而不是让下游吃一份坏缓存。
 
 **刻意不缓存** `build_dir/target-*`：包编译的中间产物与 `.config` 强耦合、体积大，
 真正贵的是工具链本身。

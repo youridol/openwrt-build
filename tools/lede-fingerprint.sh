@@ -84,11 +84,52 @@ cfg_slice() {
 		"$_CFG" 2>/dev/null | LC_ALL=C sort || echo "<no-toolchain-symbols>"
 }
 
+
+# 宿主编译环境身份（系统 gcc / libc / runner 镜像）。
+#
+# 为什么必须进指纹：上游宿主工具（staging_dir/host）是**用系统 gcc 编的**，
+# 产物里的 fortify / LFS 符号（__sprintf_chk、fopen64 …）由**系统 glibc**
+# 在链接期提供。而指纹原先只覆盖 lede 源码内容与 .config 切片，
+# 完全不含「这台机器上的宿主工具链长什么样」。
+#
+# 后果（2026-11-02 run 41442544890 实证，job 125267693362）：
+# 还原一份用**别的**宿主环境编出来的 host 缓存后，宿主 gas 链接 as-new 时
+#   ../libiberty/libiberty.a: undefined reference to `__sprintf_chk'
+#   ../libbfd.a: undefined reference to `fopen64' / `ftello64'
+# → make[7]: *** [Makefile:1313: as-new] Error 1
+# → ERROR: toolchain/binutils failed to build.
+# 把这几项并进指纹后，「宿主环境变了」会直接变成**缓存未命中**，
+# 而不是还原一份与当前机器 ABI 不匹配的树。
+#
+# 取值必须**确定**：两个工作流都跑 ubuntu-22.04，同样输入得同样输出。
+# 取不到时输出固定的 <unknown>/<absent>，而不是空串 —— 空串会让
+# 「读不到」与「确实相同」无法区分。
+host_id() {
+	_VID=$(sed -n 's/^VERSION_ID=//p' /etc/os-release 2>/dev/null | head -1 | tr -d '"')
+	[ -n "$_VID" ] || _VID="<unknown>"
+	echo "HOST_OS_VERSION=$_VID"
+	_LIBC=$(ldd --version 2>/dev/null | head -1)
+	[ -n "$_LIBC" ] || _LIBC="<unknown>"
+	echo "HOST_LIBC=$_LIBC"
+	for _cc in gcc g++; do
+		if command -v "$_cc" >/dev/null 2>&1; then
+			_T=$("$_cc" -dumpmachine 2>/dev/null || echo "<unknown>")
+			_V=$("$_cc" -dumpfullversion 2>/dev/null || "$_cc" -dumpversion 2>/dev/null || echo "<unknown>")
+			echo "HOST_${_cc}_TARGET=$_T"
+			echo "HOST_${_cc}_VERSION=$_V"
+		else
+			echo "HOST_${_cc}_TARGET=<absent>"
+			echo "HOST_${_cc}_VERSION=<absent>"
+		fi
+	done
+}
+
 TOOLCHAIN_FP=$(
 	{
 		fp_files toolchain target/linux/generic include/toolchain.mk \
 			include/host-build.mk include/download.mk include/unpack.mk
 		cfg_slice
+		host_id
 	} | sha256sum | cut -d' ' -f1
 )
 
@@ -97,6 +138,7 @@ HOST_FP=$(
 		fp_files tools include/host-build.mk include/download.mk \
 			include/unpack.mk include/depends.mk
 		cfg_slice
+		host_id
 	} | sha256sum | cut -d' ' -f1
 )
 
