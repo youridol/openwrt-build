@@ -70,6 +70,7 @@ on:
       - 'tools/lede-fingerprint.sh'
       - 'tools/normalize-mtime.sh'
       - 'tools/verify-toolchain-cache.sh'
+      - 'tools/verify-toolchain-reuse.sh'
       - '.github/workflows/cache-deps.yml'
 
 # 内置令牌的最小权限：
@@ -445,6 +446,129 @@ jobs:
             exit 1
           fi
 
+      - name: Decide whether the restored tree is safe to compile on
+        id: reuse
+        run: |
+          # ⚠️ 这一步是本工作流最关键的一道判定，不要删、不要 `|| true`。
+          #
+          # 只判断「缓存**内容**完整」是不够的 —— 还要判断「lede 会不会
+          # **跳过**它」。两者都成立才安全。只成立前者时会出现本仓库
+          # 最难查的一类失败：
+          #
+          #   run 41442544890（2026-11-02，job 125267693362）实际报错：
+          #     libtool: link: .../staging_dir/host/bin/gcc ... -o as-new \
+          #        ... -L.../toolchain-x86_64_gcc-13.3.0_musl/lib \
+          #        ../libiberty/libiberty.a -lz -lzstd -pthread
+          #     /usr/bin/ld: ../libiberty/libiberty.a(cp-demangle.o):
+          #        undefined reference to `__sprintf_chk'
+          #     /usr/bin/ld: ../bfd/.libs/libbfd.a(bfdio.o):
+          #        undefined reference to `fopen64' / `fseeko64' / `ftello64'
+          #     make[7]: *** [Makefile:1313: as-new] Error 1
+          #     ERROR: toolchain/binutils failed to build.
+          #     make: *** [.../include/toplevel.mk:231: toolchain/compile] Error 2
+          #
+          # 机理（已用成功/失败两边的完整日志对照确认）：
+          #   · 还原成功，目标 sysroot 已就绪
+          #     （staging_dir/toolchain-*/include/sys/types.h 存在）；
+          #   · 但工具链 stamp 被判过期，lede 仍要重编 toolchain/binutils；
+          #   · 于是宿主 gcc 编译 gas 时**同时**吃到
+          #       -I staging_dir/toolchain-*/include   （musl 头，来自缓存）
+          #       宿主自带的 glibc + -D_FORTIFY_SOURCE=2
+          #     → 目标文件混用两套 libc 语义 → __*_chk / *64 符号无人提供。
+          #
+          # 全新克隆**不会**这样：干净树里 binutils 编译时 sysroot 还是空的
+          # （musl 在后面才安装）。实测成功 run 的编译顺序就是
+          # binutils/compile 早于 musl/compile。
+          #
+          # 所以「sysroot 已就绪 + 工具链仍要重编」= 唯一危险组合，
+          # 且它是**缓存还原**带来的、全新克隆没有的组合。
+          set +e
+          sh openwrt-build/tools/verify-toolchain-reuse.sh lede
+          rrc=$?
+          set -e
+          case "$rrc" in
+            0)
+              echo ">>> 安全：Sysroot 已就绪且工具链会被跳过，可增量编译"
+              echo "safe=true" >> "$GITHUB_OUTPUT"
+              ;;
+            11)
+              # 危险组合：删掉工具链那几棵树，回到「全新克隆」的编译顺序。
+              #
+              # 只删 staging_dir/toolchain-* 与 build_dir/toolchain-*：
+              #   · 危险只来自**目标 sysroot**，宿主工具（staging_dir/host）
+              #     与它无关，保留才能继续享受宿主缓存；
+              #   · 删完 sysroot 就不在了，重编就是干净克隆的顺序，安全。
+              echo ">>> 危险组合：sysroot 已就绪但工具链仍要重编 → 回退为干净树" >&2
+              echo ">>> 删除 lede/staging_dir/toolchain-* 与 lede/build_dir/toolchain-*" >&2
+              rm -rf lede/staging_dir/toolchain-* lede/build_dir/toolchain-*
+              # 断言真的删掉了：否则下一步会带着污染树编译并随机挂在 binutils。
+              # 断言**具体的危险文件**，而不是只查目录 —— 目录可能以别的名字残留。
+              if [ -n "$(find lede/staging_dir -maxdepth 1 -name 'toolchain-*' 2>/dev/null | head -1)" ]; then
+                echo "!!! 清理后仍存在 staging_dir/toolchain-* —— 退出，不要带着污染树编译" >&2
+                exit 1
+              fi
+              if [ -n "$(find lede/build_dir -maxdepth 1 -name 'toolchain-*' 2>/dev/null | head -1)" ]; then
+                echo "!!! 清理后仍存在 build_dir/toolchain-* —— 退出，不要带着污染树编译" >&2
+                exit 1
+              fi
+              SYSROOT_HDR=$(find lede -path '*toolchain-*/include/sys/types.h' 2>/dev/null | head -1)
+              if [ -n "$SYSROOT_HDR" ]; then
+                echo "!!! 清理后目标 sysroot 仍在: $SYSROOT_HDR —— 退出" >&2
+                exit 1
+              fi
+              echo ">>> 已回退为干净树，将完整编译工具链"
+              echo "safe=true" >> "$GITHUB_OUTPUT"
+              ;;
+            12)
+              echo ">>> 树里没有目标 sysroot（等同全新克隆），原地重编是安全的"
+              echo "safe=true" >> "$GITHUB_OUTPUT"
+              ;;
+            *)
+              echo "!!! 复用判定脚本异常（exit=$rrc）—— 这是 bug，不是「没有缓存」" >&2
+              exit 1
+              ;;
+          esac
+
+      - name: Verify toolchain cache content before trusting it
+        run: |
+          # 内容完整性校验（与 build-openwrt.yml 同一把尺子）：
+          # 交叉 gcc 在不在、能不能真编一个程序、stamp 全不全。
+          #
+          # 与上一步的分工：
+          #   上一步问「会不会被复用」；这一步问「**内容完整**吗」。
+          #   两者都成立才敢拿去编译。
+          #
+          # 本轮没有还原到工具链 → 直接从零编译，不需要校验
+          # （此时校验必然失败，会把正常路径判成错误）。
+          # ⚠️ 不要写成 `[ -d lede/staging_dir/toolchain-* ]`：
+          #    未加引号的 glob 在 dash 里会展开成多个参数，`[` 直接报错。
+          TC_DIR=$(find lede/staging_dir -maxdepth 1 -type d -name 'toolchain-*' 2>/dev/null | head -1)
+          if [ -z "$TC_DIR" ]; then
+            echo ">>> 本轮没有工具链缓存（将从零编译），跳过内容校验"
+            exit 0
+          fi
+
+          set +e
+          sh openwrt-build/tools/verify-toolchain-cache.sh lede
+          vrc=$?
+          set -e
+          if [ "$vrc" -eq 0 ]; then
+            echo ">>> 工具链缓存内容校验通过"
+            exit 0
+          fi
+
+          # 缓存内容不完整：**回退为干净编译**，而不是让整个预热 job 失败。
+          #
+          # 为什么回退而不是 exit 1：本 job 的产物就是一份**好**缓存。
+          # 缓存坏了属于「本轮白拿不到增量」，重编一遍仍能产出正确缓存；
+          # 直接失败则整轮白跑，且下一轮还会拿到同一份坏缓存、再次失败。
+          # 这与 build-openwrt.yml 的既有策略一致（rc=11 → 回退完整编译）。
+          # ⚠️ 但这**不是**静默容错：诊断信息全部打印，且重编失败照样红。
+          echo "!!! 工具链缓存内容校验未通过（rc=$vrc）—— 回退为完整编译" >&2
+          echo "    清掉解包出来的工具链树后从零编译；旧缓存会在本轮编译成功后覆盖" >&2
+          rm -rf lede/staging_dir/toolchain-* lede/build_dir/toolchain-*
+          echo ">>> 已清理，将从零编译工具链"
+
       - name: Download source packages (need toolchain sources)
         working-directory: lede
         env:
@@ -476,6 +600,55 @@ jobs:
           echo ">>> 交叉编译器: $CC"
           "$CC" --version | head -1
           ls -l staging_dir/host/bin/ | head -20
+
+      - name: Assert host binutils was not polluted by the target sysroot
+        run: |
+          # 可证伪的守卫：抓「宿主工具被目标 sysroot 污染」这一具体形态。
+          #
+          # 为什么需要（而不是只靠「编译成功」）：
+          #   2026-11-02 的失败是宿主 gas 链接 as-new 时
+          #     undefined reference to `__sprintf_chk' / `fopen64' / `ftello64'
+          #   → ERROR: toolchain/binutils failed to build.
+          #   若换成「能链接但产物混了目标 libc」的写法，编译不报错、
+          #   缓存照样上传，下游要几十分钟后才炸。这里几秒内把它暴露。
+          #
+          # 判据（都只用**已产出**的二进制，不猜名字）：
+          #   1. 工具链 bin/ 里的交叉 as / ld 存在；
+          #   2. 它们能在 runner 上**直接执行** —— 它们本身是宿主程序，
+          #      混用目标 libc 的直接后果就是「跑不起来 / 动态加载失败」；
+          #   3. 交叉 as 能真的把一段最小汇编编成目标文件。
+          #
+          # ⚠️ 不硬编码 `x86_64-openwrt-linux-musl-as` 这种名字：
+          #    前缀随 TARGET_SUFFIX 变，写死会在换目标时误报。用模式发现。
+          set -e
+          TC=$(find staging_dir -maxdepth 1 -type d -name 'toolchain-*' | head -1)
+          [ -n "$TC" ] || { echo "!!! 没有 staging_dir/toolchain-*" >&2; exit 1; }
+
+          AS_BIN=$(find "$TC/bin" -maxdepth 1 \( -type f -o -type l \) -name '*-as' 2>/dev/null | head -1)
+          LD_BIN=$(find "$TC/bin" -maxdepth 1 \( -type f -o -type l \) -name '*-ld' 2>/dev/null | head -1)
+          [ -n "$AS_BIN" ] || { echo "!!! $TC/bin 里没有交叉 as（binutils 没装上）" >&2; ls -l "$TC/bin" >&2 || true; exit 1; }
+          [ -n "$LD_BIN" ] || { echo "!!! $TC/bin 里没有交叉 ld（binutils 没装上）" >&2; ls -l "$TC/bin" >&2 || true; exit 1; }
+
+          for b in "$AS_BIN" "$LD_BIN"; do
+            [ -x "$b" ] || { echo "!!! 没有执行位: $b" >&2; exit 1; }
+            # 直接执行：宿主 libc 与产物不匹配时这里就会失败
+            # （典型：error while loading shared libraries / cannot execute）。
+            if ! OUT=$("$b" --version 2>&1); then
+              echo "!!! $b 无法在 runner 上执行（宿主链接被污染？）：" >&2
+              printf '%s\n' "$OUT" >&2 || true
+              exit 1
+            fi
+            echo ">>> $(basename "$b"): $(printf '%s' "$OUT" | head -1)"
+          done
+
+          # 真实汇编一次：证明交叉 as 不只是能打印版本，而是真能干活。
+          TMPD=$(mktemp -d)
+          trap 'rm -rf "$TMPD"' EXIT INT TERM
+          printf '.text\n.globl _start\n_start:\n\tnop\n' > "$TMPD/t.s"
+          "$AS_BIN" -o "$TMPD/t.o" "$TMPD/t.s"
+          [ -s "$TMPD/t.o" ] || { echo "!!! $AS_BIN 产出的目标文件为空" >&2; exit 1; }
+          echo ">>> $(basename "$AS_BIN") 能正常汇编（输出 $(wc -c < "$TMPD/t.o" | tr -d ' ') 字节）"
+          echo ">>> 断言通过：宿主 binutils 未被目标 sysroot 污染"
 
       - name: Verify toolchain is actually usable before packing
         run: |
