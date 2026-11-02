@@ -34,6 +34,7 @@
 | P2-14 `whitelist_forward.conf` 无效冗余 | 已消解 | 仓库不再 overlay 该文件，用上游默认（已是 fw4 正确写法） |
 | 工程-13 `.gitattributes` 缺 `*.ps1` | 已处理 | 已加 `*.ps1 text eol=lf` |
 | 工程-14 AGENTS.md 三处失实 | 已处理 | 后续版本多次校正 |
+| 工程-16 `luci-app-trafficctl` 整包已移除 | **已移除（v0.25.0）** | 包目录、patch、工具脚本与 CI 步骤全部删除，见 `CHANGELOG.md` v0.25.0。本文正文提到 trafficctl 之处均为当时的实测记录，保持原样 |
 | 工程-15 HEAD 含 v0.3.5 修复但无 tag | 未变 | 仅本地标签现状，不影响代码 |
 
 **结论：19 项里 14 项已处理/已消解，2 项仍待做（P0-1 上行整形、P2-13 dnsmasq 日志），

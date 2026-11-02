@@ -1,6 +1,6 @@
 # luci-app-dnsproxy —— DNS Proxy 页面（上游包 + 3 个本地 patch）
 
-`luci-app-dnsproxy` 是「服务 → DNS Proxy」这一组页面：配置 dnsproxy 实例的监听地址/端口、上游、缓存、TLS 服务端、隐私选项与性能参数，并提供状态、诊断、配置原文、日志、帮助五个辅助页。它的**源码不在本仓库**：CI 每次构建都从上游 `adm1n5ky/luci-app-dnsproxy` 全新克隆，本仓库只以三个 patch 的形式记录改动（证据：`.github/workflows/build-openwrt.yml:562-566`、`patches/luci-app-dnsproxy/README.md:5-16`）。
+`luci-app-dnsproxy` 是「服务 → DNS Proxy」这一组页面：配置 dnsproxy 实例的监听地址/端口、上游、缓存、TLS 服务端、隐私选项与性能参数，并提供状态、诊断、配置原文、日志、帮助五个辅助页。它的**源码不在本仓库**：CI 每次构建都从上游 `adm1n5ky/luci-app-dnsproxy` 全新克隆，本仓库只以三个 patch 的形式记录改动（证据：`.github/workflows/build-openwrt.yml:552-556`、`patches/luci-app-dnsproxy/README.md:5-16`）。
 
 这个包在本固件里的角色比较特殊：**它是 dnsproxy 二进制的「可回退」配置入口，而不是框架启用时的实际配置来源**。框架（dnschain）启用时，dnsproxy 的启动参数由 `/var/etc/dnschain/dnsproxy.args` 与 `dnsproxy-foreign.args` 决定，`init.d/dnsproxy` 直接让位、一个实例都不启动（证据：`files/etc/init.d/dnsproxy:273-287`）。本页面写的 `/etc/config/dnsproxy` 只在框架关闭时才决定行为（证据：`files/etc/config/dnsproxy:6-15`）。
 
@@ -17,8 +17,8 @@
 
 | 项 | 值 | 证据 |
 |---|---|---|
-| 包名 | `luci-app-dnsproxy` | `build-openwrt.yml:568-569`（clone 到 `package/luci-app-dnsproxy`） |
-| 来源 | 上游 `https://github.com/adm1n5ky/luci-app-dnsproxy`，`--depth 1` | `build-openwrt.yml:568-569` |
+| 包名 | `luci-app-dnsproxy` | `build-openwrt.yml:558-559`（clone 到 `package/luci-app-dnsproxy`） |
+| 来源 | 上游 `https://github.com/adm1n5ky/luci-app-dnsproxy`，`--depth 1` | `build-openwrt.yml:558-559` |
 | 本地改动 | 3 个 patch | `patches/luci-app-dnsproxy/` 下 `0001`/`0002`/`0003` 三个文件 + `README.md` |
 | 路由条数 | 6 条（全部由上游 `menu.d` 提供，**仓库内无该文件**） | 见 §2 |
 | 二进制来源 | helloworld feed 的 `dnsproxy` 0.83.0（packages feed 的 0.56.2 被删） | `build-openwrt.yml:617-631` |
@@ -38,7 +38,7 @@
 
 ## 2. 路由表
 
-**仓库内不存在 `luci-app-dnsproxy` 的 `menu.d` 文件**（`package/` 下只有 `luci-app-dnschain` 与 `luci-app-trafficctl` 两个本地包；`patches/luci-app-dnsproxy/` 下只有 3 个 patch 与 1 个 README）。路由由上游包在构建时克隆进来的 `menu.d` 提供，本仓库不改路由表，只通过 patch 往已有页面加控件（`docs/routes.md:69`）。
+**仓库内不存在 `luci-app-dnsproxy` 的 `menu.d` 文件**（`package/` 下只有 `luci-app-dnschain` 一个本地包；`patches/luci-app-dnsproxy/` 下只有 3 个 patch 与 1 个 README）。路由由上游包在构建时克隆进来的 `menu.d` 提供，本仓库不改路由表，只通过 patch 往已有页面加控件（`docs/routes.md:69`）。
 
 下表取自 `docs/routes.md:71-78` 的登记（该登记附带路由器实测核对，见 `docs/routes.md:82`）：
 
@@ -353,7 +353,7 @@ flowchart TB
 | 5 | 11 个字段的 UCI 键不被 `init.d/dnsproxy` 读取（§4.1 表里标 ❌ 的行）：页面能改、能存，不进命令行 | `init.d/dnsproxy:60-126` 全部读取点 vs `0003` patch 对应 `cfgvalue` 行 |
 | 6 | `file.js` 的保存路径**绕过 UCI**，与 settings 页的 `uci.set` 是两套写入方式，两者对同一文件写入时无同步机制 | `0003` patch:604-605（文案）、`:611`（`fs.write`）vs `0003` patch:28-406（`uci.set`） |
 | 7 | patch 0002 给 ACL 加的只有 `/usr/lib/opkg/status` 只读，而代码还会读 `/lib/apk/db/installed`；后者是上游 ACL 原有的（patch 上下文可见），两者必须同时存在才能覆盖 apk 与 opkg 两种固件 | `0002` patch:5-12（上下文含 `/lib/apk/db/installed`，新增行是 `/usr/lib/opkg/status`） |
-| 8 | `files/etc/config/dnsproxy` 的 `cache.enabled '0'`、无 `fallback`、`ipv6_disabled '0'` 三条被 CI 硬断言，但它们只在框架关闭时才影响行为 | 断言 `build-openwrt.yml:1253-1283`；生效条件 `init.d/dnsproxy:289-331` |
+| 8 | `files/etc/config/dnsproxy` 的 `cache.enabled '0'`、无 `fallback`、`ipv6_disabled '0'` 三条被 CI 硬断言，但它们只在框架关闭时才影响行为 | 断言 `build-openwrt.yml:1045-1075`；生效条件 `init.d/dnsproxy:289-331` |
 | 9 | `files/etc/capabilities/dnsproxy.json` 只授予 `CAP_NET_BIND_SERVICE`（5 个集合各一项），而 dnsproxy 在框架关闭时默认监听 `127.0.0.1:5353`（非低端口），该能力仅在把 `listen_port` 改成 53 时才需要 | `files/etc/capabilities/dnsproxy.json:1-17`；`init.d/dnsproxy:319`；`files/etc/config/dnsproxy:25` |
 | 10 | `stop_service` 的让位分支（`:338`）在 `config_load` 之后，而 `start_service` 的让位分支（`:280`）在 `config_load` 之后、`is_enabled` 之前 —— 两处顺序一致，但都意味着让位时 `global.enabled` 未被检查，即「框架启用 + dnsproxy 自身禁用」与「框架启用 + dnsproxy 自身启用」行为完全相同 | `init.d/dnsproxy:277-293`、`:333-341` |
 
@@ -365,12 +365,12 @@ flowchart TB
 
 | 步骤 | 做什么 | 证据 |
 |---|---|---|
-| clone 上游 | `git clone --depth 1 https://github.com/adm1n5ky/luci-app-dnsproxy.git package/luci-app-dnsproxy` | `build-openwrt.yml:568-569` |
-| 断言 patch 存在 | `ls ../openwrt-build/patches/luci-app-dnsproxy/*.patch` 失败即 `exit 1` | `build-openwrt.yml:571-575` |
-| 逐个应用 | 循环里先 `git apply --check`（失败 `exit 1`），再 `git apply`，每次打印绝对路径 | `build-openwrt.yml:577-588` |
-| 回显改动 | `git -C package/luci-app-dnsproxy diff --stat` + `diff \| head -80` | `build-openwrt.yml:590-593` |
+| clone 上游 | `git clone --depth 1 https://github.com/adm1n5ky/luci-app-dnsproxy.git package/luci-app-dnsproxy` | `build-openwrt.yml:558-559` |
+| 断言 patch 存在 | `ls ../openwrt-build/patches/luci-app-dnsproxy/*.patch` 失败即 `exit 1` | `build-openwrt.yml:561-565` |
+| 逐个应用 | 循环里先 `git apply --check`（失败 `exit 1`），再 `git apply`，每次打印绝对路径 | `build-openwrt.yml:567-578` |
+| 回显改动 | `git -C package/luci-app-dnsproxy diff --stat` + `diff \| head -80` | `build-openwrt.yml:580-583` |
 
-patch 应用时必须**先转绝对路径**：在 `(cd package/... )` 子 shell 内相对路径会失效（注释 `build-openwrt.yml:577-578`）。禁止 `|| true`（注释 `:565`，对应 `AGENTS.md` 红线 2、3）。
+patch 应用时必须**先转绝对路径**：在 `(cd package/... )` 子 shell 内相对路径会失效（注释 `build-openwrt.yml:567-568`）。禁止 `|| true`（注释 `:555`，对应 `AGENTS.md` 红线 2、3）。
 
 幂等性来自「每次全新克隆」，不是来自 patch 本身可重复应用 —— `README.md:33-34` 写明了这一点。
 
@@ -388,24 +388,24 @@ patch 应用时必须**先转绝对路径**：在 `(cd package/... )` 子 shell 
 
 | 项 | 值 | 证据 |
 |---|---|---|
-| `CONFIG_PACKAGE_dnsproxy` | `=y` | `build-openwrt.yml:717` |
-| `CONFIG_PACKAGE_luci-app-dnsproxy` | `=y` | `build-openwrt.yml:718` |
-| 执行位 | `chmod +x files/etc/init.d/dnsproxy` | `build-openwrt.yml:979` |
+| `CONFIG_PACKAGE_dnsproxy` | `=y` | `build-openwrt.yml:631` |
+| `CONFIG_PACKAGE_luci-app-dnsproxy` | `=y` | `build-openwrt.yml:632` |
+| 执行位 | `chmod +x files/etc/init.d/dnsproxy` | `build-openwrt.yml:771` |
 | 行尾 | `**/etc/init.d/dnsproxy text eol=lf` | `.gitattributes:49` |
 
 ### 7.4 与 dnsproxy 相关的 CI 契约断言
 
-集中在 `Verify dnschain framework contracts` 步骤（`build-openwrt.yml:1035-1350`）：
+集中在 `Verify dnschain framework contracts` 步骤（`build-openwrt.yml:827-1142`）：
 
 | 断言 | 判据 | 证据 |
 |---|---|---|
-| `dnsproxy cache.enabled=0` | `awk` 取 `config dnsproxy 'cache'` 段后第一处 `option enabled`，必须含 `'0'` | `build-openwrt.yml:1259-1265` |
-| 无 `list fallback` | 剥注释后 `grep -E "^[[:space:]]*list fallback"` 必须无命中 | `build-openwrt.yml:1266-1272` |
-| `ipv6_disabled=0` | `grep -qE "option ipv6_disabled '0'"` | `build-openwrt.yml:1273-1279` |
-| 让位逻辑存在 | `grep -q 'dnschain_takes_over' files/etc/init.d/dnsproxy` | `build-openwrt.yml:1321-1328` |
-| 库脚本不得生成 `--cache` / `--fallback` / `--ipv6-disabled` | 对 `files/usr/share/dnschain/dnschain.sh` 剥注释后 grep | `build-openwrt.yml:1130-1145` |
+| `dnsproxy cache.enabled=0` | `awk` 取 `config dnsproxy 'cache'` 段后第一处 `option enabled`，必须含 `'0'` | `build-openwrt.yml:1051-1057` |
+| 无 `list fallback` | 剥注释后 `grep -E "^[[:space:]]*list fallback"` 必须无命中 | `build-openwrt.yml:1058-1064` |
+| `ipv6_disabled=0` | `grep -qE "option ipv6_disabled '0'"` | `build-openwrt.yml:1065-1071` |
+| 让位逻辑存在 | `grep -q 'dnschain_takes_over' files/etc/init.d/dnsproxy` | `build-openwrt.yml:1113-1120` |
+| 库脚本不得生成 `--cache` / `--fallback` / `--ipv6-disabled` | 对 `files/usr/share/dnschain/dnschain.sh` 剥注释后 grep | `build-openwrt.yml:922-937` |
 
-**仓库内没有专门校验 dnsproxy patch 的脚本。** `tools/` 下的 `verify-dnschain-domains.sh` 只覆盖 dnschain（对 `dnsproxy` 的唯一命中是 `:480` 的一句注释），`verify-firmware-artifact.sh` 只列 dnschain 条目（`:135-159`）。patch 是否可应用完全靠构建时的 `git apply --check`（`build-openwrt.yml:582-585`）。
+**仓库内没有专门校验 dnsproxy patch 的脚本。** `tools/` 下的 `verify-dnschain-domains.sh` 只覆盖 dnschain（对 `dnsproxy` 的唯一命中是 `:480` 的一句注释），`verify-firmware-artifact.sh` 只列 dnschain 条目（`:135-159`）。patch 是否可应用完全靠构建时的 `git apply --check`（`build-openwrt.yml:572-575`）。
 
 ---
 
@@ -431,7 +431,7 @@ git -C /tmp/upstream apply --check \
 
 ### 8.2 构建期：CI 的断言
 
-`Verify dnschain framework contracts` 步骤里的 §7.4 五条断言会拦住「配置被改回旧值」这类回退。它们都是显式 `exit 1`（`build-openwrt.yml:1344-1348`）。
+`Verify dnschain framework contracts` 步骤里的 §7.4 五条断言会拦住「配置被改回旧值」这类回退。它们都是显式 `exit 1`（`build-openwrt.yml:1136-1140`）。
 
 ### 8.3 运行时：判断开关到底有没有生效
 

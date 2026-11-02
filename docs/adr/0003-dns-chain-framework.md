@@ -47,13 +47,13 @@
 | 10 | §9.2 | `filter_aaaa = 1` | 强制 `0` | `files/usr/bin/dnschain-reconcile:97-98`、`files/etc/uci-defaults/99-zz-dnschain:75-80` |
 | 11 | §9.2 | 键名 `access_control.router_proxy` | 完整键是 `shadowsocksr.@access_control[0].router_proxy` | `files/usr/bin/dnschain-reconcile:100-112` |
 | 12 | §9.2 | 触发点含 `procd_add_reload_trigger shadowsocksr dnsproxy dhcp` 与 selftest 定时任务 | 只有 `procd_add_reload_trigger "$DNSCHAIN_CONF"`；全仓库无 cron/procd 定时；`selftest.interval` 无消费者 | `files/etc/init.d/dnschain:496-498`、`general.lua:1824-1826` |
-| 13 | §9.3、§10.1 | 生成 `upstreams-domains.txt`（`[/域名/]`）并作为 `--upstream <文件>` | 生成的是 `foreign-split.conf`（纯域名清单）；`--upstream` 只接 URL；`upstreams-domains.txt` 是遗留物、无消费者 | `files/usr/share/dnschain/dnschain.sh:257-326`、`:332-372`、`.github/workflows/build-openwrt.yml:1168-1176` |
+| 13 | §9.3、§10.1 | 生成 `upstreams-domains.txt`（`[/域名/]`）并作为 `--upstream <文件>` | 生成的是 `foreign-split.conf`（纯域名清单）；`--upstream` 只接 URL；`upstreams-domains.txt` 是遗留物、无消费者 | `files/usr/share/dnschain/dnschain.sh:257-326`、`:332-372`、`.github/workflows/build-openwrt.yml:960-968` |
 | 14 | §10.1 | `--timeout 5s` | `8s` | `files/usr/share/dnschain/dnschain.sh:358-359`、`:404-405` |
-| 15 | §10.3 | chinadns-ng 参数块 | 该进程已不存在；`-A` 的职责改由 dnsmasq `nftset=` 承担 | `files/usr/share/dnschain/dnschain.sh:1105-1124`、`.github/workflows/build-openwrt.yml:1147-1158` |
+| 15 | §10.3 | chinadns-ng 参数块 | 该进程已不存在；`-A` 的职责改由 dnsmasq `nftset=` 承担 | `files/usr/share/dnschain/dnschain.sh:1105-1124`、`.github/workflows/build-openwrt.yml:939-950` |
 | 16 | §10.4、§10.6 | `files/etc/config/dnsproxy:118`、`files/etc/init.d/dnsproxy:293` | `tls.enabled` 在 `:142-145`；CA 证书 jail-mount 在 `:320-325` | 同左 |
 | 17 | §10.9 | `applechina.conf` 是 173 条指向 `114.114.114.114` | 173 条全部指向 `127.0.0.1#5353`；191 行中 18 行注释，含 `114.114.114.114` 的只有 1 行注释 | `files/etc/ssrplus/applechina.conf:4`、全文件 173 条 `server=` |
 | 18 | §13.1 | 修改 `99-gaming-optimize` 把 `pdnsd_enable=4 → 0` | 该文件**未被修改**，仍写 `4`；靠后执行的 `99-zz-dnschain` 覆盖 | `files/etc/uci-defaults/99-gaming-optimize:303-306`、`files/etc/uci-defaults/99-zz-dnschain:45-50` |
-| 19 | §13.2 | `chmod +x` 清单在 `build-openwrt.yml:475-478` | 实际在 `:979-992`；`:475-478` 是 shadcn 主题 clone | `.github/workflows/build-openwrt.yml:962-994` |
+| 19 | §13.2 | `chmod +x` 清单在 `build-openwrt.yml:465-468` | 实际在 `:771-784`；`:465-468` 是 shadcn 主题 clone | `.github/workflows/build-openwrt.yml:754-786` |
 | 20 | §2.7 D1/D5/D7 | 引用 `AGENTS.md:517`、`AGENTS.md:335`、`GLOSSARY.md:49-51`，以及「`@whitelist` 必须含代理节点 IP」 | 三处行号都对不上；`AGENTS.md` 全文无 `whitelist` 字样 | `AGENTS.md:497`、`AGENTS.md:313`、`GLOSSARY.md:51`；全仓库 grep `whitelist` 在 `AGENTS.md` 零命中 |
 | 21 | §2.7 D8 | 仓库 overlay 仍生成 `dnsmasq restart` | **成立**，行号见证据 | `files/etc/uci-defaults/99-gaming-optimize:503` |
 | 22 | §11 测试纪律 | 引用「AGENTS.md §6.2」 | 不存在；第 6 节只有编号项 1–12，应写「§6 第 2 项」 | `AGENTS.md:661`、`:673` |
@@ -119,7 +119,7 @@ flowchart TD
    （`:381-417`）生成，函数内明确不写 `--cache` / `--fallback` / `--ipv6-disabled`
    （`:370`）。
 3. **分流由 dnsmasq 的 `server=/域名/` 承担**，不是 dnsproxy 的 `[/域名/]`。
-   CI 反向断言禁止再出现 `[/域名/]` 形式（`.github/workflows/build-openwrt.yml:1168-1176`）。
+   CI 反向断言禁止再出现 `[/域名/]` 形式（`.github/workflows/build-openwrt.yml:960-968`）。
 4. **观测域名的去向走 `--servers-file`**，改道只改该文件 + SIGHUP
    （`files/usr/share/dnschain/dnschain.sh:1165-1245`）。
 
@@ -291,7 +291,7 @@ for s in blacklist china whitelist_domain; do nft list set inet ss_spec $s; done
 
 全局关 AAAA 会把国内也砍掉。自检第 5 项把 `--ipv6-disabled` 直接判 FAIL
 （`files/usr/bin/dnschain-selftest:211-212`），CI 也禁止库脚本生成它
-（`.github/workflows/build-openwrt.yml:1141-1144`）。
+（`.github/workflows/build-openwrt.yml:933-936`）。
 
 ---
 
@@ -622,7 +622,7 @@ ss_spec_output 端口集                             含 853、不含 53（只�
   （`[/域名/]` 形式），v0.10.0 后没有任何代码生成或读取它。
   路由器上该文件可能仍存在（上一次运行留下的），但 dnsproxy 参数里没有它。
   CI 反向断言禁止库脚本再生成 `[/&/]` 形式
-  （`.github/workflows/build-openwrt.yml:1168-1176`）。
+  （`.github/workflows/build-openwrt.yml:960-968`）。
 - **`idna-bypass.conf` 也已不再生成**（`dnschain.lua:12` 的注释记录该删除）。
 - **`import_interval` 无消费者**：`reconcile_lists` 只在被调用时比对一次指纹
   （`files/usr/bin/dnschain-reconcile:245-310`），没有轮询循环。
@@ -694,7 +694,7 @@ SSR-Plus `start()` 先装 dnsmasq 分流、约 2 秒后才拉起后端，存在�
 1. 分流规则写在 **dnsmasq** 的 `dnschain-split.conf`，不写 dnsproxy 参数。
 2. **不过滤 `xn--`**：dnsmasq 原生支持 punycode，过滤会让 IDNA 域名失去分流
    （`files/usr/share/dnschain/dnschain.sh:299-308`；CI 反向断言
-   `.github/workflows/build-openwrt.yml:1186-1197`）。
+   `.github/workflows/build-openwrt.yml:978-989`）。
 
 ### 10.2 为什么不配 fallback
 
@@ -709,7 +709,7 @@ fallback 是**全局**的，不区分域名。任一上游不可用时，国外�
 **【已失效】** 原文 §10.3 是一整段 chinadns-ng 参数（`-b 127.0.0.1 -l 5335`、
 `-d gfw`、`-t tls://…`、`-N tag:gfw --filter-qtype 64,65`、`-A inet@ss_spec@blacklist`、
 `--cert-verify`、`-o 5`）。**该进程已不存在**，CI 反向断言库脚本不得再定义
-`dc_gen_filter_args`（`.github/workflows/build-openwrt.yml:1147-1158`）。
+`dc_gen_filter_args`（`.github/workflows/build-openwrt.yml:939-950`）。
 
 现行对应实现：
 
@@ -746,7 +746,7 @@ chain dnschain_reject_dot {
 证据：`files/etc/init.d/dnschain:244-255`；优先级实测记录在同文件 `:226-231`。
 
 **写法约束（AGENTS 红线 7）**：`/etc/nftables.d/*.nft` 里禁止出现 `table` 声明，
-只能写裸 chain。CI 有守卫（`.github/workflows/build-openwrt.yml:1199-1205`）。
+只能写裸 chain。CI 有守卫（`.github/workflows/build-openwrt.yml:991-997`）。
 
 **关闭时不删文件，清成注释占位** —— fw4 对目录用 glob include，目录为空会导致
 include 无匹配、fw4 reload 失败（`files/etc/init.d/dnschain:256-263`）。
@@ -956,7 +956,7 @@ $ grep -c '127\.0\.0\.1#5353' files/etc/ssrplus/applechina.conf → 175（含 2 
 `**/etc/uci-defaults/99-zz-dnschain`（沿用 `**/` 前缀 —— 根锚定 `/etc/...`
 永不匹配 `files/` 前缀，AGENTS 红线 1）。
 
-**CI 执行位清单**在 `.github/workflows/build-openwrt.yml:979-992`：
+**CI 执行位清单**在 `.github/workflows/build-openwrt.yml:771-784`：
 
 ```sh
 chmod +x files/etc/init.d/dnsproxy
@@ -969,7 +969,7 @@ if [ -f files/usr/share/dnschain/dnschain.sh ]; then chmod +x …; fi
 if [ -f files/usr/bin/dnschain-health ]; then chmod +x …; fi
 ```
 
-> 行号更正：原文写 `build-openwrt.yml:475-478`。实际 `:475-478` 是
+> 行号更正：原文写 `build-openwrt.yml:465-468`。实际 `:465-468` 是
 > shadcn 主题的 `git clone`（`:473-478`），执行位清单在 `:976-992`。
 
 **git 索引里的实际模式**（`git ls-files -s`）：只有
@@ -1036,7 +1036,7 @@ if [ -f files/usr/bin/dnschain-health ]; then chmod +x …; fi
 |---|---|---|
 | 1 | 接受「两个 dnsproxy 实例 + SSR-Plus 固定模式 0」作为默认 | 端口所有权简单，代价是 SSR 生成的 `#5335` 变死端口（R-3） |
 | 2 | 接受 T2（拒绝 LAN 出向 853）默认开启 | 自带 DoT 的客户端会先失败再回落；与服务端 DoH/DoT 互斥 |
-| 3 | 接受独立页面作为**新包** `luci-app-dnschain` | 与 trafficctl 的 vendored 模式一致，不并入 dnsproxy 的 patch 体系 |
+| 3 | 接受独立页面作为**新包** `luci-app-dnschain` | 当时与 trafficctl 的 vendored 模式一致，不并入 dnsproxy 的 patch 体系（trafficctl 已于 v0.25.0 移除，本决定不受影响：dnschain 是自有包，仍不并入 dnsproxy 的 patch 体系） |
 | 4 | 接受把「三层缓存并存」定性为**设计缺陷** | 已按单一缓存实现 |
 
 **仍未定的实现级问题**：

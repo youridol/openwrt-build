@@ -38,7 +38,7 @@ UnicodeEncodeError: 'gbk' codec can't encode character '\u2713' in position 18: 
 - 实跑结果：**129 条 OK / 0 FAIL**，末行「域名分流与改道契约校验通过。」
 - 退出码 0 = 全过（`:17`）；任一 FAIL 置 `rc=1`（`:40`）。
 - 在仓库根直接跑即可，脚本自己 `cd` 到仓库根（`:20-21`）。
-- CI 也跑它，但用 `../openwrt-build/` 前缀（`build-openwrt.yml:449`），因为那一步的 `working-directory` 是 `lede`。
+- CI 也跑它，但用 `../openwrt-build/` 前缀（`build-openwrt.yml:510`），因为那一步的 `working-directory` 是 `lede`。
 
 ### 1.2 `python tools/check-dnschain-lua.py`
 
@@ -61,32 +61,14 @@ UnicodeEncodeError: 'gbk' codec can't encode character '\u2713' in position 18: 
 - 实跑结果：`OK 无缺失（426 条中文文案已在 PO 中）`。
 - 只报告不改写；`--write` 才追加缺失条目（`:10-12`）。
 
-### 1.5 `python tools/check-trafficctl-i18n.py`
-
-- 作用：校验 trafficctl 的中文翻译覆盖率；`--write-pot` 可重生成 pot 模板。
-- 实跑结果：
-
-```
-界面字符串 376 条；po 502 条；pot 376 条
-po 缺失 0；po 空译文 0；pot 缺失 0
-中文翻译完整
-```
-
-### 1.6 `sh tools/verify-dnschain-ci-sim.sh`
+### 1.5 `sh tools/verify-dnschain-ci-sim.sh`
 
 - 作用：在本地复现 CI 的工作目录结构（`lede/` 与 `openwrt-build/` 同级），把 `files/` 复制进 `lede/`，再从 workflow 里**抽出** `Verify dnschain framework contracts` 的脚本体执行，最后补跑 `verify-dnschain-domains.sh`（`tools/verify-dnschain-ci-sim.sh:20-97`）。
 - 实跑结果：末行「CI 模拟校验通过（真实 CI 应能通过）」，退出码 0。
 - 为什么需要它：那段校验的 `working-directory` 是 `lede`，在仓库根直接跑会**误报通过或误报失败**（`:7-12`）。
 - 它自带 Python UTF-8 兜底，因为 workflow 注释里有 `⚠️`（`:47-53`）。
 
-### 1.7 `sh tools/verify-trafficctl-invariants.sh`
-
-- 作用：trafficctl 本地不变量校验，7 个分组（`:78`、`:85`、`:136`、`:158`、`:846`、`:871`、`:902`）。
-- 实跑结果：末行「trafficctl 本地不变量校验通过」，退出码 0。分组 7 实际跑通了「克隆上游 tag → 重放 6 个 patch → 与 vendored 包逐字节比对」。
-- **前提**：分组 7 需要 `git clone --depth 1 --branch "$UP_TAG"` 上游仓库（`:917`），即需要**网络**；也可用 `TCTL_UPSTREAM_LOCAL` 指向本地基线目录跳过克隆（`:911-915`）。无网络时该分组会失败，前 6 组仍可跑。
-- CI 用 `sh` 调用（`build-openwrt.yml:556`），且在此之前先 `sh -n` 预检（`:529`），因为 bash 专有语法在 dash 里是**解析期**错误。
-
-### 1.8 `sh tools/verify-firmware-artifact.sh`
+### 1.6 `sh tools/verify-firmware-artifact.sh`
 
 - 作用：刷机前的固件产物预检（`tools/verify-firmware-artifact.sh:3-25`）。
 - **前提**：必须给一个目录参数，里面放 `gh run download` 下来的 `.img.gz` 与 `.sha256`（`:13-15`、`:29-33`）。无参数时实跑输出用法并以 **exit 2** 退出：
@@ -98,20 +80,18 @@ po 缺失 0；po 空译文 0；pot 缺失 0
 - 因此它**不能**在没有产物的仓库里跑，也不在 CI 里执行（`build-openwrt.yml` 无引用）。
 - 它核对的 18 个条目与期望权限见 `:136-159`，含 `etc/init.d/dnschain` = `-rwxr-xr-x`、`etc/rc.d/S95dnschain` / `K10dnschain` 为符号链接（`:138-139`）。
 
-### 1.9 八个脚本的定位对比
+### 1.7 六个脚本的定位对比
 
 | 脚本 | CI 是否执行 | 需要网络 | 需要固件产物 | 本次实跑结论 |
 |---|---|---|---|---|
-| `verify-dnschain-domains.sh` | 是（`:449`） | 否 | 否 | 129 OK / 0 FAIL |
-| `verify-trafficctl-invariants.sh` | 是（`:556`） | **是**（分组 7） | 否 | 通过 |
+| `verify-dnschain-domains.sh` | 是（`:520`） | 否 | 否 | 129 OK / 0 FAIL |
 | `verify-dnschain-ci-sim.sh` | 否 | 否 | 否 | 通过 |
 | `check-dnschain-lua.py` | **否** | 否 | 否 | 121 / 0 |
 | `render-dnschain-diagrams.py` | **否** | 否 | 否 | 44 / 0 |
 | `extract-dnschain-i18n.py` | **否** | 否 | 否 | 426 条无缺失 |
-| `check-trafficctl-i18n.py` | **否** | 否 | 否 | 376/502/376，缺 0 |
 | `verify-firmware-artifact.sh` | **否** | 否 | **是** | 无参数，exit 2 |
 
-中间四个 Python 脚本在 CI 里零引用（`grep -n "check-dnschain\|render-dnschain\|extract-dnschain\|check-trafficctl" .github/workflows/build-openwrt.yml` 无输出）。它们的结论在 CI 里没有强制力，只能靠本地自觉跑。
+中间三个 Python 脚本在 CI 里零引用（`grep -n "check-dnschain\|render-dnschain\|extract-dnschain" .github/workflows/build-openwrt.yml` 无输出）。它们的结论在 CI 里没有强制力，只能靠本地自觉跑。
 
 ## 2. 路由器端只读取证方法
 
@@ -250,11 +230,11 @@ done
 | 4 | `ps w \| grep -c <脚本名>` 虚高 | BusyBox 的 `ps w` 会折行长命令行，且脚本**自身的 cmdline 含搜索关键字** → 曾报出「2532 个进程」而真实只有 8 个 | AGENTS.md §6.6；正确做法是遍历 `/proc/[0-9]*/cmdline` 只匹配 exec 名 + 第一个参数 |
 | 5 | CI 日志先 grep 关键字 | `gh run view --log` 里**源码回显占绝大部分**，每条 run 脚本都以 `N\t<原文>` 重印一遍，真实输出夹在中间 → 会同时命中回显，误判成「没输出」或「输出正常」 | AGENTS.md §6.8；正确做法是先定位真实执行的第一条输出（不带行号前缀），再顺序原样打印后续几十行 |
 | 6 | `grep -c PAT \|\| echo 0` 得到 `"0\n0"` | `grep -c` 无匹配时既打印 `0` 又返回 rc=1，`\|\| echo 0` 再追加一个 → 变量含换行 → `[ "$n" -eq 0 ]` 算术比较报错返回假 → **判据恒假** | `dnschain.sh:986-1013`（含实测 `[0\n0]`）；自检第 12 项因此改用 awk（`dnschain-selftest:296-302`）；`verify-dnschain-domains.sh:318-321` 有反向断言 |
-| 7 | `[[:space:]]` 被当成 `[[ ]]` | 直接 `grep '\[\['` 会命中 POSIX 字符类，那是完全合法的 POSIX 语法 → CI 永远红 | `build-openwrt.yml:1103-1112`（判据改成「`[[` 后紧跟空白」）；`dnschain.sh` 里确实有 `sed -e 's/^[[:space:]]*//'` |
+| 7 | `[[:space:]]` 被当成 `[[ ]]` | 直接 `grep '\[\['` 会命中 POSIX 字符类，那是完全合法的 POSIX 语法 → CI 永远红 | `build-openwrt.yml:791-800`（判据改成「`[[` 后紧跟空白」）；`dnschain.sh` 里确实有 `sed -e 's/^[[:space:]]*//'` |
 | 8 | Lua 里 `[^—]` 按字节排除 | Lua 字符类按**字节**工作，`—`(U+2014) 是 `E2 80 94`，`[^—]` 实际排除这三个字节 → 凡名称含 `一`(E4 B8 **80**)、`上`、`下` 等第三字节为 0x80 的汉字，匹配直接失败。实测 20 项里 **7 项**解析失败、另有 10 项 name 尾随空格 | `dnschain.lua:482-496`（改用 `find(..., true)` 字节精确匹配） |
 | 9 | 用 `grep -c 'dnsmasq restart'` 断言「应为 0」 | 会命中 `echolog "restart: skip dnsmasq restart in stop()"` 这条**日志文本**，永久误报。正确判据是排除 `echolog` 行后统计真实调用 | AGENTS.md §4.4；文本来源 `99-gaming-optimize:501` |
 | 10 | `nc -z` 判代理节点可用性 | Cloudflare 前置节点对裸 TCP 不响应，但 TLS 握手正常 → 误判「节点挂了」。判据应看 `netstat -antp` 是否有 ESTABLISHED，或直接测经代理的解析结果 | AGENTS.md §4.4 |
-| 11 | 把 `sh` 换成 `bash` 自测 | CI 的 `/bin/sh` 是 dash，bash 专有语法（进程替换、`[[ ]]`、数组）在 dash 里是**解析期**错误，脚本一行未执行即 exit 2 | `build-openwrt.yml:520-536`；本地用 WSL 的 `/bin/sh`（dash）验证（§1.0） |
+| 11 | 把 `sh` 换成 `bash` 自测 | CI 的 `/bin/sh` 是 dash，bash 专有语法（进程替换、`[[ ]]`、数组）在 dash 里是**解析期**错误，脚本一行未执行即 exit 2 | `build-openwrt.yml:505-521`；本地用 WSL 的 `/bin/sh`（dash）验证（§1.0） |
 | 12 | 用 `stat -c %Y` 取文件 mtime | BusyBox **没有 `stat`**，`age` 恒为空 → 缓存永不命中。要用 `date -r <file> +%s` | `dnschain-selftest:603-607`；`verify-dnschain-domains.sh:347` 有反向断言 |
 | 13 | 用 `pidof dnsmasq` 第一个 PID 发 SIGHUP | 第一个是 ujail 辅助子进程，SIGHUP 是空操作 | `dnschain.sh:428-453`；`dnschain-health:298-308` |
 | 14 | 在仓库根跑 CI 那段校验就当通过 | 那段校验的 `working-directory` 是 `lede`，仓库根跑会误报 | `tools/verify-dnschain-ci-sim.sh:7-12`；要跑 `verify-dnschain-ci-sim.sh` |
@@ -268,14 +248,12 @@ done
 ```sh
 sh tools/verify-dnschain-domains.sh          # 期望 129 OK / 0 FAIL
 sh tools/verify-dnschain-ci-sim.sh           # 期望「CI 模拟校验通过」
-sh tools/verify-trafficctl-invariants.sh     # 需要网络（克隆上游 tag）
 PYTHONIOENCODING=utf-8 python tools/check-dnschain-lua.py        # 期望 PASS=121 FAIL=0
 PYTHONIOENCODING=utf-8 python tools/render-dnschain-diagrams.py  # 期望 PASS=44 FAIL=0
 PYTHONIOENCODING=utf-8 python tools/extract-dnschain-i18n.py     # 期望「无缺失」
-PYTHONIOENCODING=utf-8 python tools/check-trafficctl-i18n.py     # 期望「中文翻译完整」
 ```
 
-改了 `.sh` 还要单独过一遍 dash 解析：`sh -n <脚本>`（CI 也是这么做的，`build-openwrt.yml:1070`）。
+改了 `.sh` 还要单独过一遍 dash 解析：`sh -n <脚本>`（CI 也是这么做的，`build-openwrt.yml:758`）。
 
 ### 6.2 路由器端：自检 20 项
 
@@ -349,6 +327,5 @@ PYTHONIOENCODING=utf-8 python tools/check-trafficctl-i18n.py     # 期望「中�
 以下项目在仓库内没有对应的自动化手段，只能人工判断，故不写成「验证步骤」：
 
 - 客户端真实浏览器访问国外站点的结果（Cloudflare 机器人挑战会让 `curl` 得到 `403 Cf-Mitigated: challenge`，那是反爬不是网络故障）。
-- 上行带宽实测（本机无可用上传端点，trafficctl 的上行速率列只能靠 conntrack 字节差，冷启动首帧显示 `—`）。
 - NAT1（fullcone）与软件 flow offloading 的交互（上游未文档化该组合）。
 - 固件解包后的完整清单核对需要先有产物（`tools/verify-firmware-artifact.sh` 的输入），仓库内无法生成。

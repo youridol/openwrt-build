@@ -17,7 +17,7 @@ LUCI_TITLE:=LuCI support for DNS Chain framework
 # 注意: 不依赖 dnschain 包 —— 本框架的 init/config/脚本全部由
 # files/ overlay 提供（不是 opkg 包），故没有可依赖的包名。
 # 若写成 +dnschain，kconfig 会因符号不存在把整包判为不可选
-# （参考 trafficctl 的 +hostapd-utils 事故，AGENTS §3）。
+# （符号不存在时 kconfig 会把整包判为不可选，见 AGENTS §3）。
 LUCI_DEPENDS:=+luci-base
 LUCI_PKGARCH:=all
 

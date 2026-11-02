@@ -3,6 +3,111 @@
 本仓库所有功能/配置改动均记录于此。版本判型遵循全局规范（PATCH / MINOR / MAJOR）。
 
 
+## [v0.25.0] - 2026-11-02
+
+### 移除 — `luci-app-trafficctl` 整包及其构建/文档联动
+
+用户要求：「移除 luci-app-trafficctl 相关的所有代码」。本次**整包删除**，不留禁用开关、
+不留死配置、不留「以后可能用得上」的注释掉的代码。
+
+#### ① 删除的文件（56 个）
+
+| 类别 | 路径 | 数量 |
+|---|---|---|
+| 本地包（vendored 上游 v1.21.4） | `package/luci-app-trafficctl/` | 43 |
+| patch 与维护文档 | `patches/luci-app-trafficctl/`（含 `README.md`、`UPSTREAM`、6 个 patch） | 8 |
+| 包文档 | `docs/packages/luci-app-trafficctl.md` | 1 |
+| 工具脚本 | `tools/verify-trafficctl-invariants.sh`、`tools/regen-trafficctl-patches.py`、`tools/sync-trafficctl.sh`、`tools/check-trafficctl-i18n.py` | 4 |
+
+#### ② CI 改动（`.github/workflows/`）
+
+| 位置 | 改动 |
+|---|---|
+| `build-openwrt.yml:1` | 工作流名 `Build OpenWrt with SSR-Plus and Trafficctl` → `… and DNS Chain` |
+| `build-openwrt.yml` | 删 `Add luci-app-trafficctl` 复制步骤（原 `:167-170`） |
+| `build-openwrt.yml` | 删 `Verify invariants script is POSIX sh (dash) compatible`（原 `:596-612`）与 `Verify luci-app-trafficctl local invariants`（原 `:614-632`）两步 |
+| `build-openwrt.yml` | 删 `.config` 校验里的 trafficctl 段（原 `:744-803`）：`iw`/`conntrack` 断言、`hostapd-utils` 反向断言、`luci-app-trafficctl` + i18n 符号断言及其诊断输出 |
+| `cache-deps.yml` | 删两个 job 里各一条 `cp -r ../openwrt-build/package/luci-app-trafficctl package/` |
+| `tools/gen-openwrt-config.sh` | 删 `luci-app-trafficctl` + `luci-i18n-trafficctl-zh-cn` 两个 CONFIG 写入；删 `iw`/`conntrack` 依赖段 |
+
+**`iw` 与 `conntrack` 一并移出 `.config`**：它们在仓库里唯一的消费者就是 trafficctl
+（trafficctl 用 `iw` 读 WiFi 频段/信号、用 `conntrack` 做未卸载模式的每设备字节统计）。
+`files/` overlay 里没有任何地方调用这两个命令 —— `grep -rn 'conntrack' files/` 命中的
+全是 `sysctl.conf` 的 `nf_conntrack_*` 内核参数与注释，不是这个二进制。
+保留它们会变成「没有任何消费者的依赖」，属死配置。
+
+#### ③ 文档联动
+
+| 文档 | 改动 |
+|---|---|
+| `AGENTS.md` | §1 仓库地图删 4 行 trafficctl 条目；**整条删除红线 9**（vendored 包维护规则，21 行）；§3 删「trafficctl 1.21.4 的额外依赖」整段；§7 删 trafficctl 分支；§9 删上行吞吐风险条；归档表该行改注「整包已移除」 |
+| `docs/README.md` | §1 概览「两个本地 LuCI 包」→「本地 LuCI 包」；删文档清单与「按任务找文档」里的 trafficctl 行 |
+| `docs/routes.md` | 删 §1.2 整张 trafficctl 路由表（5 条路由）；§2 删 `host` 通配节点实测；§3 硬约束 3 条 → 2 条；§4 ACL 文件 3 个 → 2 个；§5 已知缺口 7 条 → 3 条 |
+| `docs/build/ci.md` | §4 步骤表删 3 步并重新编号（35 → 32）；§4.1 CONFIG 表删 trafficctl 两行与依赖两行；删 §4.3（`iw`/`conntrack` 为什么必须显式写）；§5.2 断言表删 3 行；§7.4 删 trafficctl 相关条目 |
+| `docs/operations/verification.md` | 删 §1.5（`check-trafficctl-i18n.py`）与 §1.7（`verify-trafficctl-invariants.sh`）；脚本定位对比表 8 个 → 6 个；§6.1 回归命令删 2 条；§7 删上行带宽实测条 |
+| `docs/runtime/overlay-inventory.md` | 构建时序第 3 步由「复制两个本地包」改为「复制 `luci-app-dnschain`」 |
+| `GLOSSARY.md` | 「vendored 包」词条改为「本仓库当前没有 vendored 包」并注明历史；删「luci-app-trafficctl」词条 |
+| `docs/packages/luci-app-dnsproxy.md` | 「`package/` 下只有两个本地包」→「只有一个」 |
+| `docs/packages/luci-app-dnschain.md` | `+dnschain` 的注释说明不再引用 trafficctl 事故，改为直述 kconfig 判定 |
+| `package/luci-app-dnschain/Makefile` | 同上，注释改为不依赖 trafficctl |
+| `docs/adr/0003-dns-chain-framework.md` | §16 决策 3 补注「trafficctl 已于 v0.25.0 移除，本决定不受影响」 |
+| `docs/adr/0004-dns-chain-verification.md` | `.lmo` 对照表删 trafficctl 行 |
+| `docs/audit/2026-10-09-network-audit.md` | §0 现状对照表新增「工程-16 整包已移除」行（正文一次性快照按原样保留） |
+
+#### ④ 行号引用同步（重要）
+
+删掉 `build-openwrt.yml` 里 104 行后，所有文档中 `build-openwrt.yml:NNN` 形式的
+**证据行号全部失效**。本次按 `difflib` 逐行对齐做了**机器化重映射**（不是手工估算），
+共 **168 处**行号引用值发生变化：
+
+| 文档 | 改动处数 |
+|---|---|
+| `docs/build/ci.md` | 58（含裸 `:NNN` 与带文件名两种写法；§4 步骤表整体重写） |
+| `docs/packages/luci-app-dnschain.md` | 21 |
+| `docs/packages/luci-app-dnsproxy.md` | 19 |
+| `docs/operations/verification.md` | 17 |
+| `docs/runtime/overlay-inventory.md` | 15 |
+| `docs/adr/0003-dns-chain-framework.md` | 10 |
+| `docs/routes.md` | 10 |
+| `docs/runtime/dns-chain.md` | 6 |
+| `docs/adr/0005-remove-chinadns-ng.md` | 5 |
+| `docs/adr/0004-dns-chain-verification.md` | 4 |
+| `GLOSSARY.md` | 2 |
+| `docs/adr/0001-filter-aaaa-semantics.md` | 1 |
+
+`tools/gen-openwrt-config.sh` 的行号引用（`docs/build/ci.md` §4.1 表格）同样按该文件
+自己的 diff 重算。改完做了两道机器化自查：
+① 所有文档里 `build-openwrt.yml:NNN` / `gen-openwrt-config.sh:NNN` 的 N 都落在
+**新文件的实际行数范围内**（越界数 = 0）；
+② 逐条回读目标行内容确认指向正确 —— 例如 §4 的 32 个步骤起始行现在**逐一**命中
+`- name: <对应步骤名>`，而不是命中原先那种「差 5 行」的相邻位置。
+
+#### ⑤ 验证
+
+| 检查 | 命令 | 结果 |
+|---|---|---|
+| YAML 解析 | `yaml.safe_load` 三个 workflow | 全部通过 |
+| 工作流 `run:` 块 dash 解析 | `python3 tools/verify-workflow-scripts.py --dash <dash>` | 54 个 run 块，语法错误 **0** |
+| 保留脚本 dash 解析 | `dash -n tools/*.sh` | 11 个脚本全部通过 |
+| 域名分流契约 | `sh tools/verify-dnschain-domains.sh` | **204 OK / 0 FAIL**，末行「域名分流与改道契约校验通过。」 |
+| 思维导图几何 | `python3 tools/render-dnschain-diagrams.py --check` | **PASS=88 FAIL=0** |
+| 中文文案完整性 | `python3 tools/extract-dnschain-i18n.py` | 无缺失（509 条） |
+| CI 目录场景 | `sh tools/verify-dnschain-ci-sim.sh` | 「CI 模拟校验通过」 |
+| 行尾 | 逐文件 `grep -U $'\r'` | 全部 LF |
+| 空白 | `git diff --check` | 无错误 |
+
+⚠️ **`tools/check-dnschain-lua.py` 本次结果是 `PASS=120 FAIL=2`，与本改动无关**：
+失败的 `渲染 _domains_list`、`渲染 _learn_domains` 两项在**改动前的 `master`
+（`5d3d2a9`）上跑出完全相同的结果**（已用 `git stash` 对照验证）。这是既有缺陷，
+本次未触碰 dnschain 的 Lua 代码，故不在本版本修复范围内。
+
+全仓 `git grep -i trafficctl` 的剩余命中**全部是有意保留的历史记录**：
+`CHANGELOG.md` / `CHANGELOG-archive.md` 的历史版本段（记录当时发生了什么，不改写）、
+`AGENTS.md` 归档表（标注「已移除，仅存档」）、`GLOSSARY.md`「vendored 包」词条
+（说明该词条现在没有实例）、`docs/adr/0003` §16（决策补注）、
+`docs/audit/2026-10-09-network-audit.md`（一次性实测快照 + §0 现状对照表）。
+可执行代码、构建配方、工具脚本、路由表、包文档中**零残留**。
+
 ## [v0.24.0] - 2026-10-26
 
 ### 新增 — DNS 分流自动补全（域名 + IP 段两层）

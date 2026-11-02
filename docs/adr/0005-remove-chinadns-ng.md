@@ -60,7 +60,7 @@ trust=$(dc_get_list foreign server | awk 'NR>1{printf ","} {printf "%s", $0}')
 实测 5 种输入（单条 / 两条 / 三条 / 空 / 含空格）与 `paste -sd, -` **完全等价**。
 
 > 该修复随 v0.10.0 一起落地；`dc_gen_filter_args` 本身在后续重构中被删除
-> （CI 反向断言，`.github/workflows/build-openwrt.yml:1147-1158`）。
+> （CI 反向断言，`.github/workflows/build-openwrt.yml:939-950`）。
 
 ---
 
@@ -323,7 +323,7 @@ FAIL xn--4vq475g.com
 改为不过滤后恢复（分流规则从 17767 条增至 17813 条）。
 
 代码依据：`files/usr/share/dnschain/dnschain.sh:299-308`；
-CI 反向断言禁止再过滤（`.github/workflows/build-openwrt.yml:1186-1197`）。
+CI 反向断言禁止再过滤（`.github/workflows/build-openwrt.yml:978-989`）。
 
 > 上述「17767 → 17813」是某时点实测快照，不是常量。
 
@@ -467,7 +467,7 @@ CONCLUSION: 链路正常
 
 | 残留 | 位置 | 与什么矛盾 |
 |---|---|---|
-| `CONFIG_PACKAGE_chinadns-ng=y` | `.github/workflows/build-openwrt.yml:687` | 同文件 `:864-867` 明确写「v0.10.0：不再要求 `CONFIG_PACKAGE_chinadns-ng`」 |
+| `CONFIG_PACKAGE_chinadns-ng=y` | `.github/workflows/build-openwrt.yml:601` | 同文件 `:760-763` 明确写「v0.10.0：不再要求 `CONFIG_PACKAGE_chinadns-ng`」 |
 | `files/etc/capabilities/dnschain-filter.json` | 该文件本身 | **无消费者**。`-A` 参数（当年需要 `CAP_NET_ADMIN`）已随 chinadns-ng 消失；两个 procd 实例都不引用它（`files/etc/init.d/dnschain:274-317`），唯一引用 `/etc/capabilities/` 的是 `files/etc/init.d/dnsproxy:319`（用 `dnsproxy.json`） |
 
 `CONFIG_PACKAGE_chinadns-ng=y` 的实际影响：SSR-Plus 的 `INCLUDE_ChinaDNS_NG`
@@ -479,7 +479,7 @@ CONCLUSION: 链路正常
 
 | 断言 | 行号 |
 |---|---|
-| 库脚本不得定义 `dc_gen_filter_args` | `.github/workflows/build-openwrt.yml:1153-1158` |
+| 库脚本不得定义 `dc_gen_filter_args` | `.github/workflows/build-openwrt.yml:945-950` |
 | 必须有 `dc_gen_foreign_args` | `:1160-1166` |
 | 不得生成 `[/域名/]` 形式 | `:1168-1176` |
 | 不得写入 `114.114.114.114` | `:1178-1184` |

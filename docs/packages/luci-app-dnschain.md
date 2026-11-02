@@ -562,7 +562,7 @@ flowchart TB
 
 - 同页多图不再有 SVG id 冲突风险（根因是 marker id 是文档级全局的）。
 - 但「同页多图」这个前提仍在，故保留 `id_prefix` 参数，改落在无副作用的 `data-dc-figure="<prefix>"` 上（`diagrams.lua:91-94`），供前端与测试区分。
-- 断言全部改为**反向条件**：不得出现 `<marker` 与 `marker-end`。见 `tools/render-dnschain-diagrams.py:176`（`check_no_arrows`）、`tools/verify-dnschain-domains.sh:645-660`、`build-openwrt.yml:414-447`。
+- 断言全部改为**反向条件**：不得出现 `<marker` 与 `marker-end`。见 `tools/render-dnschain-diagrams.py:176`（`check_no_arrows`）、`tools/verify-dnschain-domains.sh:645-660`、`build-openwrt.yml:404-437`。
 
 ⚠️ CI 与 shell 断言必须先剥掉 Lua 注释行（`grep -v '^[[:space:]]*--'`）再判断 —— 注释里写了「v0.15.0 移除了 marker-end」这类说明文字，不剥注释会让断言永久误报。
 
@@ -785,31 +785,31 @@ ACL 组名 `luci-app-dnschain`，文件 `package/luci-app-dnschain/root/usr/shar
 | `LUCI_PKGARCH` | `all` | `Makefile:22` |
 | 构建入口 | `include $(TOPDIR)/feeds/luci/luci.mk` | `Makefile:40` |
 
-不写 `+dnschain` 的理由值得单独记：运行时组件全部由 `files/` overlay 提供，**没有叫 `dnschain` 的包**。若写成 `+dnschain`，kconfig 会因符号不存在把整包判为不可选 —— 注释直接指向了 trafficctl 的 `+hostapd-utils` 事故（`Makefile:17-20`，对应 `AGENTS.md` §3）。
+不写 `+dnschain` 的理由值得单独记：运行时组件全部由 `files/` overlay 提供，**没有叫 `dnschain` 的包**。若写成 `+dnschain`，kconfig 会因符号不存在把整包判为不可选 —— 注释里记录的理由是：符号不存在时 kconfig 会把整包判为不可选（`Makefile:17-20`，对应 `AGENTS.md` §3）。
 
 ### 7.2 CI 如何取包
 
 | 步骤 | 做什么 | 证据 |
 |---|---|---|
 | `Add luci-app-dnschain (本地包…)` | 先断言 `../openwrt-build/package/luci-app-dnschain` 存在，再 `cp -r` 进 `lede/package/` | `.github/workflows/build-openwrt.yml:166-179` |
-| 关键文件断言 | 逐个检查 10 个文件在不在（`Makefile`、controller、三个 model、CSS、JS、menu.d、acl.d、PO） | `build-openwrt.yml:182-198` |
-| 运行时组件断言 | 检查 `files/usr/bin/dnschain-health`、`files/usr/share/dnschain/dnschain.sh` 存在 | `build-openwrt.yml:207-215` |
-| 执行位断言 | 检查 `files/usr/bin/dnschain-health` 有 `-x`，缺了明确失败 | `build-openwrt.yml:219-226` |
-| CSS 契约 | 必须有 `html[data-darkmode="true"]` 块；`--dc-ok/--dc-warn/--dc-bad/--dc-info` 各定义 ≥2 次 | `build-openwrt.yml:238-253` |
-| 空文件断言 | CSS/JS 必须 > 500 字节 | `build-openwrt.yml:255-263` |
-| tabmenu 收拢 | CSS 必须有 `.cbi-tabmenu:not(:has(`，JS 必须有 `dropEmptyTabmenu` | `build-openwrt.yml:274-286` |
-| 版式断言 | 不得写死 `.dc-chain svg` 的 `max-width`；必须有 `dc-table-wrap` 与 `min-width`；五类块内容必须进 `:has()` 竖排规则；`dc-block-row` 在 CSS 与 JS 都有 | `build-openwrt.yml:306-361` |
-| 表格容器计数 | `dc-table-wrap"><table class="dc-table` 与 `</tbody></table></div>` 数量必须相等且 ≥3 | `build-openwrt.yml:369-377` |
-| 链路图几何 | 从 `general.lua` 抽 `W/H`、`X4`、`NW`、`GAP`，断言 `W > X4 + NW + GAP + NW` | `build-openwrt.yml:379-397` |
-| 链路图形制 | 必须有贝塞尔 `C` 指令、`local cap = math.floor((x2 - x1) / 2)`、节点 `fill="var(--dc-surface)"`；**不得有 `<marker>` 或 `marker-end`**（v0.15.0 移除箭头）、必须有 `data-dc-figure` | `build-openwrt.yml:399-447` |
-| 域名契约 | 调 `sh ../openwrt-build/tools/verify-dnschain-domains.sh`，失败即 `exit 1` | `build-openwrt.yml:437-454` |
-| 配置符号 | `CONFIG_PACKAGE_luci-app-dnschain=y` 与 `CONFIG_PACKAGE_luci-i18n-dnschain-zh-cn=y` 必须进 `.config` | `build-openwrt.yml:678-682`、`:857-884` |
+| 关键文件断言 | 逐个检查 10 个文件在不在（`Makefile`、controller、三个 model、CSS、JS、menu.d、acl.d、PO） | `build-openwrt.yml:172-188` |
+| 运行时组件断言 | 检查 `files/usr/bin/dnschain-health`、`files/usr/share/dnschain/dnschain.sh` 存在 | `build-openwrt.yml:197-205` |
+| 执行位断言 | 检查 `files/usr/bin/dnschain-health` 有 `-x`，缺了明确失败 | `build-openwrt.yml:209-216` |
+| CSS 契约 | 必须有 `html[data-darkmode="true"]` 块；`--dc-ok/--dc-warn/--dc-bad/--dc-info` 各定义 ≥2 次 | `build-openwrt.yml:228-243` |
+| 空文件断言 | CSS/JS 必须 > 500 字节 | `build-openwrt.yml:245-253` |
+| tabmenu 收拢 | CSS 必须有 `.cbi-tabmenu:not(:has(`，JS 必须有 `dropEmptyTabmenu` | `build-openwrt.yml:264-276` |
+| 版式断言 | 不得写死 `.dc-chain svg` 的 `max-width`；必须有 `dc-table-wrap` 与 `min-width`；五类块内容必须进 `:has()` 竖排规则；`dc-block-row` 在 CSS 与 JS 都有 | `build-openwrt.yml:296-351` |
+| 表格容器计数 | `dc-table-wrap"><table class="dc-table` 与 `</tbody></table></div>` 数量必须相等且 ≥3 | `build-openwrt.yml:359-367` |
+| 链路图几何 | 从 `general.lua` 抽 `W/H`、`X4`、`NW`、`GAP`，断言 `W > X4 + NW + GAP + NW` | `build-openwrt.yml:369-387` |
+| 链路图形制 | 必须有贝塞尔 `C` 指令、`local cap = math.floor((x2 - x1) / 2)`、节点 `fill="var(--dc-surface)"`；**不得有 `<marker>` 或 `marker-end`**（v0.15.0 移除箭头）、必须有 `data-dc-figure` | `build-openwrt.yml:389-437` |
+| 域名契约 | 调 `sh ../openwrt-build/tools/verify-dnschain-domains.sh`，失败即 `exit 1` | `build-openwrt.yml:427-444` |
+| 配置符号 | `CONFIG_PACKAGE_luci-app-dnschain=y` 与 `CONFIG_PACKAGE_luci-i18n-dnschain-zh-cn=y` 必须进 `.config` | `build-openwrt.yml:592-596`、`:753-780` |
 
-注意 `.config` 里仍有一条 `CONFIG_PACKAGE_chinadns-ng=y`（`build-openwrt.yml:687`），而同文件 `:864-867` 又写明「v0.10.0：不再要求 `CONFIG_PACKAGE_chinadns-ng`，故不作为硬断言」。这两处描述互相矛盾，见 §8 第 8 条。
+注意 `.config` 里仍有一条 `CONFIG_PACKAGE_chinadns-ng=y`（`build-openwrt.yml:601`），而同文件 `:760-763` 又写明「v0.10.0：不再要求 `CONFIG_PACKAGE_chinadns-ng`，故不作为硬断言」。这两处描述互相矛盾，见 §8 第 8 条。
 
 ### 7.3 执行位与行尾
 
-`files/` overlay 的执行位由 CI 的 `chmod +x` 清单保证（`build-openwrt.yml:984-992` 共 5 条 `if [ -f … ]; then chmod +x`），**不使用 `|| true`** —— 文件缺失必须让 CI 明确失败（注释 `:985`）。
+`files/` overlay 的执行位由 CI 的 `chmod +x` 清单保证（`build-openwrt.yml:776-784` 共 5 条 `if [ -f … ]; then chmod +x`），**不使用 `|| true`** —— 文件缺失必须让 CI 明确失败（注释 `:777`）。
 
 无扩展名脚本的行尾由 `.gitattributes` 强制 LF：
 
@@ -826,7 +826,7 @@ ACL 组名 `luci-app-dnschain`，文件 `package/luci-app-dnschain/root/usr/shar
 
 ### 7.4 中文语言包
 
-`luci.mk` 由 `LUCI_BASENAME=dnschain` 推导出语言包符号 `luci-i18n-dnschain-zh-cn`（CI 注释 `build-openwrt.yml:679-680`、`:861-862`）。PO 共 475 组 msgid/msgstr，其中 4 组 msgstr 为空（文件头与多行续行）。v0.15.0 新增 8 条（「概览与诊断」「实时诊断链路」+ 6 个链路阶段名），由 `python tools/extract-dnschain-i18n.py --write` 追加。图示模块的文案也在提取范围内（`tools/extract-dnschain-i18n.py:19-27`），漏掉它会让「域名」tab 的 SVG 内文字中英混排。
+`luci.mk` 由 `LUCI_BASENAME=dnschain` 推导出语言包符号 `luci-i18n-dnschain-zh-cn`（CI 注释 `build-openwrt.yml:593-594`、`:757-758`）。PO 共 475 组 msgid/msgstr，其中 4 组 msgstr 为空（文件头与多行续行）。v0.15.0 新增 8 条（「概览与诊断」「实时诊断链路」+ 6 个链路阶段名），由 `python tools/extract-dnschain-i18n.py --write` 追加。图示模块的文案也在提取范围内（`tools/extract-dnschain-i18n.py:19-27`），漏掉它会让「域名」tab 的 SVG 内文字中英混排。
 
 ---
 
@@ -851,7 +851,7 @@ ACL 组名 `luci-app-dnschain`，文件 `package/luci-app-dnschain/root/usr/shar
 | 13 | `foreign_port` 与 `entry_port` 相同会让两个 dnsproxy 实例抢同一端口，`preflight` 会拒绝启动 | `init.d/dnschain:186-191`；页面对两个值都只做 `datatype=port`，**不做「不相等」的页面校验**（`general.lua:1591`、`:1599`） |
 | 14 | 自定义域名同时出现在国内与国外两个列表时，归属无法确定，脚本会判 `FAIL`，但页面**保存时不拦** | 脚本侧：`dnschain-health:156-172`（`grep -Fxf` 求交集）；页面侧 `validate_domain`（`general.lua:760-833`）只校验单个域名格式，不查跨列表冲突 |
 | 15 | 域名格式有两道闸，但**页面拒绝集合与脚本拒绝集合并不完全等价**（页面注释自认「不追求完全等价」） | 页面：`general.lua:756-759`；脚本：`dnschain.sh:649-693`。页面已补齐四条以缩小差距（`general.lua:796-825`） |
-| 16 | **`shadowsocksr.filter_aaaa` 有四个写入点，页面那个会被静默推翻。** 页面「抑制国外 AAAA」开关写 0/1（`general.lua:1542-1562`），但收敛器每轮强制写回 `0`（`files/usr/bin/dnschain-reconcile:97-98`），`uci-defaults` 也写 `0`（`files/etc/uci-defaults/99-zz-dnschain:76-80`）。只有 `files/etc/uci-defaults/99-gaming-optimize:796` 写 `1`，且它在排序上先执行（`99-gaming` < `99-zz-dnschain`，CI 断言见 `build-openwrt.yml:1207-1218`），因此是**死写入**。用户在页面选「开启 —— 抑制国外 AAAA」后，下一次收敛即被改回 0，页面读 `ds.ssr_filter_aaaa()` 又会显示「关闭」 | `general.lua:1542-1562` vs `dnschain-reconcile:97-98` vs `99-zz-dnschain:76-80` vs `99-gaming-optimize:796` |
+| 16 | **`shadowsocksr.filter_aaaa` 有四个写入点，页面那个会被静默推翻。** 页面「抑制国外 AAAA」开关写 0/1（`general.lua:1542-1562`），但收敛器每轮强制写回 `0`（`files/usr/bin/dnschain-reconcile:97-98`），`uci-defaults` 也写 `0`（`files/etc/uci-defaults/99-zz-dnschain:76-80`）。只有 `files/etc/uci-defaults/99-gaming-optimize:796` 写 `1`，且它在排序上先执行（`99-gaming` < `99-zz-dnschain`，CI 断言见 `build-openwrt.yml:999-1010`），因此是**死写入**。用户在页面选「开启 —— 抑制国外 AAAA」后，下一次收敛即被改回 0，页面读 `ds.ssr_filter_aaaa()` 又会显示「关闭」 | `general.lua:1542-1562` vs `dnschain-reconcile:97-98` vs `99-zz-dnschain:76-80` vs `99-gaming-optimize:796` |
 | 17 | 页面「双栈策略」的实际生效值提示只解释「`ipv6_support=1` 时被 SSR-Plus 覆盖」，**没有提到收敛器也会覆盖**，且覆盖方向相反（收敛器把用户偏好改成 0） | `general.lua:1518-1522`（提示文案）vs `dnschain-reconcile:97-98` |
 
 ### 8.1 页面对「链路不健康」的判定链
@@ -896,13 +896,13 @@ stateDiagram-v2
 
 | 命令 | 校验什么 | 断言条数 | 证据 |
 |---|---|---|---|
-| `sh tools/verify-dnschain-domains.sh` | 域名归属与自动改道的契约：section 名唯一性、两个 `DynamicList` 都挂 `validate`、归属优先级、改道判定、servers-file 位置、PID 选取、nftset 自愈位置、`grep -c \|\| echo 0` 反向断言、图示无箭头 + `data-dc-figure` 图身份、`<form>` 反向断言、日志 `syslog` 自愈、section 名与 config 名一致 | 129 条（脚本自身输出为准） | 脚本 `tools/verify-dnschain-domains.sh`；CI 调用点 `build-openwrt.yml:449` |
+| `sh tools/verify-dnschain-domains.sh` | 域名归属与自动改道的契约：section 名唯一性、两个 `DynamicList` 都挂 `validate`、归属优先级、改道判定、servers-file 位置、PID 选取、nftset 自愈位置、`grep -c \|\| echo 0` 反向断言、图示无箭头 + `data-dc-figure` 图身份、`<form>` 反向断言、日志 `syslog` 自愈、section 名与 config 名一致 | 129 条（脚本自身输出为准） | 脚本 `tools/verify-dnschain-domains.sh`；CI 调用点 `build-openwrt.yml:439` |
 | `python tools/check-dnschain-lua.py` | 用 lupa（真实 Lua 解释器）跑语法 + 模型单测 + **真实渲染每个 `cfgvalue()`** | 121 条 | 脚本 `tools/check-dnschain-lua.py:23-27` 列出被检文件；`AGENTS.md` §4.0 记录了为什么必须真渲染而不是 `luac -p` |
 | `python tools/render-dnschain-diagrams.py` | 两张导图的纯几何：越界、重叠、viewBox 容不下；并输出可打开的 HTML 预览 | 44 条 | 脚本 `tools/render-dnschain-diagrams.py:16-20`；`--check` 只检查不输出 |
 | `python tools/extract-dnschain-i18n.py` | 提取 `translate()` 文案并与 PO 比对，报缺失项 | 4 个 Lua 文件在扫描范围 | 脚本 `tools/extract-dnschain-i18n.py:19-28`；`--write` 追加缺失条目 |
 | `sh tools/verify-dnschain-ci-sim.sh` | 在临时目录复现 CI 的「`lede/` 与 `openwrt-build/` 同级」目录场景，避免本地在仓库根跑得到假结论 | — | 脚本 `tools/verify-dnschain-ci-sim.sh:1-40` |
 
-注意：只有 `verify-dnschain-domains.sh` 被 CI 直接调用（`build-openwrt.yml:449`）。`check-dnschain-lua.py`、`render-dnschain-diagrams.py`、`extract-dnschain-i18n.py`、`verify-dnschain-ci-sim.sh` 在 `build-openwrt.yml` 里**没有任何调用点**（全文件 grep 这 4 个名字均无命中），它们是纯本地校验工具。因此「CI 会跑」这句话只对第一个脚本成立。
+注意：只有 `verify-dnschain-domains.sh` 被 CI 直接调用（`build-openwrt.yml:439`）。`check-dnschain-lua.py`、`render-dnschain-diagrams.py`、`extract-dnschain-i18n.py`、`verify-dnschain-ci-sim.sh` 在 `build-openwrt.yml` 里**没有任何调用点**（全文件 grep 这 4 个名字均无命中），它们是纯本地校验工具。因此「CI 会跑」这句话只对第一个脚本成立。
 
 路由器上的只读取证（不属于 CI，但排查时按这个顺序）：
 

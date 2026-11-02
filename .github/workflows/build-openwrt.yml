@@ -1,4 +1,4 @@
-name: Build OpenWrt with SSR-Plus and Trafficctl
+name: Build OpenWrt with SSR-Plus and DNS Chain
 
 on:
   push:
@@ -163,11 +163,6 @@ jobs:
             echo "src-git helloworld https://github.com/fw876/helloworld" >> "$FEED_CONF"
           echo "--- feeds.conf helloworld 条目 ---"
           grep '^src-git helloworld' "$FEED_CONF"
-
-      - name: Add luci-app-trafficctl (本地包，含中文翻译)
-        working-directory: lede
-        run: |
-          cp -r ../openwrt-build/package/luci-app-trafficctl package/
 
       - name: Add luci-app-dnschain (本地包，DNS 链路控制页面)
         working-directory: lede
@@ -512,9 +507,9 @@ jobs:
 
           # ── v0.13.0：域名分流与自动改道的契约 ──────────────────────
           #
-          # 这一整块抽到 tools/verify-dnschain-domains.sh 里，理由同
-          # trafficctl 的 invariants 脚本：断言较多（88 条）、本地要能
-          # 直接复跑，内联在 YAML 里无法本地执行，只能靠 push 后看 CI 日志。
+          # 这一整块抽到 tools/verify-dnschain-domains.sh 里，理由：断言较多
+          # （88 条）、本地要能直接复跑，内联在 YAML 里无法本地执行，
+          # 只能靠 push 后看 CI 日志。
           #
           # 该步骤的 working-directory 是 lede，而脚本在仓库根，
           # 故用 ../openwrt-build 前缀。
@@ -592,44 +587,6 @@ jobs:
 
           # 记下 commit 供产物命名/溯源
           echo "THEME_SHA=$THEME_SHA" >> "$GITHUB_ENV"
-
-      - name: Verify invariants script is POSIX sh (dash) compatible
-        working-directory: openwrt-build
-        run: |
-          # 【必须排在「跑断言」之前】
-          # 该脚本的失败形态之一是**解析期**语法错误，报错只有一句
-          #   tools/verify-trafficctl-invariants.sh: 494: Syntax error: "(" unexpected
-          # 既没有 FAIL 行也没有断言上下文，极易被误判成「某条断言不通过」。
-          # 这里先用 `sh -n` 做纯解析检查，让同类问题在日志里有一句明确的
-          # 「用了 bash 专有语法」，而不是让人去猜第 494 行出了什么事。
-          if ! sh -n tools/verify-trafficctl-invariants.sh; then
-            echo "!!! tools/verify-trafficctl-invariants.sh 含 bash 专有语法，dash 无法解析。" >&2
-            echo "    CI 用 /bin/sh（dash）执行该脚本；进程替换 <(...)、[[ ]]、数组、" >&2
-            echo "    local/function 关键字都会在解析期直接 Syntax error，构建不会开始。" >&2
-            echo "    需要临时文件请写进脚本里的 \$TMPD（已在脚本头部建立）。" >&2
-            exit 1
-          fi
-          echo "OK   tools/verify-trafficctl-invariants.sh 可被 dash 解析"
-
-      - name: Verify luci-app-trafficctl local invariants (速度监控 / 中文翻译 / 刷新)
-        working-directory: openwrt-build
-        run: |
-          # 这一步的全部断言都在 tools/verify-trafficctl-invariants.sh 里。
-          #
-          # 为什么抽成脚本而不是写在 YAML 里：
-          #   1. 断言较多（含一段 python 用来按 git 索引修正文件模式），内联在
-          #      YAML 里容易因缩进/heredoc 出错，且无法在本地直接跑；
-          #   2. 抽出来后本地可 `sh tools/verify-trafficctl-invariants.sh` 复现，
-          #      CI 与本地用同一份逻辑，不会出现「本地过了 CI 挂」。
-          #
-          # 该脚本校验的核心是「四项本地改动仍在」+「patch 可复现 vendored 包」，
-          # 详见脚本头部注释与 AGENTS.md 红线 9。
-          #
-          # 【调用方式必须保持 `sh`】runner 的 /bin/sh 是 dash。用 bash 调用会让
-          # bash 专有语法（进程替换 `<(...)` 等）通过本地自测，却在 CI 解析期
-          # 直接 `Syntax error` → exit 2 → 编译根本不会开始。
-          # v0.8.4 的 tag 构建与 10-18/10-19 两次定时构建正是这样连续失败三天。
-          sh tools/verify-trafficctl-invariants.sh
 
       - name: Fetch luci-app-dnsproxy upstream and apply local patches (ALL_DOH)
         working-directory: lede
@@ -741,72 +698,11 @@ jobs:
             && echo "OK   CONFIG_PACKAGE_luci-app-sqm=y" \
             || echo "WARN luci-app-sqm 未启用（LuCI 里无 SQM 页面，但内核与脚本仍生效）"
 
-          echo "=== luci-app-trafficctl 的功能依赖 ==="
-          # 本仓库已在 Makefile 里去掉上游的 +hostapd-utils（理由见该文件注释：
-          # 它只在选中 hostapd/wpad 变体时存在，x86_64 无 WiFi → 不可满足 →
-          # 会导致 luci-app-trafficctl 与其 i18n 子包一起从 .config 消失）。
-          # 故这里只断言真正存在且必需的两项。
-          for sym in CONFIG_PACKAGE_iw CONFIG_PACKAGE_conntrack; do
-            if grep -q "^${sym}=y$" .config; then
-              echo "OK   ${sym}=y"
-            else
-              echo "FAIL ${sym} 未启用（trafficctl 相应功能会降级）："
-              grep -E "^#? ?${sym}(=| is not set)" .config || echo "  (符号不存在于 .config)"
-              exit 1
-            fi
-          done
-          # 反向断言：Makefile 里不得再出现 hostapd-utils 依赖。
-          # 它若被加回去，整包会被依赖求解丢弃（症状隐蔽：构建成功但界面变英文）。
-          if grep -q 'hostapd-utils' ../openwrt-build/package/luci-app-trafficctl/Makefile \
-               && grep -qE '^LUCI_DEPENDS:.*hostapd-utils' ../openwrt-build/package/luci-app-trafficctl/Makefile; then
-            echo "FAIL Makefile 的 LUCI_DEPENDS 又含 hostapd-utils"
-            echo "     该符号在 x86_64（无 WiFi）不可满足，会让整包与中文包一起消失。"
-            grep -nE '^LUCI_DEPENDS:' ../openwrt-build/package/luci-app-trafficctl/Makefile
-            exit 1
-          else
-            echo "OK   LUCI_DEPENDS 未含 hostapd-utils（x86_64 不可满足）"
-          fi
-
-          echo "=== trafficctl 本体与中文语言包都必须入配置 ==="
-          # 正确符号：luci-i18n-trafficctl-zh-cn
-          #   luci.mk 由目录名推导 LUCI_BASENAME=trafficctl，再生成
-          #   Package/luci-i18n-$(LUCI_BASENAME)-$(lang)。
-          # 历史错误写法 luci-i18n-luci-app-trafficctl-zh-cn 不匹配任何符号，
-          # 会被 confdata.c 静默忽略，导致中文包从未编入。
-          #
-          # 这里同时断言**本体**：中文语言包是 luci-app-trafficctl 的子包
-          # （DEPENDS:=$(PKG_NAME)），本体一旦被依赖求解丢弃，语言包必然
-          # 跟着消失。只查语言包会在根因上绕远路（v0.4.7/v0.4.8 的经历）。
-          tfail=0
-          for sym in CONFIG_PACKAGE_luci-app-trafficctl \
-                     CONFIG_PACKAGE_luci-i18n-trafficctl-zh-cn; do
-            if grep -q "^${sym}=y$" .config; then
-              echo "OK   ${sym}=y"
-            else
-              echo "FAIL ${sym} 未启用"
-              tfail=1
-            fi
-          done
-          if [ "$tfail" != "0" ]; then
-            # 诊断输出：kconfig 对未启用的 bool 写的是
-            #   # CONFIG_PACKAGE_x is not set
-            # 行尾**没有** '='，所以 `grep '…trafficctl.*='` 永远匹配不到，
-            # 会误报「无任何 trafficctl i18n 符号」。故这里直接列出全部相关行。
-            echo "--- .config 中与 trafficctl 有关的全部符号 ---"
-            grep -E "trafficctl" .config || echo "  (一条都没有 → 包被依赖求解整体丢弃)"
-            echo "--- 根因排查：hostapd/wpad 变体是否存在 ---"
-            grep -E "^#? ?CONFIG_PACKAGE_(hostapd|wpad|wpa-supplicant)[a-z0-9_-]*(=| is not set)" .config \
-              || echo "  (没有任何 hostapd/wpad 变体 → x86_64 无 WiFi)"
-            echo "  提示：若上面既无 luci-app-trafficctl 也无 luci-i18n-*，则根因是"
-            echo "        LUCI_DEPENDS 里含本目标不可满足的包（历史上是 hostapd-utils）。"
-            exit 1
-          fi
-
           echo "=== dnschain 本体与中文语言包都必须入配置 ==="
           # v0.9.0 首次构建的教训：只写了 package/luci-app-dnschain 却没在 CI 里
           # 复制+启用 → 固件里一个页面文件都没有，而构建**全绿**。
           # 只查「文件在仓库里」不够，必须查「符号进了 .config」。
-          # 符号推导同 trafficctl：LUCI_BASENAME=dnschain
+          # 符号推导（luci.mk 由目录名推导）：LUCI_BASENAME=dnschain
           #   → luci-i18n-dnschain-zh-cn
           #
           # v0.10.0：不再要求 CONFIG_PACKAGE_chinadns-ng。
