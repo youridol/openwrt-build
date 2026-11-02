@@ -16,10 +16,6 @@
 |---|---|---|
 | `.github/workflows/build-openwrt.yml` | 主编译流水线（拉 lede → 装包 → 编译 → 传产物） | 本项目自有 |
 | `.github/workflows/release.yml` | 推 `v*` tag 时建 Release，notes 自动取自 `CHANGELOG.md` | 本项目自有 |
-| `package/luci-app-trafficctl/` | **本地包**（源自 `YusDyr/luci-app-trafficctl` **v1.21.4**），整包 vendored 进仓库；改动以 `patches/luci-app-trafficctl/*.patch` 记录 | 直接改本仓库副本，改完跑 `tools/regen-trafficctl-patches.py` |
-| `patches/luci-app-trafficctl/*.patch` | trafficctl 相对上游的差分记录（**不参与构建**，供跟进上游 + CI 一致性校验） | 由 `tools/regen-trafficctl-patches.py` 生成，勿手改 |
-| `tools/sync-trafficctl.sh` | 升级 trafficctl 到指定上游 tag（覆盖包目录 + 重算 patch + 回放校验） | 直接用 |
-| `tools/check-trafficctl-i18n.py` | 校验中文翻译覆盖率；`--write-pot` 重生成 pot 模板 | 直接用 |
 | `tools/verify-dnschain-domains.sh` | 域名归属与分流规则的 204 条契约断言（CI 与本地同一份；§12 是性能不变量，§15 是自动补全） | 直接用 |
 | `tools/check-dnschain-lua.py` | 用 lupa（真实 Lua）跑语法 + 模型 + **真实渲染页面每个 `cfgvalue()`** | 直接用 |
 | `tools/render-dnschain-diagrams.py` | 两张思维导图的纯几何校验 + 输出可打开的 HTML 预览 | 直接用 |
@@ -54,8 +50,6 @@
 4. **执行位不可丢。** `files/etc/init.d/*`、`files/etc/uci-defaults/*`、`files/etc/hotplug.d/**`、
    `files/etc/rc.local` 均需 `+x`，CI 有显式 `chmod +x` 清单（`.github/workflows/build-openwrt.yml`）。
    新增此类文件后，请一并更新该清单。
-   （`package/luci-app-trafficctl/` 的脚本不在此清单内，它们靠 git 索引里的 100755 位生效；
-   CI 并未对它们 chmod。）
 
 5. **不要提交本机凭据。** `.gitignore` 已排除 `rsh.py` 等**本机排查工具**（内含路由器明文口令）、
    一次性排障报告、编译产物与密钥。**新增此类文件时请同步补充 `.gitignore` 规则**；
@@ -80,32 +74,10 @@
 8. **`/etc/nftables.d` 片段的建立必须用单事务 `nft -f`（原子）。**
    若用「先 `nft list set` 检查、再逐条 `nft add`」的写法，
    前端轮询（默认 2s）与手工调用并发时会**同时通过检查各建一套规则**，
-   导致规则重复 → 同一数据包被累加两次 → 速率翻倍
-   （实证：trafficctl 里 180 MB 下载被记成 380 MB）。
+   导致规则重复 → 同一数据包被累加两次 → 速率翻倍。
    正确做法是把 `delete table` + 重建写在**同一个 `nft -f` 文件**里，
    并在提交前先 `nft -c -f` 只校验。
 
-9. **`package/luci-app-trafficctl/` 是 vendored 副本，改它必须同步 patch。**
-   改完 `package/` 下任何文件后**必须**跑
-   `python3 tools/regen-trafficctl-patches.py <上游包目录>` 重算 patch，
-   否则 CI 的 `Verify luci-app-trafficctl local invariants` 会 `exit 1`。
-   升级上游用 `sh tools/sync-trafficctl.sh <tag>`。
-
-   **六项本地改动必须保留**（被覆盖会静默失效，界面不报错、构建也成功）：
-   ① `trafficctl-bytes-nft.sh` 重写（丢掉 → 速率列恒 `—`）；
-   ② `Makefile` 去掉 `+hostapd-utils`（丢掉 → 整包被 kconfig 丢弃、界面变英文）；
-   ③ `status.js`/`status.css`/`menu.d`/`config`/`rpcd` 的刷新与 tab 改动；
-   ④ `po/zh-cn/*.po`（丢掉 → 中文界面变英文）；
-   ⑤ `host.js` + `trafficctl-device.sh` 主机连接详情页；
-   ⑥ `settings.js` + `common.js` 设置独立 tab。
-
-   **每条的具体易错点、实测数据与断言位置见
-   [`patches/luci-app-trafficctl/README.md`](patches/luci-app-trafficctl/README.md)
-   的「本地改动清单」一节** —— 那是本条的完整版，改 trafficctl 前必读。
-
-   ⚠️ `package/luci-app-trafficctl/README.md` 是**上游原文**，其中有 5 处指向
-   上游仓库 `docs/API.md` 等文件的链接在本仓库不存在（上游包里不带这些文档）。
-   这**不是**本仓库的断链，**不要改它** —— 改了会让 patch 重放与上游不一致。
 ---
 
 ## 3. 构建链路关键点（改 CI 前必读）
@@ -122,19 +94,8 @@
   编译失败（libstdc++-12 ranges 不全），CI 装 gcc-13 并预生成 `.built` stamp。
 - patch 应用时必须**先转绝对路径**：在 `(cd package/... )` 子 shell 内相对路径会失效。
 - 启用的关键 CONFIG：`luci-app-ssr-plus`（含 Iptables 透明代理、Xray、ChinaDNS-NG、MosDNS 等）、
-  `luci-app-trafficctl` + `luci-i18n-...-zh-cn`、`dnsproxy` + `luci-app-dnsproxy` + CA 证书、
+  `luci-app-dnschain` + `luci-i18n-dnschain-zh-cn`、`dnsproxy` + `luci-app-dnsproxy` + CA 证书、
   `kmod-tcp-bbr`、`iptables-mod-fullconenat`。
-- **trafficctl 1.21.4 的额外依赖**：`iw`（读 WiFi 频段/信号）、`conntrack`
-  （未卸载模式下的每设备字节统计）—— 这两个 CI 显式 `=y` 并断言。
-  **`+hostapd-utils` 已从 Makefile 的 `LUCI_DEPENDS` 中移除**（本仓库补丁，见下）。
-  上游 1.21.4 把它写成依赖，但它在 lede 里声明为
-  `DEPENDS:=@<某个 hostapd/wpad 变体>` + `VARIANT:=*` —— **只有选中 hostapd/wpad
-  变体时该符号才存在**。x86_64 无 WiFi 硬件 → 永远不可满足 → kconfig 把
-  `luci-app-trafficctl` **整包**判为不可选，连带 `luci-i18n-trafficctl-zh-cn`
-  （`DEPENDS:=$(PKG_NAME)`）一起从 `.config` 消失。
-  **症状极其隐蔽**：构建不报错、界面变英文，只有 i18n 断言会挂
-  （v0.4.7/v0.4.8 两次构建均由此失败）。已加 CI 反向断言禁止它被加回去；
-  `tools/verify-trafficctl-invariants.sh` 也会检查。
 
 ---
 
@@ -692,8 +653,6 @@ MosDNS 的 `reject 0` 返回的是 `rcode=0` + `ancount=0`（合法答复：明�
 1. **先读** `CHANGELOG.md` 尾部与相关 `files/`、`patches/` 的注释——大量约束写在注释里。
 2. 判断改动归属：
    - dnsproxy 的 LuCI 改动 → 新增 `patches/luci-app-dnsproxy/000N-*.patch`（单一职责、递增编号）。
-   - trafficctl 的改动 → **直接改** `package/luci-app-trafficctl/`（vendored 整包），
-     改完**必须**跑 `python3 tools/regen-trafficctl-patches.py <上游包目录>`（见红线 9）。
    - 固件运行时配置 → 改 `files/` overlay；**首次开机默认值**改 `files/etc/uci-defaults/99-gaming-optimize`。
    - 编译流程/依赖 → 改 `.github/workflows/build-openwrt.yml`。
 3. 本地**无法**完整编译（需 lede 全量环境）；至少做静态检查：
@@ -748,9 +707,6 @@ MosDNS 的 `reject 0` 返回的是 `rcode=0` + `ancount=0`（合法答复：明�
   丢掉端口，二次启动叠成 `127.0.0.1#5353#5353`。当前 `apple_dns` 为空是
   **正确状态**，不要填。
 
-- **[风险] 上行吞吐无法测量**：本机无可用上传端点（公共镜像 PUT 返回 405），
-  trafficctl 的上行速率列只能靠 conntrack 字节差，冷启动首帧为 `—`。
-
 - **[风险] NAT1（fullcone）与软件 flow offloading 的交互无一手来源**：
   本机实测二者同时开启时 fullcone 仍生效，但上游未文档化该组合，升级后需复测。
 
@@ -769,7 +725,7 @@ MosDNS 的 `reject 0` 返回的是 `rcode=0` + `ancount=0`（合法答复：明�
 | `v0.3.5` 无 tag | 仅本地标签现状，不影响代码 |
 | mosdns 模板 `reject` 前置 | v0.4.0 |
 | `rps_flow_cnt` 清零点 | 确认为 `packet-steering.uc`；需非零时设 `network.globals.steering_flows` |
-| trafficctl vendored 维护 / patch 生成器 / 速率恒 `—` / 上游依赖拖累 / CI 守卫误判 / 伪 mode 变更 | v0.4.5~v0.4.9，见红线 9 与 `patches/luci-app-trafficctl/README.md` |
+| trafficctl vendored 维护 / patch 生成器 / 速率恒 `—` / 上游依赖拖累 / CI 守卫误判 / 伪 mode 变更 | v0.4.5~v0.4.9；**整个包已于 v0.25.0 移除**（见 `CHANGELOG.md`），本条仅存档 |
 | 所有 Release 曾经都是空的 | v0.4.12 |
 | CI 触发条件 | `on.push.paths-ignore` |
 

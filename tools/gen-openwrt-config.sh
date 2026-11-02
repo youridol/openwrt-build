@@ -77,21 +77,14 @@ echo "CONFIG_PACKAGE_luci-app-ssr-plus_INCLUDE_Shadowsocks_V2ray_Plugin=y" >> .c
 echo "CONFIG_PACKAGE_luci-app-ssr-plus_INCLUDE_ShadowsocksR_Libev_Client=y" >> .config
 echo "CONFIG_PACKAGE_luci-app-ssr-plus_INCLUDE_ShadowsocksR_Libev_Server=y" >> .config
 
-# 启用 trafficctl 及其中文语言包
-# i18n 包名由 luci.mk 推导，不是「luci-i18n-<PKG_NAME>-<lang>」：
-#   LUCI_NAME   = 目录名            = luci-app-trafficctl
-#   LUCI_TYPE   = 第 2 段           = app
-#   LUCI_BASENAME = patsubst luci-app-%,%,LUCI_NAME = trafficctl
-#   LuciTranslation 生成 Package/luci-i18n-$(LUCI_BASENAME)-zh-cn
-# 故正确符号为 luci-i18n-trafficctl-zh-cn。
-# 原写 luci-i18n-luci-app-trafficctl-zh-cn 从不匹配任何符号，
-# 被 confdata.c 静默忽略 → 中文包实际从未编入（本次修正）。
-echo "CONFIG_PACKAGE_luci-app-trafficctl=y" >> .config
-echo "CONFIG_PACKAGE_luci-i18n-trafficctl-zh-cn=y" >> .config
-
 # 启用 dnschain 控制页面及其中文语言包（v0.9.0）
-# 包名推导规则同 trafficctl：LUCI_BASENAME=dnschain
-#   → 语言包符号为 luci-i18n-dnschain-zh-cn
+# i18n 包名由 luci.mk 推导，不是「luci-i18n-<PKG_NAME>-<lang>」：
+#   LUCI_NAME     = 目录名            = luci-app-dnschain
+#   LUCI_BASENAME = patsubst luci-app-%,%,LUCI_NAME = dnschain
+#   LuciTranslation 生成 Package/luci-i18n-$(LUCI_BASENAME)-$(lang)
+# 故正确符号为 luci-i18n-dnschain-zh-cn。
+# 原写 luci-i18n-luci-app-dnschain-zh-cn 这类形式从不匹配任何符号，
+# 会被 confdata.c 静默忽略 → 中文包实际从未编入。
 echo "CONFIG_PACKAGE_luci-app-dnschain=y" >> .config
 echo "CONFIG_PACKAGE_luci-i18n-dnschain-zh-cn=y" >> .config
 
@@ -154,25 +147,6 @@ echo "CONFIG_PACKAGE_kmod-sched-cake=y" >> .config
 echo "CONFIG_PACKAGE_kmod-ifb=y" >> .config
 echo "CONFIG_PACKAGE_kmod-sched-core=y" >> .config
 echo "CONFIG_PACKAGE_tc-tiny=y" >> .config
-
-# === luci-app-trafficctl 的显式依赖 ===
-# 上游 1.21.4 的 LUCI_DEPENDS 为
-#   +conntrack +luci-base +rpcd +curl +tc +iw +hostapd-utils
-#
-# 本仓库已在 package/luci-app-trafficctl/Makefile 里**去掉
-# +hostapd-utils**（见该文件的注释）。原因：hostapd-utils 在 lede 中
-# 声明为 `DEPENDS:=@<某个 hostapd/wpad 变体>` + `VARIANT:=*`，
-# 而本目标是 x86_64 无 WiFi 硬件 → 该符号永远不可满足 →
-# 依赖求解把 luci-app-trafficctl **整包**判定为不可选，连带
-# luci-i18n-trafficctl-zh-cn（DEPENDS:=$(PKG_NAME)）一起从 .config
-# 消失。症状是构建不报错、界面变英文、i18n 断言失败。
-#
-# 这里仍然显式写出 iw 与 conntrack：它们真实存在且可用
-# （conntrack 实测 opkg 提供 1.4.7-1；iw 见 log 中的 OK 行），
-# 显式声明可避免「依赖靠自动解析、顺序一变就丢」。
-# hostapd-utils 不再写入 —— 本目标无 WiFi，且它已不是依赖项。
-echo "CONFIG_PACKAGE_iw=y" >> .config
-echo "CONFIG_PACKAGE_conntrack=y" >> .config
 
 # === 显式排除不用的文件服务 ===
 # 实测这两个服务对用户无用：vsftpd 监听 0.0.0.0:21 但无实际用途；

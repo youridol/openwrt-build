@@ -169,7 +169,6 @@ jobs:
             echo "src-git helloworld https://github.com/fw876/helloworld" >> "$FEED_CONF"
 
           # 本地包
-          cp -r ../openwrt-build/package/luci-app-trafficctl package/
           cp -r ../openwrt-build/package/luci-app-dnschain package/
 
           # luci-app-dnsproxy：上游 clone + 本地 patch（与主流程同一流程）
@@ -376,7 +375,6 @@ jobs:
           set -e
           grep -q '^src-git helloworld' "$FEED_CONF" 2>/dev/null || \
             echo "src-git helloworld https://github.com/fw876/helloworld" >> "$FEED_CONF"
-          cp -r ../openwrt-build/package/luci-app-trafficctl package/
           cp -r ../openwrt-build/package/luci-app-dnschain package/
           ./scripts/feeds update -a
           ./scripts/feeds install -a

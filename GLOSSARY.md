@@ -162,11 +162,10 @@ _Avoid_: 状态库、探测结果
 
 **vendored 包**：
 整包复制进本仓库的上游 LuCI 应用，改动以 patch 形式记录。
-目前只有 `package/luci-app-trafficctl/`（源自上游 **v1.21.4**）。
-改它之后**必须**跑 `python3 tools/regen-trafficctl-patches.py <上游包目录>` 重算 patch。
-_落点_：`package/luci-app-trafficctl/Makefile:4`（`PKG_VERSION:=1.21.4`）、
-`patches/luci-app-trafficctl/UPSTREAM`（`v1.21.4`）、
-`tools/regen-trafficctl-patches.py:2-10`
+**本仓库当前没有 vendored 包** —— 历史上唯一的实例 `package/luci-app-trafficctl/`
+（上游 v1.21.4）已于 v0.25.0 整体移除；`package/` 下现在只有自有的
+`luci-app-dnschain/`（不是 vendored，没有上游可比对，故没有 patch 记录）。
+_落点_：`package/` 目录清单；移除记录见 `CHANGELOG.md` v0.25.0。
 _反例_：`luci-app-dnsproxy` 不是 vendored —— 它由 feed 提供，改动只以
 `patches/luci-app-dnsproxy/*.patch` 落地，禁止改上游。
 _Avoid_: 本地包、内嵌包
@@ -175,7 +174,7 @@ _Avoid_: 本地包、内嵌包
 CI 每次构建都全新克隆上游，然后依次 `git apply` 本仓库的 patch。
 因为每次都是干净克隆，所以**天然幂等**；patch 失败必须让 CI 明确失败，
 严禁 `|| true`。
-_落点_：`.github/workflows/build-openwrt.yml:564-586`
+_落点_：`.github/workflows/build-openwrt.yml:549-571`
 （先 `git apply --check`，再 `git apply`；patch 路径先转绝对路径）
 _反例_：不是「打一次就永久生效」—— 本地改上游副本不会被 CI 采用。
 _Avoid_: 打补丁、应用差异
@@ -186,7 +185,7 @@ _Avoid_: 打补丁、应用差异
 排序是硬契约：`99-zz-dnschain` 必须晚于 `99-gaming-optimize`，否则无法覆盖
 后者写入的 `pdnsd_enable=4`。
 _落点_：`files/etc/uci-defaults/99-zz-dnschain:7-9`、
-CI 断言 `.github/workflows/build-openwrt.yml:1207-1218`
+CI 断言 `.github/workflows/build-openwrt.yml:895-906`
 _反例_：不是「每次开机都跑」—— 只在**首刷**跑一次，之后靠收敛器纠正。
 _Avoid_: 初始化脚本、默认值脚本
 
@@ -271,13 +270,6 @@ _落点_：`package/luci-app-dnschain/luasrc/model/cbi/dnschain/general.lua:98-1
 _反例_：不是「页面自己算一遍」—— 它读脚本产物，自己重算必然漂移
 （`dnschain.lua:692-699`）。
 _Avoid_: 配置页、DNS 管理页
-
-**luci-app-trafficctl**：
-流量统计页面，vendored 整包（上游 **v1.21.4**）。有六项本地改动必须保留，
-丢掉会静默失效（界面不报错、构建也成功）。
-_落点_：`package/luci-app-trafficctl/Makefile:3-4`、`patches/luci-app-trafficctl/README.md`
-_反例_：不是 feed 包 —— 它整包在仓库里，改完必须重算 patch。
-_Avoid_: 流量监控、带宽统计
 
 **SSR-Plus**：
 透明代理插件。**IPv4 与 IPv6 都代理**：IPv4 侧对命中的 TCP 做 `REDIRECT :1234`、
