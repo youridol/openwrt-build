@@ -230,7 +230,7 @@ done
 | 4 | `ps w \| grep -c <脚本名>` 虚高 | BusyBox 的 `ps w` 会折行长命令行，且脚本**自身的 cmdline 含搜索关键字** → 曾报出「2532 个进程」而真实只有 8 个 | AGENTS.md §6.6；正确做法是遍历 `/proc/[0-9]*/cmdline` 只匹配 exec 名 + 第一个参数 |
 | 5 | CI 日志先 grep 关键字 | `gh run view --log` 里**源码回显占绝大部分**，每条 run 脚本都以 `N\t<原文>` 重印一遍，真实输出夹在中间 → 会同时命中回显，误判成「没输出」或「输出正常」 | AGENTS.md §6.8；正确做法是先定位真实执行的第一条输出（不带行号前缀），再顺序原样打印后续几十行 |
 | 6 | `grep -c PAT \|\| echo 0` 得到 `"0\n0"` | `grep -c` 无匹配时既打印 `0` 又返回 rc=1，`\|\| echo 0` 再追加一个 → 变量含换行 → `[ "$n" -eq 0 ]` 算术比较报错返回假 → **判据恒假** | `dnschain.sh:986-1013`（含实测 `[0\n0]`）；自检第 12 项因此改用 awk（`dnschain-selftest:296-302`）；`verify-dnschain-domains.sh:318-321` 有反向断言 |
-| 7 | `[[:space:]]` 被当成 `[[ ]]` | 直接 `grep '\[\['` 会命中 POSIX 字符类，那是完全合法的 POSIX 语法 → CI 永远红 | `build-openwrt.yml:791-800`（判据改成「`[[` 后紧跟空白」）；`dnschain.sh` 里确实有 `sed -e 's/^[[:space:]]*//'` |
+| 7 | `[[:space:]]` 被当成 `[[ ]]` | 直接 `grep '\[\['` 会命中 POSIX 字符类，那是完全合法的 POSIX 语法 → CI 永远红 | `build-openwrt.yml:932-943`（判据改成「`[[` 后紧跟空白」）；`dnschain.sh` 里确实有 `sed -e 's/^[[:space:]]*//'` |
 | 8 | Lua 里 `[^—]` 按字节排除 | Lua 字符类按**字节**工作，`—`(U+2014) 是 `E2 80 94`，`[^—]` 实际排除这三个字节 → 凡名称含 `一`(E4 B8 **80**)、`上`、`下` 等第三字节为 0x80 的汉字，匹配直接失败。实测 20 项里 **7 项**解析失败、另有 10 项 name 尾随空格 | `dnschain.lua:482-496`（改用 `find(..., true)` 字节精确匹配） |
 | 9 | 用 `grep -c 'dnsmasq restart'` 断言「应为 0」 | 会命中 `echolog "restart: skip dnsmasq restart in stop()"` 这条**日志文本**，永久误报。正确判据是排除 `echolog` 行后统计真实调用 | AGENTS.md §4.4；文本来源 `99-gaming-optimize:501` |
 | 10 | `nc -z` 判代理节点可用性 | Cloudflare 前置节点对裸 TCP 不响应，但 TLS 握手正常 → 误判「节点挂了」。判据应看 `netstat -antp` 是否有 ESTABLISHED，或直接测经代理的解析结果 | AGENTS.md §4.4 |
@@ -253,7 +253,7 @@ PYTHONIOENCODING=utf-8 python tools/render-dnschain-diagrams.py  # 期望 PASS=4
 PYTHONIOENCODING=utf-8 python tools/extract-dnschain-i18n.py     # 期望「无缺失」
 ```
 
-改了 `.sh` 还要单独过一遍 dash 解析：`sh -n <脚本>`（CI 也是这么做的，`build-openwrt.yml:758`）。
+改了 `.sh` 还要单独过一遍 dash 解析：`sh -n <脚本>`（CI 也是这么做的，`build-openwrt.yml:719`）。
 
 ### 6.2 路由器端：自检 20 项
 

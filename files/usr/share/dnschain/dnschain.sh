@@ -345,6 +345,47 @@ dc_gen_upstream_file() {
 }
 
 # ------------------------------------------------------------
+# 两个 dnsproxy 实例共用的参数段（v0.25.0）
+#
+# 背景：luci-app-dnsproxy 的 Web UI 已从固件移除（v0.25.0），
+# 原先只能在那两个页面改的三项现在收敛到 dnschain 的 main section：
+#   dnsproxy_timeout    → --timeout
+#   dnsproxy_bootstrap  → --bootstrap（可多条）
+#   dnsproxy_verbose    → --verbose
+#
+# 为什么放在共享函数里：两个实例必须用**同一份** timeout 与 bootstrap，
+# 否则「国内超时 8s、国外超时 2s」这种漂移会让 fallback 的触发时机
+# 变得不可预测（fallback 是 :5353 → :5336，两侧超时不同会让判定偏斜）。
+# ------------------------------------------------------------
+dc_gen_dnsproxy_common_args() {
+	local tmo
+	tmo=$(dc_get main dnsproxy_timeout "8s")
+
+	# bootstrap：留空时回落到内置值，避免生成 `--bootstrap` + 空行
+	# （dnsproxy 会把它当成空地址并拒绝启动）。
+	local _bs
+	_bs=$(dc_get_list main dnsproxy_bootstrap)
+	if [ -n "$_bs" ]; then
+		printf '%s\n' "$_bs" | while read -r b; do
+			[ -n "$b" ] && { echo "--bootstrap"; echo "$b"; }
+		done
+	else
+		echo "--bootstrap"
+		echo "223.5.5.5"
+		echo "--bootstrap"
+		echo "223.6.6.6"
+	fi
+
+	echo "--timeout"
+	echo "$tmo"
+
+	# verbose 是开关型参数，只有为 1 时才写
+	if [ "$(dc_get main dnsproxy_verbose 0)" = "1" ]; then
+		echo "--verbose"
+	fi
+}
+
+# ------------------------------------------------------------
 # 国内 dnsproxy 实例参数（:5353）
 #
 # ADR §10.1：刻意不配 --cache*、--ipv6-disabled
@@ -375,14 +416,9 @@ dc_gen_dnsproxy_args() {
 			[ -n "$up" ] && { echo "--upstream"; echo "$up"; }
 		done
 
-		# bootstrap 仅用于解析加密上游的主机名
-		echo "--bootstrap"
-		echo "223.5.5.5"
-		echo "--bootstrap"
-		echo "223.6.6.6"
-
-		echo "--timeout"
-		echo "8s"
+		# bootstrap / timeout / verbose：两个实例共用同一份配置
+		# （v0.25.0 起由 dnschain 页面管理，原 luci-app-dnsproxy 已移除）
+		dc_gen_dnsproxy_common_args
 
 		# 单实例只服务国内域名，parallel 取最快即可
 		echo "--upstream-mode"
@@ -469,13 +505,8 @@ dc_gen_foreign_args() {
 			[ -n "$up" ] && { echo "--upstream"; echo "$up"; }
 		done
 
-		echo "--bootstrap"
-		echo "223.5.5.5"
-		echo "--bootstrap"
-		echo "223.6.6.6"
-
-		echo "--timeout"
-		echo "8s"
+		# bootstrap / timeout / verbose：与国内实例同一份配置
+		dc_gen_dnsproxy_common_args
 
 		# 国外只服务 gfw 域名，parallel 让多个 DoH 取最快
 		echo "--upstream-mode"

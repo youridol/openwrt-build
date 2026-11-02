@@ -143,7 +143,7 @@ flowchart TD
 
 优先级 `-151` 的必要性：`ss_spec_mangle prerouting` 是 `mangle(-150)`，fw4 的 `dns_intercept_lan` 是 `dstnat+1(-99)`，tproxy 会先于 DNS 劫持执行；`-151` 比 `mangle` 更早，才能先拒掉客户机自带的 DoT（`init.d/dnschain:218-232`）。nft 会把它规范化为 `priority mangle - 1`（`init.d/dnschain:226-231`）。
 
-CI 侧的守卫：`grep -c 'priority -151'` 至少 1 条（`.github/workflows/build-openwrt.yml:1001-1007`），另有「裸 chain 无 table 声明」的独立步骤（`build-openwrt.yml:1040-1088`）。
+CI 侧的守卫：`grep -c 'priority -151'` 至少 1 条（`.github/workflows/build-openwrt.yml:1164-1172`），另有「裸 chain 无 table 声明」的独立步骤（`build-openwrt.yml:1205-1253`）。
 
 ## 8. 域名归属与改道
 
@@ -327,7 +327,7 @@ CI 侧的守卫：`grep -c 'priority -151'` 至少 1 条（`.github/workflows/bu
 
 - `files/etc/uci-defaults/99-gaming-optimize:796-799` 写 `filter_aaaa='1'` 并记录日志 `filter_aaaa=1 (reject set = …)`。
 - `files/etc/uci-defaults/99-zz-dnschain:75-80` 写 `'0'`；`files/usr/bin/dnschain-reconcile:97-98` 也归一为 `'0'`。
-- `uci-defaults` 按文件名排序执行，`99-gaming-optimize` < `99-zz-dnschain`（实测 `LC_ALL=C sort` 结果；CI 也有同一断言 `.github/workflows/build-openwrt.yml:900-906`），故后者覆盖前者，**最终生效 `'0'`**。
+- `uci-defaults` 按文件名排序执行，`99-gaming-optimize` < `99-zz-dnschain`（实测 `LC_ALL=C sort` 结果；CI 也有同一断言 `.github/workflows/build-openwrt.yml:1038-1049`），故后者覆盖前者，**最终生效 `'0'`**。
 - 附带影响：`99-gaming-optimize:765-799` 的整段注释（含「`'0'` 会让被墙域名拿到真实 AAAA 并在 IPv6 上直连被 RST」）与 v0.10.0 之后的实际取值相反，读注释会得出错误结论。
 
 ### 10.2 `pdnsd_enable=4` 与 `tunnel_forward_mosdns` 仍被写入
@@ -374,9 +374,9 @@ CI 侧的守卫：`grep -c 'priority -151'` 至少 1 条（`.github/workflows/bu
 
 ### 10.9 CI 里 `chinadns-ng` 同时「必须有」和「不再要求」
 
-- `.github/workflows/build-openwrt.yml:598-601` 写 `CONFIG_PACKAGE_chinadns-ng=y`，注释称「dnschain 运行时依赖」。
-- 同文件 `:864-870` 明确「v0.10.0：不再要求 `CONFIG_PACKAGE_chinadns-ng`」，且 `:1131-1158` 断言库脚本不得再有 `dc_gen_filter_args`。
-- 结果：`.config` 里仍会带上该包，但框架不依赖它；`build-openwrt.yml:601` 的注释与实现意图相反。
+- `tools/gen-openwrt-config.sh:97-98` 写 `CONFIG_PACKAGE_chinadns-ng=y`，旧注释曾称「dnschain 运行时依赖」。
+- `.github/workflows/build-openwrt.yml:671-674` 明确「v0.10.0：不再要求 `CONFIG_PACKAGE_chinadns-ng`」，且 `:984-989` 断言库脚本不得再有 `dc_gen_filter_args`。
+- 结果：`.config` 里仍会带上该包，但框架不依赖它；`gen-openwrt-config.sh:97` 的注释已按实况更正（不再是「运行时依赖」）。
 
 ### 10.10 本次核对新发现
 

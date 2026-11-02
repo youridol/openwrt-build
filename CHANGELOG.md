@@ -108,6 +108,135 @@
 `docs/audit/2026-10-09-network-audit.md`（一次性实测快照 + §0 现状对照表）。
 可执行代码、构建配方、工具脚本、路由表、包文档中**零残留**。
 
+### 变更 — DNS 配置收敛为单一入口：`luci-app-dnsproxy` 的 Web UI 并入 `luci-app-dnschain`
+
+用户要求：「将 DNS 功能规整到一起，把 DNS 分流和 DNSproxy 集中到一个插件中；
+`luci-app-dnsproxy` 合并到 `luci-app-dnschain` 并为一个独立插件，不再需要
+`luci-app-dnsproxy` web ui，全部由 `luci-app-dnschain` 管理」。
+
+**用户看到的变化（这是本次改动的全部意义）**：
+
+| 项 | 改动前 | 改动后 |
+|---|---|---|
+| LuCI 里的 DNS 菜单 | 「服务 → DNS 分流」+「服务 → DNS Proxy」两套 | **只有「服务 → DNS 分流」一套** |
+| DNS 参数在哪改 | 两个页面各管一半，互不同步 | 全部在「DNS 分流」页；dnsproxy 的三项在「上游」tab |
+| 固件里的 LuCI 包 | `luci-app-dnschain` + `luci-app-dnsproxy` | **只有 `luci-app-dnschain`** |
+| `dnsproxy` 二进制 | 在 | **仍在** —— 框架自己托管两个实例，删不得 |
+
+#### ① 页面：新增「上游」tab 的「dnsproxy 实例参数」section
+
+`luci-app-dnsproxy` 的 Web UI 有 48 个字段。逐个核对后，只有 **3 项**是
+「框架真的会用 + 原先只能去那个页面改」的，它们收敛到本页；**其余 45 项刻意不接管**。
+
+| 新键（`dnschain.main.*`） | 对应 dnsproxy 参数 | 控件 | 默认值 |
+|---|---|---|---|
+| `dnsproxy_timeout` | `--timeout` | `Value` + 格式校验（数字 + 可选 `s`/`ms`/`m`） | `8s` |
+| `dnsproxy_bootstrap` | `--bootstrap`（可多条） | `DynamicList`（`ip4addr`/`ip6addr`） | `223.5.5.5`、`223.6.6.6` |
+| `dnsproxy_verbose` | `--verbose` | `Flag` | `0` |
+
+另有一个只读 `DummyValue`「当前生效参数」，显示两个实例端口的实时监听状态
+（在监听 / 未监听），并标出参数文件路径。
+
+**为什么其余 45 项不接管**（分两类，都已写进页面注释）：
+
+1. **框架硬约束决定，做成开关就是误导** —— 本页 v0.19.0 已经删过一批同类假开关：
+   `cache.enabled`/`cache.size`（约束 #1：缓存只在 dnsmasq 一层，dnsproxy 必须恒关）、
+   `ipv6_disabled`（必须恒 `0`，见约束 #12）、`servers.fallback`（框架自己写死
+   `--fallback 127.0.0.1:<foreign_port>`，不能与页面抢）、`servers.upstream`
+   （已由「国内上游」「国外上游」两个 section 管理）。
+2. **框架从不消费** —— `dc_gen_dnsproxy_args` / `dc_gen_foreign_args` 里没有对应参数：
+   `tls.*`、`dns64.*`、`edns.*`、`private_rdns.*`、`bogus_nxdomain.*`、`hosts.*`、
+   `global.{http3,insecure,log_file,max_go_routines,rate_limit,refuse_any,udp_buf_size,
+   ratelimit_subnet_len_*}`、`cache.{cache_optimistic,min_ttl,max_ttl,optimistic_*}`、
+   `pending_requests_enabled`、`pprof`。
+
+接管它们等于把「改了也不生效的假开关」搬过来 —— 那正是 v0.19.0 批量删假开关时定下的判据。
+
+`SECTION_TAB` 新增一条登记（`[translate("dnsproxy 实例参数")] = "upstream"`）。
+**必须登记**：漏了会让该 section 在**所有 tab 都显示**（v0.22.0 踩过）。
+section 数 18 → 19；tab 仍是 4 个。
+
+#### ② 运行时：两个实例共用同一份参数段
+
+新增 `dc_gen_dnsproxy_common_args()`（`files/usr/share/dnschain/dnschain.sh`），
+由国内（`:5353`）与国外（`:5336`）两个实例**共同调用**（2 处调用点），
+原先两处各自写死 `--bootstrap` / `--timeout 8s` 的重复代码删除。
+
+**为什么必须共用**：`--fallback` 是 `:5353 → :5336`。若两侧 timeout 不同，
+「直连超时 → 切代理」的判定时机会偏斜 —— 表现为「有时切得早、有时不切」，
+而且极难定位。
+
+bootstrap 留空时回落到内置 `223.5.5.5`/`223.6.6.6`，**不会**生成空的
+`--bootstrap` 行（dnsproxy 会把它当成空地址并拒绝启动，进程退出后端口无人监听）。
+
+`files/etc/config/dnschain` 新增三个键（含逐项注释：为什么默认 8s、
+为什么 bootstrap 只能用于解析上游主机名、为什么 verbose 日常应关）。
+
+#### ③ 构建：不再编入 `luci-app-dnsproxy`，删除 `patches/luci-app-dnsproxy/`
+
+| 项 | 改动 |
+|---|---|
+| `build-openwrt.yml` | 删 `Fetch luci-app-dnsproxy upstream and apply local patches` 整步（37 行：clone 上游 → 断言 patch 非空 → `git apply --check` → `git apply` → 打印 diff） |
+| `build-openwrt.yml` | `.config` 校验新增**反向断言**：`luci-app-dnsproxy` 与 `luci-i18n-dnsproxy-zh-cn` 必须**不**进 `.config`；`dnsproxy` 二进制必须仍在 |
+| `tools/gen-openwrt-config.sh` | 删 `CONFIG_PACKAGE_luci-app-dnsproxy=y`；注释改为「二进制仍然需要 —— 框架自己托管两个 dnsproxy 实例」 |
+| `patches/luci-app-dnsproxy/` | **整目录删除**（`README.md` + 3 个 patch，共 4 文件 / 1359 行）—— 上游包不再编入，patch 无处可打 |
+| `cache-deps.yml` | 无改动（它不涉及该包） |
+
+**为什么反向断言是必需的**：包一旦被依赖求解选回来，固件里就会重新出现
+「服务 → DNS Proxy」菜单，用户看到两套 DNS 配置入口且互不同步 ——
+这正是本次要消除的形态。**构建不会报错，只有这条断言能拦住。**
+
+#### ④ 文档联动
+
+| 文档 | 改动 |
+|---|---|
+| `docs/packages/luci-app-dnsproxy.md` | **整篇删除**（470 行）。它描述的是「上游页 + 3 个 patch 各改了什么」，patch 已删、页面已不在，整篇失效 |
+| `docs/packages/luci-app-dnschain.md` | 新增 §7.5「dnsproxy Web UI 的接管」（做了什么 / 只接管三项及其理由 / 两实例共用参数段 / 框架关闭时怎么办）；§4.1 增列新 section 与 tab 归属；§6 接口表加三行；section 计数 18 → 19；顺手修正 5 处过期计数（「18 个可见 section」「6 个 tab」「19 次 `m:section()`」→ 19/4/20） |
+| `docs/routes.md` | §1.2 整节改为「已移除 Web UI」的对照表（6 条原路由 → 现状）；登记范围说明去掉该包；§4 ACL 说明改为「只剩一个」；§1.1 后端落点行号 1980 → 2932、tab 7 → 4 |
+| `docs/build/ci.md` | §4 步骤表第 10 步改为「**v0.25.0 已删除该步骤**」并保留编号（后续步骤编号不变，避免引用链二次失效）；§4.1 CONFIG 表删 `luci-app-dnsproxy` 行并标注二进制；§5.2 增补反向断言行；§5.4 增补 9/9b 两项（新增配置键 + 参数段共用） |
+| `AGENTS.md` | §1 仓库地图删 `patches/luci-app-dnsproxy/*` 与 `README.md` 两行；§3 关键 CONFIG 改为「`dnsproxy`（**二进制**，框架托管两个实例）」；§7 变更归属改为「v0.25.0 起不再有该包，要改就改 `luci-app-dnschain` 与 `dnschain.sh`」 |
+| `GLOSSARY.md` | 「vendored 包」词条的反例改写：该包曾是「上游包 + patch」模式，v0.25.0 起 Web UI 已移除、patch 目录删除 |
+| `docs/README.md` | §1 概览「四类东西」→「三类」（删「上游包的 patch」行）；删该文档清单行；「改 DNS 拦截行为」指向改到包文档 |
+| `docs/runtime/overlay-inventory.md` | 构建时序删「拉 dnsproxy 上游并应用 patch」一步 |
+| `docs/runtime/dns-chain.md`、`docs/adr/0001/0003/0004/0005` | `chinadns-ng` 残留那一条的证据从「`build-openwrt.yml:601` 写 `CONFIG_PACKAGE_chinadns-ng=y`」更正为「`tools/gen-openwrt-config.sh:98`」—— 该符号从来由配方脚本写入，workflow 里没有这一行（原引用指向 dnsproxy 的 clone 行，属误引） |
+
+#### ⑤ 行号引用同步
+
+`build-openwrt.yml` 删 37 行、`tools/gen-openwrt-config.sh` 删 1 行 + 增 4 行注释，
+所有 `build-openwrt.yml:NNN` / `gen-openwrt-config.sh:NNN` 证据行号因此失效。
+本次按 `difflib` 逐行对齐做**机器化重映射**，再做两道人眼回读：
+① 全部 N 落在新文件的实际行数范围内（越界 = 0）；
+② `docs/build/ci.md` §4 的 32 个步骤起始行**逐一**命中对应 `- name:` 行。
+
+同时修正了 **9 处原本就指错**的引用（它们在此之前指向已被删除的 dnsproxy 步骤内部）：
+`docs/adr/0004:100`、`:163`、`:1040`，`docs/adr/0005:470`，
+`docs/packages/luci-app-dnschain.md:809`、`:811`、`:832`，
+`docs/runtime/dns-chain.md:377`、`:379`。
+一并重排了 `docs/build/ci.md` §5.1–§5.9 的 56 处区间引用（原值与真实步骤范围系统性偏差），
+现在每条都回读过目标行内容。
+
+#### ⑥ 验证
+
+| 检查 | 命令 | 结果 |
+|---|---|---|
+| 域名分流契约 | `sh tools/verify-dnschain-domains.sh` | **211 OK / 0 FAIL**（v0.24.0 为 204，本次 +7 条），末行「域名分流与改道契约校验通过。」 |
+| 工作流 `run:` 块 dash 解析 | `python3 tools/verify-workflow-scripts.py --dash /tmp/dashwrap` | 全部通过，语法错误 **0** |
+| 思维导图几何 | `python3 tools/render-dnschain-diagrams.py --check` | **PASS=88 FAIL=0** |
+| 中文文案完整性 | `python3 tools/extract-dnschain-i18n.py` | 无缺失（526 条；v0.24.0 为 509，本次 +17） |
+| CI 目录场景 | `sh tools/verify-dnschain-ci-sim.sh` | 「CI 模拟校验通过」 |
+| 行尾 | 逐文件 CRLF 扫描 | 全部 LF |
+| 空白 | `git diff --check` | 无错误 |
+| 行号引用 | 脚本核对 81 处 `build-openwrt.yml:NNN` + 6 处 `gen-openwrt-config.sh:NNN` | 越界 **0**；32 个步骤起始行全部命中 `- name:` |
+| 文档相对链接 | 全量解析 `docs/**/*.md` 的 `[](path)` | 断链 **0**（含已删除的 `luci-app-dnsproxy.md` 零残留引用） |
+
+⚠️ **`tools/check-dnschain-lua.py` 结果是 `PASS=121 FAIL=2`**，与本次改动无关：
+失败的 `渲染 _domains_list`、`渲染 _learn_domains` 两项在**改动前的 `master`（`5d3d2a9`）
+worktree 上跑出完全相同的结果**（`/tmp/lua-base.log`：`PASS=120 FAIL=2`，同样是这两项）。
+本次只在页面上**新增**一个 section（+1 通过项），未触碰这两个既有失败点，故不在本版本修复范围内。
+
+版本：`PKG_VERSION` 1.10.0 → **1.11.0**（新功能，MINOR）；
+`general.lua` 的静态资源 `?v=1.11.0`。
+
 ## [v0.24.0] - 2026-10-26
 
 ### 新增 — DNS 分流自动补全（域名 + IP 段两层）

@@ -932,17 +932,19 @@ echo "── 13. tab 结构不变量（v0.18.0，ADR-0007）──────�
 # （健康改道与分诊整体移除），新增「DNS 分流去向」（原「DNS 分流状态」改名
 # 并改为静态两档）。
 _sec_missing=""
+# v0.25.0：新增「dnsproxy 实例参数」（从已移除的 luci-app-dnsproxy 接管），16 → 17 个。
 for _t in "当前状态" "DNS 分流去向" "自检" "操作" \
           "自定义域名 · 国内（补全归属）" "自定义域名 · 国外（补全归属）" \
           "已录入清单" \
           "国内上游" "国外上游" "双栈策略" "端口与实例" "缓存" \
+          "dnsproxy 实例参数" \
           "名单规模" "SSR-Plus 兼容" "拦截与框架开关" "DHCP 下发 DNS（明文）"; do
 	if ! body_of "$GENERAL" | grep -qF "translate(\"$_t\")"; then
 		_sec_missing="$_sec_missing $_t"
 	fi
 done
 if [ -z "$_sec_missing" ]; then
-	pass "SECTION_TAB 的 16 个 section 都有 m:section 声明"
+	pass "SECTION_TAB 的 17 个 section 都有 m:section 声明"
 else
 	fail "SECTION_TAB 有 section 无声明:$_sec_missing"
 fi
@@ -1683,6 +1685,61 @@ if body_of "$DIAG" | sed -n '/^_learn_candidates()/,/^}/p' | grep -qF '| while r
 	fail "_learn_candidates 仍在逐行 fork（实测 109 秒，应为 480 毫秒）"
 else
 	pass "_learn_candidates 单遍 awk（无逐行 fork）"
+fi
+
+# ── 55. dnsproxy Web UI 的移除不得回退（v0.25.0）────────────────
+#
+# 用户要求「不再需要 luci-app-dnsproxy 的 web ui，全部由 luci-app-dnschain 管理」。
+# 这条断言防的是「有人又把 luci-app-dnsproxy 加回来」，那会让固件里
+# 重新出现两个 DNS 配置入口，且两者互不同步 —— 正是本次要消除的形态。
+#
+# 判据分三处，缺一不可：
+#   a) 构建配方不得再编入该 LuCI 包
+#   b) CI 不得再 clone 它的上游仓库
+#   c) 二进制 dnsproxy 必须仍在（框架托管两个实例，删了整条链路起不来）
+# 注意判据：配方里的写法是 `echo "CONFIG_PACKAGE_…=y" >> .config`，
+# 行首是 echo 不是符号名 —— 用 ^ 锚定会永远不匹配，断言变成永远通过
+# （本仓库在 v0.4.7 的 nft 守卫上踩过同类「断言永不触发」的坑）。
+if grep -q 'CONFIG_PACKAGE_luci-app-dnsproxy=y' tools/gen-openwrt-config.sh 2>/dev/null; then
+	fail "构建配方又启用了 luci-app-dnsproxy（Web UI 应已移除）"
+else
+	pass "构建配方未启用 luci-app-dnsproxy（Web UI 已移除）"
+fi
+
+if grep -q 'adm1n5ky/luci-app-dnsproxy' .github/workflows/build-openwrt.yml 2>/dev/null; then
+	fail "CI 仍在 clone luci-app-dnsproxy 上游（该包应不再编入）"
+else
+	pass "CI 不再 clone luci-app-dnsproxy 上游"
+fi
+
+if grep -q 'CONFIG_PACKAGE_dnsproxy=y' tools/gen-openwrt-config.sh 2>/dev/null; then
+	pass "dnsproxy 二进制仍被启用（框架的两个实例需要它）"
+else
+	fail "dnsproxy 二进制未启用（框架的 dnsproxy 实例将无法启动）"
+fi
+
+# ── 56. dnsproxy 实例参数已由 dnschain 接管（v0.25.0）────────────
+#
+# 原先这三项只能去 luci-app-dnsproxy 页面改。UI 移除后必须有新家，
+# 否则用户彻底失去调整 timeout / bootstrap / verbose 的入口。
+for _k in "dnsproxy_timeout" "dnsproxy_bootstrap" "dnsproxy_verbose"; do
+	if grep -qF "$_k" "$CONF" 2>/dev/null; then
+		pass "配置含 $_k（从已移除的 dnsproxy UI 接管）"
+	else
+		fail "配置缺 $_k —— dnsproxy UI 移除后该项将无处可改"
+	fi
+done
+
+# 两个实例必须共用同一份参数生成逻辑（否则 timeout 会两侧漂移）
+if body_of "$LIB" | grep -q '^dc_gen_dnsproxy_common_args()'; then
+	_calls=$(body_of "$LIB" | grep -c 'dc_gen_dnsproxy_common_args$')
+	if [ "${_calls:-0}" -ge 2 ]; then
+		pass "国内/国外实例共用参数段（${_calls} 处调用）"
+	else
+		fail "参数段调用点不足 2 处（实为 ${_calls:-0}）"
+	fi
+else
+	fail "缺 dc_gen_dnsproxy_common_args（timeout/bootstrap 会两侧漂移）"
 fi
 
 echo ""

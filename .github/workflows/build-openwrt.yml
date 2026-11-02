@@ -588,43 +588,6 @@ jobs:
           # 记下 commit 供产物命名/溯源
           echo "THEME_SHA=$THEME_SHA" >> "$GITHUB_ENV"
 
-      - name: Fetch luci-app-dnsproxy upstream and apply local patches (ALL_DOH)
-        working-directory: lede
-        run: |
-          # ============================================================
-          # ALL_DOH: 以 patch 形式在 openwrt-build 维护 luci-app-dnsproxy 改动
-          # 原则: 不修改 adm1n5ky/luci-app-dnsproxy 上游仓库, 不改分支
-          # 流程: 上游 clone → 依次 git apply patches/luci-app-dnsproxy/*.patch
-          # 约束: patch 失败必须让 CI 失败（禁止 || true / 静默忽略）
-          #       每次全新 clone → 重复执行天然幂等
-          # ============================================================
-          git clone --depth 1 https://github.com/adm1n5ky/luci-app-dnsproxy.git \
-            package/luci-app-dnsproxy
-
-          # 确保目录下确有 patch，否则明确失败
-          if ! ls ../openwrt-build/patches/luci-app-dnsproxy/*.patch >/dev/null 2>&1; then
-            echo "!!! 未找到 patches/luci-app-dnsproxy/*.patch，构建中止" >&2
-            exit 1
-          fi
-
-          # 注意: 下面在 (cd package/... ) 子 shell 里执行 git apply，相对路径会失效，
-          #       必须先转成绝对路径（以 lede/ 为基准解析）。
-          for patch in ../openwrt-build/patches/luci-app-dnsproxy/*.patch; do
-            abs_patch="$(cd "$(dirname "$patch")" && pwd)/$(basename "$patch")"
-            echo ">>> 应用 patch: $abs_patch"
-            (cd package/luci-app-dnsproxy && git apply --check "$abs_patch") || {
-              echo "!!! patch 应用检查失败（上游可能已变更，需同步更新 $abs_patch）: $abs_patch" >&2
-              exit 1
-            }
-            (cd package/luci-app-dnsproxy && git apply "$abs_patch")
-            echo ">>> patch 应用成功: $abs_patch"
-          done
-
-          # 打印已应用改动，编译日志可确认 patch 生效
-          echo "===== luci-app-dnsproxy 本地 patch 已生效改动 ==="
-          git -C package/luci-app-dnsproxy diff --stat
-          git -C package/luci-app-dnsproxy diff | head -80
-
       - name: Update and install feeds
         working-directory: lede
         run: |
@@ -724,6 +687,30 @@ jobs:
             grep -E "dnschain" .config || echo "  (一条都没有 → 包被依赖求解整体丢弃)"
             echo "  提示：若 luci-app-dnschain 一条都没有，检查 package/ 是否已复制进"
             echo "        lede/package/（见 'Add luci-app-dnschain' 步骤）。"
+            exit 1
+          fi
+
+          echo "=== luci-app-dnsproxy 的 Web UI 必须不入配置（v0.25.0 合并进 dnschain）==="
+          # v0.25.0：dnsproxy 的 Web UI 已由 luci-app-dnschain 接管。
+          # 二进制 dnsproxy 仍必须 =y（框架托管两个实例），但 LuCI 包必须**不在**。
+          #
+          # 为什么必须反向断言：包一旦被依赖求解选回来，固件里就会重新出现
+          # 「服务 → DNS Proxy」菜单，用户看到两套 DNS 配置入口且互不同步 ——
+          # 这正是本次要消除的形态。构建不会报错，只有这条断言能拦住。
+          for sym in CONFIG_PACKAGE_luci-app-dnsproxy                      CONFIG_PACKAGE_luci-i18n-dnsproxy-zh-cn; do
+            if grep -q "^${sym}=y$" .config; then
+              echo "FAIL ${sym} 仍被启用（dnsproxy Web UI 应已移除，统一由 dnschain 管理）" >&2
+              echo "     检查 package/ 是否又复制了 luci-app-dnsproxy，或 feeds 把它选了回来。" >&2
+              grep -nE "^#? ?${sym}[ =]" .config >&2 || true
+              exit 1
+            fi
+            echo "OK   ${sym} 未启用"
+          done
+          # 二进制本体必须仍在（框架的两个实例靠它）
+          if grep -q "^CONFIG_PACKAGE_dnsproxy=y$" .config; then
+            echo "OK   CONFIG_PACKAGE_dnsproxy=y（二进制，框架仍需要）"
+          else
+            echo "FAIL CONFIG_PACKAGE_dnsproxy 未启用（框架的 dnsproxy 实例将无法启动）" >&2
             exit 1
           fi
 
@@ -1069,9 +1056,14 @@ jobs:
           #     （ipv6_support=1 后国外 IPv6 走代理，无需抑制 AAAA）
           #   - 新增 foreign_port '5336'（国外 dnsproxy 实例）
           #   - 新增 require_ipv6 '1'（SSR-Plus 的 IPv6 流量代理）
+          # v0.25.0：dnsproxy 实例参数从已移除的 luci-app-dnsproxy 接管，
+          # 三项必须留在 dnschain 配置里（否则脚本回落到内置默认，
+          # 用户改不了 timeout 与 bootstrap，排障时无入口）。
           for kv in "entry_port '5353'" "foreign_port '5336'" \
                     "foreign 'keep'" "domestic 'keep'" \
-                    "require_ipv6 '1'" "filter_https_rr '0'"; do
+                    "require_ipv6 '1'" "filter_https_rr '0'" \
+                    "dnsproxy_timeout '8s'" "list dnsproxy_bootstrap '223.5.5.5'" \
+                    "dnsproxy_verbose '0'"; do
             if grep -q "$kv" "$CONF"; then
               echo "OK   配置含 $kv"
             else
@@ -1079,6 +1071,23 @@ jobs:
               rc=1
             fi
           done
+
+          # v0.25.0：两个 dnsproxy 实例必须共用同一份 timeout/bootstrap 生成逻辑。
+          # 若某一侧又写死自己的 timeout，两侧就会漂移，
+          # fallback（:5353 → :5336）的触发时机会变得不可预测。
+          if grep -q '^dc_gen_dnsproxy_common_args()' "$LIB"; then
+            echo "OK   有 dc_gen_dnsproxy_common_args（两实例共用参数段）"
+          else
+            echo "FAIL 缺少 dc_gen_dnsproxy_common_args（timeout/bootstrap 会两侧漂移）"
+            rc=1
+          fi
+          _cn_calls=$(grep -c 'dc_gen_dnsproxy_common_args$' "$LIB")
+          if [ "${_cn_calls:-0}" -ge 2 ]; then
+            echo "OK   国内与国外实例都调用了公共参数段（${_cn_calls} 处）"
+          else
+            echo "FAIL 公共参数段调用点不足 2 处（实为 ${_cn_calls:-0}）—— 某一侧会缺 timeout/bootstrap"
+            rc=1
+          fi
 
           # 国外上游必须是 DoH（不是 DoT）
           if grep -q "list server 'https://dns.google/dns-query'" "$CONF"; then
@@ -1577,8 +1586,7 @@ jobs:
           #         (libstdc++-12 ranges 适配不完整, gcc-13 已修复)
           # 方案: 安装 gcc-13, 用 CC=gcc-13 CXX=g++-13 预编译 gn 并落 .built
           #       stamp(OpenWrt stamp 机制), make world 时自动跳过 gn。
-          # 约束: 不改 helloworld 上游代码、不关闭 SSR-Plus 任何组件、
-          #       不影响 luci-app-dnsproxy 的 patch 流程。
+          # 约束: 不改 helloworld 上游代码、不关闭 SSR-Plus 任何组件。
           # ---------------------------------------------------------------
           sudo apt-get install -y -qq software-properties-common
           sudo add-apt-repository -y ppa:ubuntu-toolchain-r/test >/dev/null

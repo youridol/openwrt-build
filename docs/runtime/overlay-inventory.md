@@ -1,6 +1,6 @@
 # `files/` overlay 全清单
 
-`files/` 是 rootfs overlay：构建时 `cp -r ../openwrt-build/files ./` 复制进 `lede/files/`，打包阶段合并进固件根文件系统（`.github/workflows/build-openwrt.yml:754-766`）。它**不是**上游源码，改动直接生效于下一次构建。
+`files/` 是 rootfs overlay：构建时 `cp -r ../openwrt-build/files ./` 复制进 `lede/files/`，打包阶段合并进固件根文件系统（`.github/workflows/build-openwrt.yml:793-827`）。它**不是**上游源码，改动直接生效于下一次构建。
 
 ## 1. 全清单
 
@@ -19,11 +19,11 @@
 | `files/etc/hotplug.d/iface/50-ipv6-pd-lan` | hotplug 脚本 | `100755` | 需要 `+x`（overlay 已带） | `wan_6` `ifup` 时 `sleep 3` 后 `ifup lan`，修复 PD 前缀拿到但 LAN 未应用的问题 | `:5-6`（双条件过滤）、`:8-9`（sleep + ifup） |
 | `files/etc/init.d/dnschain` | init.d（procd） | `100644` | **需要** `+x`，靠 CI 补 | 框架服务脚本：生成运行时配置、preflight 校验、托管两个 dnsproxy 与健康守护、生成 fw4 片段、抑制重复重启 dnsmasq | `:29-31`（START/STOP/USE_PROCD）、`:38`（853 片段路径）、`:46-73`（generate_all）、`:161-215`（preflight）、`:233-269`（update_dot_reject）、`:274-290`（国内实例）、`:302-317`（国外实例）、`:342-352`（标记文件）、`:366-381`（健康实例）、`:422-462`（stop_service）、`:464-494`（reload_service） |
 | `files/etc/init.d/dnsproxy` | init.d（procd） | `100755` | 需要 `+x`（overlay 已带） | 上游 dnsproxy 服务脚本 + 本地 ALL_DOH 扩展：LAN DNS 拦截的 nft/iptables 片段、**dnschain 让位逻辑** | `:17-18`（USE_PROCD/START）、`:24`（拦截片段路径）、`:157-189`（fw3/iptables 分支）、`:199-256`（按后端分派）、`:222-231`（fw4 裸 chain）、`:273-275`（让位判据）、`:280-287`（让位时不动拦截规则）、`:346-356`（reload 转发给 dnschain） |
-| `files/etc/ssrplus/applechina.conf` | ssrplus overlay | `100644` | 不需要 | 173 条 Apple 域名分流，全部指向 `127.0.0.1#5353`（加密入口），替代上游的明文 `114.114.114.114` | `:1-18`（说明与两条硬约束）、`:19-191`（173 条 `server=`）；行数断言 `.github/workflows/build-openwrt.yml:1077-1101` |
-| `files/etc/ssrplus/mosdns-config.yaml` | ssrplus overlay | `100644` | 不需要 | SSR-Plus 的 mosdns 模板副本。**`upstreams:` 必须正好在第 14 行**（init 用 `awk -v line=14` 注入），`reject 0` 前置到 `forward_google` 之前 | `:10-14`（forward_google 与 `upstreams:`）、`:16-24`（disable_IPv6 序列，含 reject）、`:26-30`（with_IPv6）、`:44-63`（契约说明与差异理由）；断言 `build-openwrt.yml:788-825` |
+| `files/etc/ssrplus/applechina.conf` | ssrplus overlay | `100644` | 不需要 | 173 条 Apple 域名分流，全部指向 `127.0.0.1#5353`（加密入口），替代上游的明文 `114.114.114.114` | `:1-18`（说明与两条硬约束）、`:19-191`（173 条 `server=`）；行数断言 `.github/workflows/build-openwrt.yml:1145-1156` |
+| `files/etc/ssrplus/mosdns-config.yaml` | ssrplus overlay | `100644` | 不需要 | SSR-Plus 的 mosdns 模板副本。**`upstreams:` 必须正好在第 14 行**（init 用 `awk -v line=14` 注入），`reject 0` 前置到 `forward_google` 之前 | `:10-14`（forward_google 与 `upstreams:`）、`:16-24`（disable_IPv6 序列，含 reject）、`:26-30`（with_IPv6）、`:44-63`（契约说明与差异理由）；断言 `build-openwrt.yml:762-799` |
 | `files/etc/uci-defaults/99-gaming-optimize` | uci-defaults | `100755` | 需要 `+x`（overlay 已带） | 首刷默认值总入口：防火墙/flow offloading/MTU 修复、IPv6 双栈、LAN 固定 IP、SSR-Plus 的 MosDNS 与 AAAA 开关、dnsmasq 上游与并发槽、对 `init.d/shadowsocksr` 的四处幂等补丁、dnsmasq 日志改 syslog | `:290-306`（SSR 铺底 + `pdnsd_enable=4` + `tunnel_forward_mosdns`）、`:436-524`（v0.8.3 restart 守卫补丁）、`:527-595`（v0.8.4 移除 53）、`:597-726`（v0.8.6 并发守卫补丁）、`:729-762`（dnsmasq 上游与 `dnsforwardmax`）、`:764-799`（`filter_aaaa='1'`）、`:801-834`（日志改 syslog）、`:118-152`（MSS clamp 已移除的说明）、`:836-846`（commit 全部） |
 | `files/etc/uci-defaults/99-zz-dnschain` | uci-defaults | `100644` | **需要** `+x`，靠 CI 补 | 框架首刷默认值：SSR-Plus 交给框架（`pdnsd_enable=0`、`ipv6_support=1`、`filter_aaaa=0`）、dnsproxy 拦截开关、dnsmasq 唯一上游与 `serversfile`、首轮生成运行时文件 | `:23-26`（配置文件存在性）、`:37-50`（`pdnsd_enable` → 0）、`:52-80`（IPv6 与 `filter_aaaa`）、`:93-99`（dnsproxy 键）、`:104-121`（dnsmasq 上游/槽/缓存）、`:128-153`（首轮生成）、`:155-184`（`serversfile` 走库常量） |
-| `files/etc/uci-defaults/99-zzz-luci-theme-shadcn` | uci-defaults | `100644` | **需要** `+x`，靠 CI 补 | 把 shadcn 设为 LuCI 默认主题：无条件写 `luci.main.mediaurlbase`，覆盖主题自带 `30_luci-theme-shadcn` 的存在性短路 | `:30-39`（主题文件存在性守卫）、`:41-45`（注册主题）、`:47-54`（无条件设默认）、`:56`（commit）；排序断言 `build-openwrt.yml:740-748` |
+| `files/etc/uci-defaults/99-zzz-luci-theme-shadcn` | uci-defaults | `100644` | **需要** `+x`，靠 CI 补 | 把 shadcn 设为 LuCI 默认主题：无条件写 `luci.main.mediaurlbase`，覆盖主题自带 `30_luci-theme-shadcn` 的存在性短路 | `:30-39`（主题文件存在性守卫）、`:41-45`（注册主题）、`:47-54`（无条件设默认）、`:56`（commit）；排序断言 `build-openwrt.yml:766-791` |
 | `files/usr/bin/dnschain-health` | 可执行脚本 | `100755` | 需要 `+x`（overlay 已带） | 健康探测与改道的 CLI：`cycle`/`daemon`/`status`/`explain`/`check`/`apply`/`reset`/`flush` 八个子命令 | `:16-23`（子命令说明，漏列 `flush`）、`:76-124`（status 的 ROW/SUM）、`:135-181`（check）、`:205-264`（apply：5 条正常出口 `restarted`/`sighup`/`unchanged`/`skipped（框架未启用）`/`skipped（无 init.d/dnsmasq）`，加 2 条 `ERROR=` 失败出口）、`:272-278`（reset）、`:309-316`（flush）、`:318-338`（daemon）、`:343-364`（入口） |
 | `files/usr/bin/dnschain-reconcile` | 可执行脚本 | `100644` | **需要** `+x`，靠 CI 补 | 收敛器：把 SSR-Plus / dnsmasq / dnsproxy 的白名单键归一，名单单向导入，nftset 归零自愈，dnsmasq 日志自愈 | `:51-237`（reconcile_invariants）、`:63-112`（SSR 键归一）、`:122-139`（dnsmasq 键与唯一上游）、`:164-189`（nftset 自愈）、`:197-207`（端口集只校验）、`:213-234`（日志自愈）、`:245-310`（reconcile_lists）、`:316-362`（reconcile_intercept）、`:367-414`（main 的四处重启条件） |
 | `files/usr/bin/dnschain-selftest` | 可执行脚本 | `100644` | **需要** `+x`，靠 CI 补 | 20 项全链路自检，带 60 秒结果缓存与指纹失效 | `:31-42`（emit）、`:99-575`（check_all 的 20 项）、`:580-672`（main 与退出码）、`:680-694`（原子写缓存）、`:698-740`（指纹） |
@@ -50,8 +50,8 @@
 
 | 依赖 | 说明 | 证据 |
 |---|---|---|
-| `99-zz-dnschain` 必须晚于 `99-gaming-optimize` | 要覆盖后者写的 `pdnsd_enable=4` | `files/etc/uci-defaults/99-zz-dnschain:7-9`、`:34-35`；断言 `build-openwrt.yml:999-1010` |
-| `99-zzz-luci-theme-shadcn` 必须晚于 `30_luci-theme-shadcn` | 要覆盖主题包的存在性短路，无条件设默认主题 | `files/etc/uci-defaults/99-zzz-luci-theme-shadcn:21-23`；断言 `build-openwrt.yml:740-748` |
+| `99-zz-dnschain` 必须晚于 `99-gaming-optimize` | 要覆盖后者写的 `pdnsd_enable=4` | `files/etc/uci-defaults/99-zz-dnschain:7-9`、`:34-35`；断言 `build-openwrt.yml:1038-1049` |
+| `99-zzz-luci-theme-shadcn` 必须晚于 `30_luci-theme-shadcn` | 要覆盖主题包的存在性短路，无条件设默认主题 | `files/etc/uci-defaults/99-zzz-luci-theme-shadcn:21-23`；断言 `build-openwrt.yml:766-791` |
 
 ### 2.1 顺序导致的覆盖关系
 
@@ -133,24 +133,23 @@ git 的 `.gitattributes` 模式**匹配的是仓库内真实路径**，不是部
 
 ### 4.1 CI 的 `chmod +x` 清单
 
-在 `Apply gaming optimization files overlay` 步骤里，复制完 overlay 后逐条设置（`.github/workflows/build-openwrt.yml:767-786`）：
+在 `Apply gaming optimization files overlay` 步骤里，复制完 overlay 后逐条设置（`.github/workflows/build-openwrt.yml:806-827`）：
 
 | 行号 | 命令 | 覆盖对象 |
 |---|---|---|
-| `:979` | `chmod +x files/etc/init.d/dnsproxy` | dnsproxy 服务脚本 |
-| `:980` | `chmod +x files/etc/rc.local` | rc.local（索引里已是 100755，冗余但无害） |
-| `:981` | `chmod +x files/etc/uci-defaults/*` | 三个 uci-defaults 脚本 |
-| `:982` | `if [ -d files/etc/hotplug.d/iface ]; then chmod +x files/etc/hotplug.d/iface/*; fi` | `50-ipv6-pd-lan` |
-| `:983` | `if [ -d files/etc/hotplug.d/dhcp ]; then chmod +x files/etc/hotplug.d/dhcp/*; fi` | 该目录当前不存在，`if` 兜住 |
-| `:986` | `if [ -f files/etc/init.d/dnschain ]; then chmod +x files/etc/init.d/dnschain; fi` | dnschain 服务脚本 |
-| `:987` | `if [ -f files/usr/bin/dnschain-reconcile ]; then chmod +x files/usr/bin/dnschain-reconcile; fi` | 收敛器 |
-| `:988` | `if [ -f files/usr/bin/dnschain-selftest ]; then chmod +x files/usr/bin/dnschain-selftest; fi` | 自检 |
-| `:989` | `if [ -f files/usr/share/dnschain/dnschain.sh ]; then chmod +x files/usr/share/dnschain/dnschain.sh; fi` | 库脚本 |
-| `:992` | `if [ -f files/usr/bin/dnschain-health ]; then chmod +x files/usr/bin/dnschain-health; fi` | 健康 CLI（索引里已是 100755） |
+| `:810` | `chmod +x files/etc/init.d/dnsproxy` | dnsproxy 服务脚本 |
+| `:811` | `chmod +x files/etc/rc.local` | rc.local（索引里已是 100755，冗余但无害） |
+| `:812` | `chmod +x files/etc/uci-defaults/*` | 三个 uci-defaults 脚本 |
+| `:813` | `if [ -d files/etc/hotplug.d/iface ]; then chmod +x files/etc/hotplug.d/iface/*; fi` | `50-ipv6-pd-lan` |
+| `:814` | `if [ -d files/etc/hotplug.d/dhcp ]; then chmod +x files/etc/hotplug.d/dhcp/*; fi` | 该目录当前不存在，`if` 兜住 |
+| `:817` | `if [ -f files/etc/init.d/dnschain ]; then chmod +x files/etc/init.d/dnschain; fi` | dnschain 服务脚本 |
+| `:818` | `if [ -f files/usr/bin/dnschain-reconcile ]; then chmod +x files/usr/bin/dnschain-reconcile; fi` | 收敛器 |
+| `:819` | `if [ -f files/usr/bin/dnschain-selftest ]; then chmod +x files/usr/bin/dnschain-selftest; fi` | 自检 |
+| `:820` | `if [ -f files/usr/share/dnschain/dnschain.sh ]; then chmod +x files/usr/share/dnschain/dnschain.sh; fi` | 库脚本 |
 
-该步骤明确「不使用 `|| true`」，缺失必须让 CI 明确失败（`build-openwrt.yml:769`、`:777`）。
+该步骤明确「不使用 `|| true`」，缺失必须让 CI 明确失败（`build-openwrt.yml:808-809`、`:816`）。
 
-另有一步在复制包目录时就断言 `dnschain-health` 有执行位（`build-openwrt.yml:209-216`），失败信息是「缺执行位（页面按钮会静默失败）」。
+另有一步在复制包目录时就断言 5 个运行时脚本有执行位（`build-openwrt.yml:230-242`），失败信息是「缺执行位（页面按钮会静默失败）」。
 
 固件产物预检也核对执行位：`etc/init.d/dnschain` 期望 `-rwxr-xr-x`，`etc/uci-defaults/99-zz-dnschain` 期望 `-rwxr-xr-x`，`usr/bin/dnschain-*` 与 `usr/share/dnschain/dnschain.sh` 期望 `-rwxr-xr-x`（`tools/verify-firmware-artifact.sh:137-145`）。
 
@@ -158,9 +157,9 @@ git 的 `.gitattributes` 模式**匹配的是仓库内真实路径**，不是部
 
 文件 **191 行**，其中 `^server=` **173 条**，全部指向 `127.0.0.1#5353`；含 `114.114.114.114` 的只有 **1 行**，且是注释（`:4`，说明上游原文件的样子）。
 
-- 173 条断言：`build-openwrt.yml:1084-1087`（`ap_data -ne 173` 即失败）。
-- 明文为 0 断言：`build-openwrt.yml:1088-1091`。
-- 全部指向加密入口断言：`build-openwrt.yml:1092-1095`（`ap_enc -ne 173` 即失败）。
+- 173 条断言：`build-openwrt.yml:1145-1148`（`ap_data -ne 173` 即失败）。
+- 明文为 0 断言：`build-openwrt.yml:1149-1152`。
+- 全部指向加密入口断言：`build-openwrt.yml:1153-1156`（`ap_enc -ne 173` 即失败）。
 
 ### 5.1 为什么不能设 `shadowsocksr.@global[0].apple_dns`
 
@@ -186,4 +185,4 @@ git 的 `.gitattributes` 模式**匹配的是仓库内真实路径**，不是部
 12. `:1402` 校验 SSR-Plus uci-defaults 顺序
 13. `:1573` 编译
 
-关键点：**契约校验步骤（9–12）跑在 overlay 复制（8）之后**，所以它们读的是 `lede/files/...`；唯一的例外是主题脚本检查，它显式用仓库路径 `../openwrt-build/files/etc/uci-defaults/99-zzz-luci-theme-shadcn`，理由是那一步在复制之前（`build-openwrt.yml:727-731`）。
+关键点：**契约校验步骤（9–12）跑在 overlay 复制（8）之后**，所以它们读的是 `lede/files/...`；唯一的例外是主题脚本检查，它显式用仓库路径 `../openwrt-build/files/etc/uci-defaults/99-zzz-luci-theme-shadcn`，理由是那一步在复制之前（`build-openwrt.yml:732-737`）。

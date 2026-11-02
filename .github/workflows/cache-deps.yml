@@ -171,22 +171,6 @@ jobs:
           # 本地包
           cp -r ../openwrt-build/package/luci-app-dnschain package/
 
-          # luci-app-dnsproxy：上游 clone + 本地 patch（与主流程同一流程）
-          git clone --depth 1 https://github.com/adm1n5ky/luci-app-dnsproxy.git \
-            package/luci-app-dnsproxy
-          if ! ls ../openwrt-build/patches/luci-app-dnsproxy/*.patch >/dev/null 2>&1; then
-            echo "!!! 未找到 patches/luci-app-dnsproxy/*.patch，预热中止" >&2
-            exit 1
-          fi
-          for patch in ../openwrt-build/patches/luci-app-dnsproxy/*.patch; do
-            abs_patch="$(cd "$(dirname "$patch")" && pwd)/$(basename "$patch")"
-            (cd package/luci-app-dnsproxy && git apply --check "$abs_patch") || {
-              echo "!!! patch 检查失败（上游可能已变更）: $abs_patch" >&2
-              exit 1
-            }
-            (cd package/luci-app-dnsproxy && git apply "$abs_patch")
-          done
-
           # 默认主题 shadcn（预构建产物，不需要前端构建）
           THEME_REPO="https://github.com/youridol/luci-theme-shadcn.git"
           rm -rf /tmp/luci-theme-shadcn package/luci-theme-shadcn

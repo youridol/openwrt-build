@@ -209,6 +209,9 @@ local SECTION_TAB = {
 	[translate("缓存")]          = "upstream",
 	[translate("SSR-Plus 兼容")] = "upstream",
 	[translate("拦截与框架开关")] = "upstream",
+	-- v0.25.0：dnsproxy 实例参数从已移除的 luci-app-dnsproxy 接管，
+	-- 归「上游」tab —— 它管的就是「查询怎么发出去」。
+	[translate("dnsproxy 实例参数")] = "upstream",
 	[translate("DHCP 下发 DNS（明文）")] = "upstream",
 
 	-- ── 名单 ───────────────────────────────────────────────────
@@ -276,7 +279,7 @@ local function emit_tab_meta(map)
 		--   （tools/check-dnschain-lua.py）的桩缺失而整个文件加载失败
 		--   （实测 PASS 从 132 掉到 78，报 "general.lua 能加载 FAIL"）。
 		--   包版本是常量、无依赖，且语义正好 —— 「包升级了，资源该重拉」。
-		local ver = "?v=1.10.0"
+		local ver = "?v=1.11.0"
 
 		return string.format(
 			'<link rel="stylesheet" href="%s/dnschain/dnschain.css%s">' ..
@@ -2372,6 +2375,82 @@ function o.write(self, section)
 	local ok, msg = ds.flush_cache()
 	ds.invalidate()
 	setmsg((ok and "✓ " or "✗ ") .. msg)
+end
+
+-- ── dnsproxy 实例参数（v0.25.0 从已移除的 luci-app-dnsproxy 接管）──
+--
+-- 背景：v0.25.0 起 luci-app-dnsproxy 的 Web UI 不再编入固件，
+-- 它的 48 个字段里绝大多数本来就**不由框架消费**（框架自己生成
+-- /var/etc/dnschain/dnsproxy.args），只有三项是框架真的会用、而原先
+-- 只能去那个页面改的：timeout / bootstrap / verbose。
+--
+-- 这三项收敛到本页，框架把它们同时写进国内与国外两个实例的参数文件
+-- （dc_gen_dnsproxy_common_args，dnschain.sh）。
+--
+-- 其余 45 个字段**刻意不接管**，理由分两类：
+--   ① 框架硬约束决定，不该是开关：cache（只在 dnsmasq 一层）、
+--      ipv6_disabled（必须 0）、fallback（框架自己写死指向 :5336）
+--   ② 框架从不使用：TLS 服务端、DNS64、EDNS、rate limit、
+--      pprof、private rdns、bogus_nxdomain、udp_buf_size、http3 …
+--      接管它们等于把「改了也不生效的假开关」搬过来 ——
+--      本页 v0.19.0 已删过一批同类假开关，不重复这个错误。
+s = m:section(TypedSection, "dnschain", translate("dnsproxy 实例参数"),
+	translate("框架自己托管两个 dnsproxy 实例，参数由 " ..
+		"<code>/var/etc/dnschain/dnsproxy*.args</code> 生成。" ..
+		"这里的三项<b>同时作用于两个实例</b> —— 两侧必须一致，" ..
+		"否则 fallback（:5353 → :5336）的触发时机会出现偏斜。"))
+s.anonymous = true
+s.addremove = false
+
+o = s:option(Value, "dnsproxy_timeout", translate("上游查询超时"),
+	translate("dnsproxy 的 <code>--timeout</code>，默认 <code>8s</code>。" ..
+		"<br/>太小：跨境 DoH 首包常 &gt; 3s，会被判超时并误触发 fallback。" ..
+		"<br/>太大：直连真的不通时要等很久才切到代理链。"))
+o.datatype = "or(uinteger, string)"
+o.placeholder = "8s"
+o.rmempty = false
+o.default = "8s"
+o.validate = function(self, value)
+	if not value or value == "" then return nil, translate("不能为空") end
+	-- 必须是「数字 + 可选单位(s/ms/m)」：dnsproxy 只认这种形式，
+	-- 写错它会在启动时拒绝，进程退出后端口无人监听（客户机全挂）。
+	if not value:match("^%d+%.?%d*[smh]?$") then
+		return nil, translate("格式应为 8s / 500ms / 2m（数字 + 可选单位）")
+	end
+	return value
+end
+
+o = s:option(DynamicList, "dnsproxy_bootstrap", translate("bootstrap 服务器"),
+	translate("仅用于解析<b>加密上游的主机名</b>（DoH 的 SNI/Host 需要）。" ..
+		"明文是它唯一且应有的用途。" ..
+		"<br/>留空时回落到内置的 <code>223.5.5.5</code> / <code>223.6.6.6</code>。"))
+o.datatype = "or(ip4addr, ip6addr)"
+o.rmempty = true
+
+o = s:option(Flag, "dnsproxy_verbose", translate("详细日志"),
+	translate("给两个实例加 <code>--verbose</code>。排障时打开，" ..
+		"日常保持关闭 —— 它会让 logread 被 DNS 查询刷屏。"))
+o.rmempty = false
+o.default = "0"
+
+o = s:option(DummyValue, "_dnsproxy_args", translate("当前生效参数"))
+o.rawhtml = true
+function o.cfgvalue()
+	local entry = ds.entry_port()
+	local fport = ds.foreign_port()
+	local function badge(ok, yes, no)
+		return ok and '<span class="dc-badge dc-badge--ok">' .. yes .. '</span>'
+			or '<span class="dc-badge dc-badge--bad">' .. no .. '</span>'
+	end
+	local cn_ok = ds.port_listening(entry, "udp")
+	local fg_ok = ds.port_listening(fport, "udp")
+	return string.format(
+		'%s 国内 :%s &nbsp; %s 国外 :%s<br/>' ..
+		'<span style="font-size:11px;color:var(--dc-mute)">' ..
+		translate("参数文件：/var/etc/dnschain/dnsproxy.args 与 dnsproxy-foreign.args") ..
+		'</span>',
+		badge(cn_ok, translate("在监听"), translate("未监听")), entry,
+		badge(fg_ok, translate("在监听"), translate("未监听")), fport)
 end
 
 ------------------------------------------------------------------------

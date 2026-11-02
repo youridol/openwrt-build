@@ -61,34 +61,32 @@
 7. **helloworld feed 判重后追加**（`:156-166`）：先 `grep -q '^src-git helloworld' || echo …`，因为 lede 自 2026 起自带该 feed，直接追加会 `Duplicate feed name 'helloworld'` → `feeds update` exit 25（`:162-163`）
 8. **复制 `package/luci-app-dnschain` 并做完整性断言**（`:167-526`）：断言 10 个关键文件存在、`dnschain-health` 有执行位、CSS 双主题令牌、表格滚动容器开闭数量相等且 ≥3、链路图 `viewBox` 容得下最右节点、贝塞尔曲线与箭头数量、`reject` 前置；最后调 `tools/verify-dnschain-domains.sh`（`:516-526`）
 9. **拉取并裁剪主题 shadcn**（`:527-590`）：`git clone --depth 1`，只复制 `Makefile root htdocs ucode LICENSE`，断言 4 个关键文件与 `main.css > 20000` 字节
-10. **拉 dnsproxy 上游并应用 patch**（`:591-627`）：
-    - `git clone --depth 1 https://github.com/adm1n5ky/luci-app-dnsproxy.git package/luci-app-dnsproxy`（`:601-602`）
-    - 先断言 `patches/luci-app-dnsproxy/*.patch` 非空（`:605-608`）
-    - 逐个 patch **先转绝对路径**（`:613`，因为在 `(cd package/…)` 子 shell 里相对路径失效）
-    - `git apply --check` 成功才 `git apply`（`:615-619`），**禁止 `|| true`**
-    - 打印 `git diff --stat` 与 `diff | head -80` 供日志确认（`:623-627`）
-11. **`feeds update -a` + `feeds install -a`**（`:628-633`）
-12. **强制各 feed 拉到最新 commit**（`:634-649`）：遍历 `feeds/*/`，有 `.git` 就 `git fetch` + `git reset --hard @{upstream}`，失败再回落到默认分支
-13. **对齐 dnsproxy 的 feed 链接**（`:650-665`）：删 `package/feeds/packages/dnsproxy`（旧版 0.56.2），`mkdir -p package/feeds/helloworld` 后 `ln -sfn ../../../feeds/helloworld/dnsproxy package/feeds/helloworld/dnsproxy`（新版 0.83.0）
-14. **生成 `.config`（单一配方）**（`:666-677`）：调 `tools/gen-openwrt-config.sh`，由该脚本写入目标三元组、SSR-Plus 全部 INCLUDE、dnschain 及其中文包、主题、DNS、SQM 与排除项，中间 `make defconfig` 两次。逐项见 §4.1。
-15. **校验 SQM / i18n / 排除项**（`:678-805`，见 §5.2）
-16. **复制 overlay 并补执行位**（`:806-840`）
-17. **校验 mosdns 模板契约**（`:841-879`）
-18. **校验 dnschain 契约**（`:880-1195`）
-19. **校验无嵌套 table 的 nft 片段**（`:1196-1245`）
-20. **校验 SSR-Plus uci-defaults 顺序契约**（`:1246-1328`）
-21. **算缓存指纹**（`:1329-1347`）：`tools/lede-fingerprint.sh` 输出 `TOOLCHAIN_FP` / `HOST_FP`，见 §8.2
-22. **归一源码 mtime**（`:1348-1363`）：`tools/normalize-mtime.sh`，工具链缓存能否被复用全看这一步，见 §8.3
-23. **恢复 dl 镜像**（`:1364-1395`）：`tools/cache-release.sh restore … 'dl.*'` + `dir-mirror.sh unpack`；退出码 10 视为「首次运行」
-24. **恢复工具链缓存**（`:1396-1479`）：按指纹取 `toolchain-*` / `host-*` 资产，解包后过 `tools/verify-toolchain-cache.sh`，再复核 stamp 是否比源码新；任一不满足即回退完整编译
-25. **下载软件包源码**（`:1480-1567`）：设 `DOWNLOAD_MIRROR` 与 `CURL_OPTIONS --max-time 300`，调 `tools/make-download.sh`（内含硬超时 + 哈希不一致自愈）
-26. **用 gcc-13 预编译 gn**（`:1568-1594`）：装 `gcc-13 g++-13`，`make tools/ninja/compile`，再 `CC=gcc-13 CXX=g++-13 make package/feeds/helloworld/gn/host/compile`
-27. **编译**（`:1595-1612`）：`make -j${{ env.JOBS }} V=s`
-28. **产物重命名**（`:1613-1661`）：`openwrt-x86-64-<generic>…` → `openwrt-x86-64-ssrplus-<VERSION>-<SHA>-<后缀>`，同时生成 `.sha256`，并断言新名含版本号且以 `.img.gz` 结尾
-29. **上传 artifact**（`:1662-1685`）
-30. **断言 artifact 真实存在**（`:1686-1730`）：查 Actions API，最多 6 次、每次等 5 秒
-31. **回写 dl 镜像（尽力而为）**（`:1731-1752`）：`continue-on-error: true`，构建成功后把本轮补齐的 `dl/` 覆盖缓存，见 §8.5
-32. **tag 构建时上传到 Release**（`:1753-1836`）：仅 `startsWith(github.ref, 'refs/tags/')`
+10. ~~**拉 dnsproxy 上游并应用 patch**~~ —— **v0.25.0 已删除该步骤**。
+    `luci-app-dnsproxy` 的 Web UI 合并进 `luci-app-dnschain` 后不再编入固件，
+    `patches/luci-app-dnsproxy/` 一并删除。dnsproxy **二进制**仍由 helloworld
+    feed 提供（见第 12 步的 feed 链接对齐），框架自己托管两个实例。
+11. **`feeds update -a` + `feeds install -a`**（`:591-596`）
+12. **强制各 feed 拉到最新 commit**（`:597-612`）：遍历 `feeds/*/`，有 `.git` 就 `git fetch` + `git reset --hard @{upstream}`，失败再回落到默认分支
+13. **对齐 dnsproxy 的 feed 链接**（`:613-628`）：删 `package/feeds/packages/dnsproxy`（旧版 0.56.2），`mkdir -p package/feeds/helloworld` 后 `ln -sfn ../../../feeds/helloworld/dnsproxy package/feeds/helloworld/dnsproxy`（新版 0.83.0）
+14. **生成 `.config`（单一配方）**（`:629-640`）：调 `tools/gen-openwrt-config.sh`，由该脚本写入目标三元组、SSR-Plus 全部 INCLUDE、dnschain 及其中文包、主题、DNS、SQM 与排除项，中间 `make defconfig` 两次。逐项见 §4.1。
+15. **校验 SQM / i18n / 排除项**（`:641-792`，见 §5.2）
+16. **复制 overlay 并补执行位**（`:793-827`）
+17. **校验 mosdns 模板契约**（`:828-866`）
+18. **校验 dnschain 契约**（`:867-1204`）
+19. **校验无嵌套 table 的 nft 片段**（`:1205-1254`）
+20. **校验 SSR-Plus uci-defaults 顺序契约**（`:1255-1337`）
+21. **算缓存指纹**（`:1338-1356`）：`tools/lede-fingerprint.sh` 输出 `TOOLCHAIN_FP` / `HOST_FP`，见 §8.2
+22. **归一源码 mtime**（`:1357-1372`）：`tools/normalize-mtime.sh`，工具链缓存能否被复用全看这一步，见 §8.3
+23. **恢复 dl 镜像**（`:1373-1404`）：`tools/cache-release.sh restore … 'dl.*'` + `dir-mirror.sh unpack`；退出码 10 视为「首次运行」
+24. **恢复工具链缓存**（`:1405-1488`）：按指纹取 `toolchain-*` / `host-*` 资产，解包后过 `tools/verify-toolchain-cache.sh`，再复核 stamp 是否比源码新；任一不满足即回退完整编译
+25. **下载软件包源码**（`:1489-1576`）：设 `DOWNLOAD_MIRROR` 与 `CURL_OPTIONS --max-time 300`，调 `tools/make-download.sh`（内含硬超时 + 哈希不一致自愈）
+26. **用 gcc-13 预编译 gn**（`:1577-1602`）：装 `gcc-13 g++-13`，`make tools/ninja/compile`，再 `CC=gcc-13 CXX=g++-13 make package/feeds/helloworld/gn/host/compile`
+27. **编译**（`:1603-1620`）：`make -j${{ env.JOBS }} V=s`
+28. **产物重命名**（`:1621-1669`）：`openwrt-x86-64-<generic>…` → `openwrt-x86-64-ssrplus-<VERSION>-<SHA>-<后缀>`，同时生成 `.sha256`，并断言新名含版本号且以 `.img.gz` 结尾
+29. **上传 artifact**（`:1670-1693`）
+30. **断言 artifact 真实存在**（`:1694-1738`）：查 Actions API，最多 6 次、每次等 5 秒
+31. **回写 dl 镜像（尽力而为）**（`:1739-1760`）：`continue-on-error: true`，构建成功后把本轮补齐的 `dl/` 覆盖缓存，见 §8.5
+32. **tag 构建时上传到 Release**（`:1761-1836`）：仅 `startsWith(github.ref, 'refs/tags/')`
 
 ### 4.1 `.config` 里被显式 `=y` 的符号
 
@@ -116,8 +114,7 @@
 | | `CONFIG_PACKAGE_chinadns-ng=y`（**框架已不依赖**，见 §7.1） | `:105` |
 | 主题 | `CONFIG_PACKAGE_luci-theme-shadcn=y` | `:127` |
 | | `# CONFIG_PACKAGE_luci-theme-{material,openwrt,openwrt-2020,argon,design} is not set`（循环内） | `:129-131` |
-| DNS | `CONFIG_PACKAGE_dnsproxy=y` | `:135` |
-| | `CONFIG_PACKAGE_luci-app-dnsproxy=y` | `:136` |
+| DNS | `CONFIG_PACKAGE_dnsproxy=y`（**二进制**；v0.25.0 起不再有 luci-app-dnsproxy） | `:133` |
 | | `CONFIG_PACKAGE_ca-bundle=y` | `:137` |
 | | `CONFIG_PACKAGE_ca-certificates=y` | `:138` |
 | 游戏 | `CONFIG_PACKAGE_kmod-tcp-bbr=y` | `:142` |
@@ -142,132 +139,135 @@
 
 ### 4.2 为什么不能关掉 bootstrap
 
-`build-openwrt.yml:667-678` 记录了完整理由：lede 的 `collections/luci/Makefile` 里 `LUCI_DEPENDS` **硬依赖** `+luci-theme-bootstrap`，写 `is not set` 会被下一次 `make defconfig` 的依赖求解再次选回 `=y`，于是「bootstrap 必须关闭」的断言必然失败（run 39549176947 就是这样挂的）。正确做法是保留 bootstrap 但切换默认主题，代价约 300KB，换来可回退。
+`build-openwrt.yml:732-738` 记录了完整理由：lede 的 `collections/luci/Makefile` 里 `LUCI_DEPENDS` **硬依赖** `+luci-theme-bootstrap`，写 `is not set` 会被下一次 `make defconfig` 的依赖求解再次选回 `=y`，于是「bootstrap 必须关闭」的断言必然失败（run 39549176947 就是这样挂的）。正确做法是保留 bootstrap 但切换默认主题，代价约 300KB，换来可回退。
 
 ## 5. 每个契约校验步骤的断言清单
 
-### 5.1 `Add luci-app-dnschain` 步骤内的断言（`:172-501`）
+### 5.1 `Add luci-app-dnschain` 步骤内的断言（`:167-526`）
 
 | 断言 | 行号 |
 |---|---|
-| 包目录存在，否则 `exit 1` | `:179-182` |
-| 10 个关键文件逐个存在：`Makefile`、`luasrc/controller/dnschain.lua`、`luasrc/model/cbi/dnschain/{general,dnschain,diagrams}.lua`、`htdocs/…/dnschain.css`、`…/dnschain.js`、`menu.d/luci-app-dnschain.json`、`acl.d/luci-app-dnschain.json`、`po/zh-cn/luci-app-dnschain.po` | `:188-204` |
-| 运行时组件 `files/usr/bin/dnschain-health`、`files/usr/bin/dnschain-triage`、`files/usr/share/dnschain/dnschain.sh` 存在 | `:218-227` |
-| `dnschain-health` / `dnschain-triage` 有执行位 | `:231-239` |
-| CSS 含 `data-darkmode="true"` | `:248-254` |
-| `--dc-ok`/`--dc-warn`/`--dc-bad`/`--dc-info` 各定义 ≥2 次（浅色+暗色） | `:257-263` |
-| CSS 与 JS 各自 > 500 字节 | `:266-273` |
-| CSS 含 `cbi-tabmenu:not(:has(` | `:284-290` |
-| JS 含 `dropEmptyTabmenu` | `:292-297` |
-| CSS 含 `data-dc-meta` 收拢规则 | `:300-306` |
-| `.dc-chain svg` 不得写死 `max-width` | `:316-323` |
-| CSS 含 `dc-table-wrap` | `:325-329` |
-| CSS 含 `dc-chain svg` 与 `min-width` | `:331-336` |
-| CSS 含 `cbi-value:has(> .cbi-value-field > .dc-chain)` | `:343-349` |
-| `dc-metrics`/`dc-table-wrap`/`dc-stats`/`dc-badge`/`dc-alert` 五类都纳入竖排规则 | `:351-357` |
-| JS 含 `markBlockRows` | `:359-365` |
-| `dc-block-row` 在 CSS 与 JS 都有 | `:367-372` |
-| 表格滚动容器开闭数量相等且 ≥3 | `:380-389` |
-| `viewBox` 宽度 > 最右节点右边缘（`X4 + NW + GAP + NW`） | `:394-409` |
-| 链路图用贝塞尔 `C` 指令 | `:418-424` |
-| `general.lua` / `diagrams.lua` 内联链路图不得有箭头（`marker-end` / `<marker>`） | `:438-458` |
-| 图身份用 `data-dc-figure` 标记 | `:460-464` |
-| 曲线控制点有交叉保护 `math.floor((x2 - x1) / 2)` | `:466-471` |
-| 节点填充 `fill="var(--dc-surface)"` | `:473-479` |
-| `sh tools/verify-dnschain-domains.sh` 必须通过（129 条） | `:491-498` |
+| 包目录存在，否则 `exit 1` | `:174-177` |
+| 10 个关键文件逐个存在：`Makefile`、`luasrc/controller/dnschain.lua`、`luasrc/model/cbi/dnschain/{general,dnschain,diagrams}.lua`、`htdocs/…/dnschain.css`、`…/dnschain.js`、`menu.d/luci-app-dnschain.json`、`acl.d/luci-app-dnschain.json`、`po/zh-cn/luci-app-dnschain.po` | `:183-199` |
+| 运行时组件 `files/usr/share/dnschain/dnschain.sh` 存在（v0.22.0 起只剩库文件） | `:210-217` |
+| 5 个运行时脚本有执行位（`dnschain-reconcile`/`dnschain-selftest`/`dnschain-client-diag`/`init.d/dnschain`/`99-zz-dnschain`/库） | `:230-242` |
+| CSS 含 `data-darkmode="true"` | `:254-258` |
+| `--dc-ok`/`--dc-warn`/`--dc-bad`/`--dc-info` 各定义 ≥2 次（浅色+暗色） | `:261-268` |
+| CSS 与 JS 各自 > 500 字节 | `:271-278` |
+| CSS 含 `cbi-tabmenu:not(:has(` | `:290-295` |
+| JS 含 `dropEmptyTabmenu` | `:297-302` |
+| CSS 含 `data-dc-meta` 收拢规则 | `:306-311` |
+| `.dc-chain svg` 不得写死 `max-width` | `:322-327` |
+| CSS 含 `dc-table-wrap` | `:329-334` |
+| CSS 含 `dc-chain svg` 与 `min-width` | `:336-341` |
+| CSS 含 `cbi-value:has(> .cbi-value-field > .dc-chain)` | `:349-354` |
+| `dc-metrics`/`dc-table-wrap`/`dc-stats`/`dc-badge`/`dc-alert` 五类都纳入竖排规则 | `:356-363` |
+| JS 含 `markBlockRows` | `:365-370` |
+| `dc-block-row` 在 CSS 与 JS 都有 | `:372-377` |
+| 表格滚动容器开闭数量相等且 ≥3 | `:396-403` |
+| `viewBox` 宽度 > 最右节点右边缘（`X4 + NW + GAP + NW`） | `:418-432` |
+| 链路图用贝塞尔 `C` 指令 | `:444-449` |
+| `general.lua` / `diagrams.lua` 内联链路图不得有箭头（`marker-end` / `<marker>`） | `:460-481` |
+| 图身份用 `data-dc-figure` 标记 | `:484-489` |
+| 曲线控制点有交叉保护 `math.floor((x2 - x1) / 2)` | `:492-497` |
+| 节点填充 `fill="var(--dc-surface)"` | `:501-506` |
+| `sh tools/verify-dnschain-domains.sh` 必须通过（211 条） | `:516-525` |
 
-### 5.2 `Verify SQM / i18n enabled and file services excluded`（`:691-879`）
-
-| 断言 | 行号 |
-|---|---|
-| `sqm-scripts`、`kmod-sched-cake`、`kmod-ifb`、`kmod-sched-core`、`tc-tiny` 全部 `=y` | `:697-707` |
-| `luci-app-sqm` 缺失**只告警不阻断** | `:709-712` |
-| `luci-app-dnschain` 与 `luci-i18n-dnschain-zh-cn` 必须 `=y`；失败时打印全部 `dnschain` 相关行 | `:786-802` |
-| `vsftpd`、`ksmbd-server`、`autosamba` 必须**不**为 `=y` | `:804-812` |
-| `luci-theme-shadcn` 必须 `=y`；非默认主题（material/openwrt/openwrt-2020/argon/design）不得 `=y` | `:826-851` |
-| `99-zzz-luci-theme-shadcn` 存在、含 `luci.main.mediaurlbase`、排序晚于 `30_luci-theme-shadcn` | `:853-878` |
-
-### 5.3 `Verify mosdns template contract`（`:917-955`）
+### 5.2 `Verify SQM / i18n enabled and file services excluded`（`:641-792`）
 
 | 断言 | 行号 |
 |---|---|
-| 文件 `files/etc/ssrplus/mosdns-config.yaml` 存在 | `:927-928` |
-| 第 14 行**必须**是 `        upstreams:`（8 空格缩进） | `:930-937` |
-| `exec: reject 0` 与 `exec: $forward_google` 都存在 | `:939-944` |
-| `reject` 行号必须**小于** `forward` 行号 | `:945-949` |
-| `DNS_MODE` 与 `DNS_PORT` 占位符存在 | `:951-953` |
+| `sqm-scripts`、`kmod-sched-cake`、`kmod-ifb`、`kmod-sched-core`、`tc-tiny` 全部 `=y` | `:646-657` |
+| `luci-app-sqm` 缺失**只告警不阻断** | `:659-662` |
+| `luci-app-dnschain` 与 `luci-i18n-dnschain-zh-cn` 必须 `=y`；失败时打印全部 `dnschain` 相关行 | `:664-689` |
+| `luci-app-dnsproxy` 与 `luci-i18n-dnsproxy-zh-cn` 必须**不**进 `.config`（v0.25.0 反向断言） | `:693-708` |
+| `vsftpd`、`ksmbd-server`、`autosamba` 必须**不**为 `=y` | `:718-725` |
+| `luci-theme-shadcn` 必须 `=y`；非默认主题（material/openwrt/openwrt-2020/argon/design）不得 `=y` | `:727-757` |
+| `99-zzz-luci-theme-shadcn` 存在、含 `luci.main.mediaurlbase`、排序晚于 `30_luci-theme-shadcn` | `:766-791` |
 
-### 5.4 `Verify dnschain framework contracts`（`:956-1275`）
+### 5.3 `Verify mosdns template contract`（`:828-865`）
+
+| 断言 | 行号 |
+|---|---|
+| 文件 `files/etc/ssrplus/mosdns-config.yaml` 存在 | `:838-839` |
+| 第 14 行**必须**是 `        upstreams:`（8 空格缩进） | `:841-849` |
+| `exec: reject 0` 与 `exec: $forward_google` 都存在 | `:851-854` |
+| `reject` 行号必须**小于** `forward` 行号 | `:856-860` |
+| `DNS_MODE` 与 `DNS_PORT` 占位符存在 | `:862-864` |
+
+### 5.4 `Verify dnschain framework contracts`（`:867-1204`）
 
 | # | 断言 | 行号 |
 |---|---|---|
-| 0 | 8 个文件存在（`dnschain.sh`、`init.d/dnschain`、`config/dnschain`、`reconcile`、`selftest`、`health`、`triage`、`99-zz-dnschain`） | `:969-981` |
-| 1 | 7 个 shell 文件 `sh -n` 通过（dash 解析） | `:987-1000` |
-| 2a | 剥注释后不得含进程替换 `<(` / `>(` | `:1018-1023` |
-| 2b | 不得含 `[[ `（判据是「`[[` 后紧跟空白」，避免误伤 `[[:space:]]`） | `:1025-1036` |
-| 2c | 不得含 bash 数组赋值 `name=(` | `:1038-1042` |
-| 2d | 不得含作为命令的 `(( `（排除 `$((`） | `:1044-1050` |
-| 3 | 库脚本不得生成 `--cache`、`--fallback`、`--ipv6-disabled` | `:1054-1069` |
-| 4 | 库脚本不得定义 `dc_gen_filter_args`（chinadns-ng 已移除） | `:1071-1082` |
-| 4b | 库脚本**必须**有 `dc_gen_foreign_args` | `:1084-1090` |
-| 4c | 不得生成 `[/域名/]` 形式 | `:1092-1100` |
-| 5 | 不得出现明文 `114.114.114.114` | `:1102-1108` |
-| 6 | 不得过滤 `xn--` | `:1110-1121` |
-| 7 | init 脚本不得含 `table ` 声明（裸 chain 契约） | `:1123-1129` |
-| 8 | `99-zz-dnschain` 必须晚于 `99-gaming-optimize` | `:1131-1142` |
-| 9 | 配置含 `entry_port '5353'`、`foreign_port '5336'`、`foreign 'keep'`、`domestic 'keep'`、`require_ipv6 '1'`、`filter_https_rr '0'` | `:1144-1161` |
-| 9b | 国外上游必须是 `https://dns.google/dns-query`，且不得有 `tls://8.8.8.8` | `:1163-1175` |
-| 10 | `files/etc/config/dnsproxy` 的 `cache.enabled` 为 `0`、无 `list fallback`、`ipv6_disabled '0'` | `:1177-1207` |
-| 11 | `applechina.conf`：`server=` 恰好 173 条、明文 0 条、指向 `127.0.0.1#5353` 恰好 173 条 | `:1209-1233` |
-| 12 | init 脚本含 `priority -151` 至少 1 处 | `:1235-1243` |
-| 13 | `init.d/dnsproxy` 含 `dnschain_takes_over` | `:1245-1252` |
-| 14 | 两份 ADR 文档在 `../openwrt-build/docs/adr/` 下存在 | `:1254-1266` |
-| — | 任一 `rc=1` 则 `exit 1` | `:1268-1272` |
+| 0 | 6 个文件存在（`dnschain.sh` = `$LIB`、`init.d/dnschain`、`config/dnschain`、`dnschain-reconcile`、`dnschain-selftest`、`99-zz-dnschain`） | `:876-890` |
+| 1 | 7 个 shell 文件 `sh -n` 通过（dash 解析） | `:896-908` |
+| 2a | 剥注释后不得含进程替换 `<(` / `>(` | `:925-930` |
+| 2b | 不得含 `[[ `（判据是「`[[` 后紧跟空白」，避免误伤 `[[:space:]]`） | `:932-943` |
+| 2c | 不得含 bash 数组赋值 `name=(` | `:945-949` |
+| 2d | 不得含作为命令的 `(( `（排除 `$((`） | `:951-957` |
+| 3 | 库脚本不得生成 `--cache`、`--fallback`、`--ipv6-disabled` | `:961-976` |
+| 4 | 库脚本不得定义 `dc_gen_filter_args`（chinadns-ng 已移除） | `:978-989` |
+| 4b | 库脚本**必须**有 `dc_gen_foreign_args` | `:991-997` |
+| 4c | 不得生成 `[/域名/]` 形式 | `:999-1007` |
+| 5 | 不得出现明文 `114.114.114.114` | `:1009-1015` |
+| 6 | 不得过滤 `xn--` | `:1017-1028` |
+| 7 | init 脚本不得含 `table ` 声明（裸 chain 契约） | `:1030-1036` |
+| 8 | `99-zz-dnschain` 必须晚于 `99-gaming-optimize` | `:1038-1049` |
+| 9 | 配置含 `entry_port '5353'`、`foreign_port '5336'`、`foreign 'keep'`、`domestic 'keep'`、`require_ipv6 '1'`、`filter_https_rr '0'`，以及 v0.25.0 接管的三项 `dnsproxy_timeout` / `dnsproxy_bootstrap` / `dnsproxy_verbose` | `:1051-1073` |
+| 9b | 两个实例必须共用 `dc_gen_dnsproxy_common_args`，调用点 ≥ 2 处（v0.25.0） | `:1075-1090` |
+| 9c | 国外上游必须是 `https://dns.google/dns-query`，且不得有 `tls://8.8.8.8` | `:1092-1104` |
+| 10 | `files/etc/config/dnsproxy` 的 `cache.enabled` 为 `0`、无 `list fallback`、`ipv6_disabled '0'` | `:1106-1136` |
+| 11 | `applechina.conf`：`server=` 恰好 173 条、明文 0 条、指向 `127.0.0.1#5353` 恰好 173 条 | `:1138-1162` |
+| 12 | init 脚本含 `priority -151` 至少 1 处 | `:1164-1172` |
+| 13 | `init.d/dnsproxy` 含 `dnschain_takes_over` | `:1174-1181` |
+| 14 | 两份 ADR 文档在 `../openwrt-build/docs/adr/` 下存在 | `:1183-1195` |
+| — | 任一 `rc=1` 则 `exit 1` | `:1197-1201` |
 
-### 5.5 `Verify no nested-table nft fragments`（`:1276-1325`）
+### 5.5 `Verify no nested-table nft fragments`（`:1205-1253`）
 
 | 断言 | 行号 |
 |---|---|
-| `files/etc/nftables.d/*.nft` 每个文件都不得含 `^\s*table\s` | `:1294-1306` |
-| 所有提到 `nftables.d` 的 `files/` 下脚本（跳过 `*.md`）也不得含 `^\s*table\s` | `:1307-1318` |
-| 任一命中即 `exit 1` | `:1319-1322` |
+| `files/etc/nftables.d/*.nft` 每个文件都不得含 `^\s*table\s` | `:1225-1235` |
+| 所有提到 `nftables.d` 的 `files/` 下脚本（跳过 `*.md`）也不得含 `^\s*table\s` | `:1236-1247` |
+| 任一命中即 `exit 1` | `:1248-1251` |
 
-### 5.6 `Verify SSR-Plus uci-defaults ordering contract`（`:1326-1408`）
+### 5.6 `Verify SSR-Plus uci-defaults ordering contract`（`:1255-1326`）
 
 | # | 断言 | 行号 |
 |---|---|---|
-| 0 | 文件 `files/etc/uci-defaults/99-gaming-optimize` 存在 | `:1335-1336` |
-| 1 | 含 `[ ! -s /etc/config/shadowsocksr ]` 守卫（空配置先铺底） | `:1338-1346` |
-| 2 | 守卫里调用 `/etc/init.d/shadowsocksr reset` | `:1348-1353` |
-| 3 | `uci -q get shadowsocksr.@global[0]` 守卫至少 1 处，且 `uci set shadowsocksr.@global[0]` 至少 1 处 | `:1355-1370` |
-| 3b | 最后一处守卫之后必须还有写入 | `:1371-1378` |
-| 4 | 不得有「未接失败日志的裸 `uci set`」 | `:1380-1388` |
-| 5 | 含 `/etc/nftables.d/10-mss-clamp.nft` 字符串 | `:1390-1396` |
+| 0 | 文件 `files/etc/uci-defaults/99-gaming-optimize` 存在 | `:1264-1265` |
+| 1 | 含 `[ ! -s /etc/config/shadowsocksr ]` 守卫（空配置先铺底） | `:1267-1275` |
+| 2 | 守卫里调用 `/etc/init.d/shadowsocksr reset` | `:1277-1282` |
+| 3 | `uci -q get shadowsocksr.@global[0]` 守卫至少 1 处，且 `uci set shadowsocksr.@global[0]` 至少 1 处 | `:1284-1299` |
+| 3b | 最后一处守卫之后必须还有写入 | `:1300-1307` |
+| 4 | 不得有「未接失败日志的裸 `uci set`」 | `:1309-1317` |
+| 5 | 含 `/etc/nftables.d/10-mss-clamp.nft` 字符串 | `:1319-1325` |
 
-### 5.7 `Rename firmware with version` 内的断言（`:1693-1741`）
+### 5.7 `Rename firmware with version` 内的断言（`:1621-1668`）
 
 | 断言 | 行号 |
 |---|---|
-| 至少有一个 `.img.gz`，否则 `exit 1` | `:1699`、`:1703`、`:1723` |
-| 产物名含目标名与类型分隔符（`rest` 含 `-`） | `:1711-1714` |
-| 每个产物名都含 `${VERSION}` | `:1731-1734` |
-| 每个产物名都以 `.img.gz` 结尾 | `:1735-1738` |
+| 至少有一个 `.img.gz`，否则 `exit 1` | `:1629-1631`、`:1651` |
+| 产物名含目标名与类型分隔符（`rest` 含 `-`） | `:1639-1642` |
+| 每个产物名都含 `${VERSION}` | `:1655-1662` |
+| 每个产物名都以 `.img.gz` 结尾 | `:1663-1666` |
 
 ### 5.8 `Upload artifacts` 与 `Assert firmware artifact exists`
 
-- `if-no-files-found: error`（`:1752`）。默认值是 `warn`，语义是「没匹配到文件也照样成功」，会出现「构建显示成功、Actions 上却没有产物」（`:1747-1751`）。
-- 上传 `*.img.gz` 与 `*.img.gz.sha256`（`:1753-1755`）。
-- `Assert firmware artifact exists`（`:1766-1794`）用 `gh api repos/$GH_REPO/actions/runs/$RUN_ID/artifacts --jq '.total_count'` 计数，最多 6 次、每次 5 秒（`:1776-1782`），`< 1` 即 `exit 1`（`:1788-1793`）。
+- `if-no-files-found: error`（`:1680`）。默认值是 `warn`，语义是「没匹配到文件也照样成功」，会出现「构建显示成功、Actions 上却没有产物」（`:1675-1679`）。
+- 上传 `*.img.gz` 与 `*.img.gz.sha256`（`:1681-1683`）。
+- `Assert firmware artifact exists`（`:1694-1722`）用 `gh api repos/$GH_REPO/actions/runs/$RUN_ID/artifacts --jq '.total_count'` 计数，最多 6 次、每次 5 秒（`:1705-1710`），`< 1` 即 `exit 1`（`:1716-1721`）。
 
-### 5.9 `Upload firmware to GitHub Release`（仅 tag，`:1833-1917`）
+### 5.9 `Upload firmware to GitHub Release`（仅 tag，`:1761-1845`）
 
 | 断言 / 行为 | 行号 |
 |---|---|
-| 显式设 `GH_REPO`（工作区根没有 `.git`，不设会 `fatal: not a git repository`） | `:1837-1850` |
-| `gh release view` 失败必须区分「尚未创建」与硬错误；后者立刻 `exit 1` | `:1863-1881` |
-| 60 秒内未就绪则 `gh release create` 兜底 | `:1883-1887` |
-| 已存在的同名 asset 跳过，其余 `gh release upload --clobber` | `:1893-1905` |
-| 兜底断言：Release 上至少 1 个 `.img.gz`，否则 `exit 1` | `:1910-1915` |
+| 显式设 `GH_REPO`（工作区根没有 `.git`，不设会 `fatal: not a git repository`） | `:1765-1778` |
+| `gh release view` 失败必须区分「尚未创建」与硬错误；后者立刻 `exit 1` | `:1786-1809` |
+| 60 秒内未就绪则 `gh release create` 兜底 | `:1811-1815` |
+| 已存在的同名 asset 跳过，其余 `gh release upload --clobber` | `:1817-1833` |
+| 兜底断言：Release 上至少 1 个 `.img.gz`，否则 `exit 1` | `:1835-1843` |
+
 ## 6. `release.yml`
 
 | 步骤 | 行为 | 行号 |
@@ -279,41 +279,41 @@
 | 版本段结束位置 | 从 `start+1` 起找下一个 `^## \[`；找不到则到文件末尾 | `:60-65` |
 | 抽取 notes | `sed -n "$((start+1)),${end}p"`，再用 `perl` 裁掉首尾空行 | `:68-70` |
 | 建或更新 Release | 已存在 → `gh release edit --notes-file`；否则 `gh release create --notes-file` | `:85-93` |
-| 权限 | `permissions: contents: write`（`build-openwrt.yml` 也各自声明，两个工作流的令牌**独立**） | `:15-16`；对比 `build-openwrt.yml:49-62` |
+| 权限 | `permissions: contents: write`（`build-openwrt.yml` 也各自声明，两个工作流的令牌**独立**） | `:15-16`；对比 `build-openwrt.yml:44-62` |
 
-固件**不在**这个工作流上传 —— 由 `build-openwrt.yml` 的最后一步在 tag 构建时上传（`build-openwrt.yml:1625-1709`）。两边靠 tag 名对齐。
+固件**不在**这个工作流上传 —— 由 `build-openwrt.yml` 的最后一步在 tag 构建时上传（`build-openwrt.yml:1641-1725`）。两边靠 tag 名对齐。
 
 ## 7. 已知问题
 
 ### 7.1 `chinadns-ng` 同时「必须有」和「不再要求」
 
-- `tools/gen-openwrt-config.sh:91`：`echo "CONFIG_PACKAGE_chinadns-ng=y"`，注释已更正为「由 SSR-Plus 的 INCLUDE 带入，显式再声明一次；v0.10.0 起 dnschain 框架已不再依赖它」。
-- `build-openwrt.yml:782-785`：「v0.10.0：不再要求 `CONFIG_PACKAGE_chinadns-ng`。框架已移除该组件（`-t` 不支持 DoH，而落地节点到 853 不通）」。
-- 同文件 `:1077-1082` 断言库脚本**不得**定义 `dc_gen_filter_args`。
+- `tools/gen-openwrt-config.sh:98`：`echo "CONFIG_PACKAGE_chinadns-ng=y"`，注释已更正为「由 SSR-Plus 的 INCLUDE 带入，显式再声明一次；v0.10.0 起 dnschain 框架已不再依赖它」。
+- `build-openwrt.yml:671-674`：「v0.10.0：不再要求 `CONFIG_PACKAGE_chinadns-ng`。框架已移除该组件（`-t` 不支持 DoH，而落地节点到 853 不通）」。
+- 同文件 `:984-989` 断言库脚本**不得**定义 `dc_gen_filter_args`。
 
 即 `.config` 里仍会带该包，但框架已不依赖它（保留是因为 SSR-Plus 侧仍会用到）。它不会导致构建失败（SSR-Plus 的 `INCLUDE_ChinaDNS_NG=y` 本来就带入）。
 
 ### 7.2 MSS clamp 断言是假通过
 
-- `build-openwrt.yml:1183-1188` 断言 `99-gaming-optimize` 里含字符串 `/etc/nftables.d/10-mss-clamp.nft`。
+- `build-openwrt.yml:1319-1325` 断言 `99-gaming-optimize` 里含字符串 `/etc/nftables.d/10-mss-clamp.nft`。
 - 该字符串在文件里**只出现在注释**：`files/etc/uci-defaults/99-gaming-optimize` 的注释段（「后来改为写 `/etc/nftables.d/10-mss-clamp.nft`（fw4 时代）。**两个版本都已删除**」）。
 - 该段代码已被完整删除，理由是功能冗余 + fw3 路径死代码 + fw4 路径曾造成断网。
 - 因此这条断言校验的不是「生成逻辑存在」，而是「解释删除原因的注释里提到了这个路径」——**注释被删就会红，逻辑被加回来也不会红**。它不能证明任何东西。
 
 ### 7.3 文档存在性检查必须带 `../openwrt-build/` 前缀
 
-- `build-openwrt.yml:1046-1058` 的 `working-directory` 是 `lede`（`:749`），而 `docs/` 在**仓库根**（与 `lede` 同级）。
-- 直接写 `docs/adr/...` 会指到 `lede/docs/` —— 那是 lede 源码自带的目录，里面没有本仓库的 ADR（`:1254-1266`，v0.9.0 首次构建因此失败）。
-- 正确写法是 `[ -f "../openwrt-build/$doc" ]`（`:1260`）。
-- 同一模式还出现在 `:491-495`（`../openwrt-build/tools/verify-dnschain-domains.sh`）、`:1260`。
+- `build-openwrt.yml:1183-1195` 的 `working-directory` 是 `lede`（`:736`），而 `docs/` 在**仓库根**（与 `lede` 同级）。
+- 直接写 `docs/adr/...` 会指到 `lede/docs/` —— 那是 lede 源码自带的目录，里面没有本仓库的 ADR（`:1188-1195`，v0.9.0 首次构建因此失败）。
+- 正确写法是 `[ -f "../openwrt-build/$doc" ]`（`:1189`）。
+- 同一模式还出现在 `:516-519`（`../openwrt-build/tools/verify-dnschain-domains.sh`）、`:1189`。
 
 ### 7.4 本次核对新发现
 
-- **`:486` 的断言条数已过期**：`build-openwrt.yml:476` 的注释写「断言较多（88 条）」，而 `tools/verify-dnschain-domains.sh` 现在输出 **129 条 OK**（见 `docs/operations/verification.md` §1.1）。
+- **断言条数已过期（v0.25.0 复查）**：`build-openwrt.yml:511` 的注释仍写「断言较多（88 条）」，而 `tools/verify-dnschain-domains.sh` 现在输出 **211 条 OK**（见 `docs/operations/verification.md` §1.1）。
 - **CI 不跑三个本地校验脚本**：`tools/check-dnschain-lua.py`、`tools/render-dnschain-diagrams.py`、`tools/extract-dnschain-i18n.py` 在全仓库 `.yml` 里零引用（`grep -n "check-dnschain\|render-dnschain\|extract-dnschain\|firmware-artifact\|ci-sim" .github/workflows/build-openwrt.yml` 无输出）。CI 只跑 `verify-dnschain-domains.sh`。这三个脚本的结论在 CI 里没有任何强制力。
 - **`verify-firmware-artifact.sh` 也未接入 CI**：它是刷机前的本地预检，需要解包后的目录参数（`tools/verify-firmware-artifact.sh:29-33`），CI 里没有产物解包步骤。
-- **`:647-662` 的 `git reset --hard @{upstream}` 失败被 `|| true` 吞掉**：`(cd "$f" && git fetch origin && git reset --hard @{upstream}) || (…default_branch…) || true`，即所有 feed 都更新失败时该步骤仍返回 0。这与红线 3「禁止静默失败」的口径不一致（对比 `:695`、`:737` 明确写「不使用 `|| true`」）。实际影响有限：feed 更新失败不改变「用的是哪个 commit」这件事的可观测性，但会让「强制拉到最新」这个承诺无法验证。
-- **`build-openwrt.yml` 与 `release.yml` 对 `CHANGELOG` 顶部格式的容忍度不同**：`build-openwrt.yml:88-95` 要求第一条 `## [` 必须是版本标题，`release.yml` 没有这条检查（只在 `:49` 用 `grep -nF` 找目标版本）。因此 `release.yml` 在顶部写 `## [未发布]` 时仍能正常发版，而 `build-openwrt.yml` 会拒绝构建 —— 两者的前置条件不一致。
+- **`:597-612` 的 `git reset --hard @{upstream}` 失败被 `|| true` 吞掉**：`(cd "$f" && git fetch origin && git reset --hard @{upstream}) || (…default_branch…) || true`，即所有 feed 都更新失败时该步骤仍返回 0。这与红线 3「禁止静默失败」的口径不一致（对比 `:808-809`、`:816` 明确写「不使用 `|| true`」）。实际影响有限：feed 更新失败不改变「用的是哪个 commit」这件事的可观测性，但会让「强制拉到最新」这个承诺无法验证。
+- **`build-openwrt.yml` 与 `release.yml` 对 `CHANGELOG` 顶部格式的容忍度不同**：`build-openwrt.yml:107-114` 要求第一条 `## [` 必须是版本标题，`release.yml` 没有这条检查（只在 `:49` 用 `grep -nF` 找目标版本）。因此 `release.yml` 在顶部写 `## [未发布]` 时仍能正常发版，而 `build-openwrt.yml` 会拒绝构建 —— 两者的前置条件不一致。
 
 ---
 

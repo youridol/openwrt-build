@@ -166,8 +166,10 @@ _Avoid_: 状态库、探测结果
 （上游 v1.21.4）已于 v0.25.0 整体移除；`package/` 下现在只有自有的
 `luci-app-dnschain/`（不是 vendored，没有上游可比对，故没有 patch 记录）。
 _落点_：`package/` 目录清单；移除记录见 `CHANGELOG.md` v0.25.0。
-_反例_：`luci-app-dnsproxy` 不是 vendored —— 它由 feed 提供，改动只以
-`patches/luci-app-dnsproxy/*.patch` 落地，禁止改上游。
+_反例_：`luci-app-dnsproxy` 曾是「上游包 + patch」模式（由 feed 提供，
+改动只以 `patches/luci-app-dnsproxy/*.patch` 落地，禁止改上游）。
+**v0.25.0 起该包的 Web UI 已从固件移除**，patch 目录一并删除 ——
+dnsproxy 的配置入口合并进 `luci-app-dnschain`。
 _Avoid_: 本地包、内嵌包
 
 **patch 重放**：
@@ -185,7 +187,7 @@ _Avoid_: 打补丁、应用差异
 排序是硬契约：`99-zz-dnschain` 必须晚于 `99-gaming-optimize`，否则无法覆盖
 后者写入的 `pdnsd_enable=4`。
 _落点_：`files/etc/uci-defaults/99-zz-dnschain:7-9`、
-CI 断言 `.github/workflows/build-openwrt.yml:895-906`
+CI 断言 `.github/workflows/build-openwrt.yml:1038-1049`
 _反例_：不是「每次开机都跑」—— 只在**首刷**跑一次，之后靠收敛器纠正。
 _Avoid_: 初始化脚本、默认值脚本
 
