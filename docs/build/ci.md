@@ -60,7 +60,7 @@
 6. **设 `JOBS=2`**（`:152-155`）
 7. **helloworld feed 判重后追加**（`:156-166`）：先 `grep -q '^src-git helloworld' || echo …`，因为 lede 自 2026 起自带该 feed，直接追加会 `Duplicate feed name 'helloworld'` → `feeds update` exit 25（`:162-163`）
 8. **复制 `package/luci-app-dnschain` 并做完整性断言**（`:167-526`）：断言 10 个关键文件存在、`dnschain-health` 有执行位、CSS 双主题令牌、表格滚动容器开闭数量相等且 ≥3、链路图 `viewBox` 容得下最右节点、贝塞尔曲线与箭头数量、`reject` 前置；最后调 `tools/verify-dnschain-domains.sh`（`:516-526`）
-9. **拉取并裁剪主题 shadcn**（`:527-590`）：`git clone --depth 1`，只复制 `Makefile root htdocs ucode LICENSE`，断言 4 个关键文件与 `main.css > 20000` 字节
+9. **复制主题 shadcn 并做完整性断言**（`:544-634`）：**v0.26.0 起改为从本仓库 `../openwrt-build/package/luci-theme-shadcn` 复制，不再 runtime clone 上游**（用户要求「编译时不要再拉上游」）。断言 5 个关键文件（含 `UPSTREAM`）、`main.css > 20000` 字节、4 个二进制资源类型（防行尾转换损坏）；`THEME_SHA` 改从 `UPSTREAM` 的 `commit:` 行读取
 10. ~~**拉 dnsproxy 上游并应用 patch**~~ —— **v0.25.0 已删除该步骤**。
     `luci-app-dnsproxy` 的 Web UI 合并进 `luci-app-dnschain` 后不再编入固件，
     `patches/luci-app-dnsproxy/` 一并删除。dnsproxy **二进制**仍由 helloworld
@@ -182,8 +182,24 @@
 | `luci-app-dnschain` 与 `luci-i18n-dnschain-zh-cn` 必须 `=y`；失败时打印全部 `dnschain` 相关行 | `:664-689` |
 | `luci-app-dnsproxy` 与 `luci-i18n-dnsproxy-zh-cn` 必须**不**进 `.config`（v0.25.0 反向断言） | `:693-708` |
 | `vsftpd`、`ksmbd-server`、`autosamba` 必须**不**为 `=y` | `:718-725` |
-| `luci-theme-shadcn` 必须 `=y`；非默认主题（material/openwrt/openwrt-2020/argon/design）不得 `=y` | `:727-757` |
-| `99-zzz-luci-theme-shadcn` 存在、含 `luci.main.mediaurlbase`、排序晚于 `30_luci-theme-shadcn` | `:766-791` |
+| `luci-theme-shadcn` 必须 `=y`；非默认主题（material/openwrt/openwrt-2020/argon/design）不得 `=y` | `:772-809` |
+| `99-zzz-luci-theme-shadcn` 存在、含 `luci.main.mediaurlbase`、排序晚于 `30_luci-theme-shadcn` | `:812-837` |
+
+### 5.2.1 主题 vendoring 契约（`tools/verify-theme-vendor.sh`）
+
+v0.26.0 起主题由本仓库提供，`Add luci-theme-shadcn` 步骤之前新增一步
+`sh ../openwrt-build/tools/verify-theme-vendor.sh`。它覆盖五类**构建发现不了**的失效：
+
+| 断言 | 为什么构建发现不了 |
+|---|---|
+| 5 个关键文件存在（`Makefile`/`UPSTREAM`/`30_luci-theme-shadcn`/`main.css`/`login.css`） | 缺 `main.css` 时包照样编过，只是登录后白屏 |
+| `main.css ≥ 20000` 字节 | 误传源码版 tailwind 只有几 KB，页面静默无样式 |
+| 4 个二进制资源 `file` 类型正确（jpeg/ico/png/woff2） | `.gitattributes` 把二进制当文本转换后损坏，构建与运行都不报错 |
+| `.gitattributes` 的 `*.png binary` 等规则**行号晚于** `package/**` | 规则写反顺序等于没写 —— git 是后者覆盖前者 |
+| 无扩展名脚本无 CRLF、有执行位 | CRLF 只在 busybox ash 上炸；缺执行位则 `30_luci-theme-shadcn` 不执行 |
+| workflows 里不再出现 `clone … luci-theme-shadcn` | 配方回退成 runtime clone 时构建仍然成功 |
+
+⚠️ 该脚本本地可直接跑：`sh tools/verify-theme-vendor.sh`（CI 与本地同一份）。
 
 ### 5.3 `Verify mosdns template contract`（`:828-865`）
 

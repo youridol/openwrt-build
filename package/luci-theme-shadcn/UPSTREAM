@@ -1,0 +1,29 @@
+repo:   https://github.com/youridol/luci-theme-shadcn.git
+ref:    main
+commit: ed8065043eef7af8577609c4fbd9a0f0f1c5b9ea
+date:   2026-10-26T23:01:58+0800
+sync:   2026-11-04
+
+# 为什么 vendored 而不是 CI 里 git clone
+# --------------------------------------
+# 用户要求「CI/CD 编译时不要再拉上游，改用本仓库的代码」。故把主题的
+# 构建相关文件固定进 package/luci-theme-shadcn/。
+#
+# 只保留构建需要的 5 项：Makefile / root / htdocs / ucode / LICENSE。
+# 上游的 .dev / .github / .husky / *.md / node_modules 等是开发工具链，
+# 进了固件会白占空间，也不参与 OpenWrt 打包。
+#
+# htdocs/luci-static/shadcn/main.css 已由上游预构建并入库（实测 134262 字节、
+# 7 个 woff2），故**不需要前端构建**，直接当 LuCI 包编译即可。
+# 因此不能只放源码 —— 丢了 htdocs 会白屏。
+#
+# 升级方式
+# --------
+# 1. 取上游新 commit，重做上面的 5 项复制；
+# 2. 更新本文件的三行（commit / date / sync）；
+# 3. 跑 tools/verify-theme-vendor.sh 校验字节一致性与行尾。
+#
+# ⚠️ 本包内 13 个二进制资源（4 png / 1 jpeg / 1 ico / 7 woff2）依赖 .gitattributes 里的
+# `*.png binary` 等规则。若那几行被删或移到 `package/**` 之上，
+# 二进制会被 CRLF→LF 转坏（实测 login-bg.jpeg 少 4 字节），
+# 构建不报错，只表现为登录页背景图裂开。

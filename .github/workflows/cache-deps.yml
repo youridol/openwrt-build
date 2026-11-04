@@ -171,19 +171,19 @@ jobs:
           # 本地包
           cp -r ../openwrt-build/package/luci-app-dnschain package/
 
-          # 默认主题 shadcn（预构建产物，不需要前端构建）
-          THEME_REPO="https://github.com/youridol/luci-theme-shadcn.git"
-          rm -rf /tmp/luci-theme-shadcn package/luci-theme-shadcn
-          git clone --depth 1 --branch main "$THEME_REPO" /tmp/luci-theme-shadcn
-          mkdir -p package/luci-theme-shadcn
-          for item in Makefile root htdocs ucode LICENSE; do
-            # 写成 if 而不是 `[ -e ] && cp`：run 块在 bash -e 下执行，
-            # 若最后一项不存在，`&&` 链返回 1 会让整个步骤静默失败。
-            # （dir-mirror.sh 就栽在这个形态上，见该脚本 pack 的注释。）
-            if [ -e "/tmp/luci-theme-shadcn/$item" ]; then
-              cp -r "/tmp/luci-theme-shadcn/$item" package/luci-theme-shadcn/
-            fi
-          done
+          # 默认主题 shadcn（v0.26.0 起由本仓库 vendored 提供，不再 runtime clone）
+          #
+          # 与 build-openwrt.yml 的 'Add luci-theme-shadcn' 步骤保持同一配方：
+          # 两边都从 ../openwrt-build/package/luci-theme-shadcn 复制。
+          # ⚠️ 若这里仍去 clone 上游，预热出的 .config 会与真实构建不一致
+          # （上游 main 一旦改动，包名/PKG_VERSION 可能变），
+          # 表现为 dl 镜像缺包、每次构建回落到慢源。
+          if [ ! -d ../openwrt-build/package/luci-theme-shadcn ]; then
+            echo "!!! 缺少 ../openwrt-build/package/luci-theme-shadcn" >&2
+            exit 1
+          fi
+          rm -rf package/luci-theme-shadcn
+          cp -r ../openwrt-build/package/luci-theme-shadcn package/
 
           ./scripts/feeds update -a
           ./scripts/feeds install -a
@@ -360,6 +360,15 @@ jobs:
           grep -q '^src-git helloworld' "$FEED_CONF" 2>/dev/null || \
             echo "src-git helloworld https://github.com/fw876/helloworld" >> "$FEED_CONF"
           cp -r ../openwrt-build/package/luci-app-dnschain package/
+
+          # 默认主题 shadcn（v0.26.0 起由本仓库 vendored 提供）
+          # 与 warm-dl / build-openwrt.yml 同一配方，避免预热的 .config 漂移。
+          if [ ! -d ../openwrt-build/package/luci-theme-shadcn ]; then
+            echo "!!! 缺少 ../openwrt-build/package/luci-theme-shadcn" >&2
+            exit 1
+          fi
+          cp -r ../openwrt-build/package/luci-theme-shadcn package/
+
           ./scripts/feeds update -a
           ./scripts/feeds install -a
           # 同 warm-dl：feed 更新失败必须显式失败，不用 `|| true`。

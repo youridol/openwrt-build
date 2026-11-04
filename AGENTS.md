@@ -20,6 +20,8 @@
 | `tools/check-dnschain-lua.py` | 用 lupa（真实 Lua）跑语法 + 模型 + **真实渲染页面每个 `cfgvalue()`** | 直接用 |
 | `tools/render-dnschain-diagrams.py` | 两张思维导图的纯几何校验 + 输出可打开的 HTML 预览 | 直接用 |
 | `tools/extract-dnschain-i18n.py` | 提取 `translate()` 中文并比对 PO（`--write` 追加缺失） | 直接用 |
+| `tools/verify-theme-vendor.sh` | `luci-theme-shadcn` vendoring 契约（文件齐全、二进制未被行尾转坏、执行位、`UPSTREAM` 溯源） | 直接用 |
+| `package/luci-theme-shadcn/` | **vendored** 的 LuCI 主题（v0.26.0 起由本仓库提供，CI 不再 clone 上游）。改静态资源后须跑 `sh tools/verify-theme-vendor.sh` | 本仓库自有（上游 commit 记在 `UPSTREAM`） |
 | `files/` | rootfs overlay（`files/etc/...` 合并进固件），**不是**上游源码 | 直接改 |
 | `CHANGELOG.md` | 变更的唯一权威记录；版本判型 PATCH/MINOR/MAJOR | 每次功能改动必须追加 |
 | `.gitattributes` | 强制关键文件 LF 行尾 —— **极其重要，见红线 1** | 按需扩规则 |
@@ -37,6 +39,11 @@
    - 给 `files/` 下**无扩展名**文件加规则时，模式必须匹配**仓库内真实路径**（带 `files/` 前缀），
      用 `**/etc/config/xxx` 而非 `/etc/config/xxx` —— 后者永不匹配（v0.3.5 修过这个坑）。
    - 新增无扩展名脚本/配置时，记得同步 `.gitattributes`。
+   - **二进制资源必须显式写 `*.png binary` 等规则，且必须排在 `package/**` 之后。**
+     git 的规则是「后出现的覆盖先出现的」。`package/** text eol=lf` 会把 png/jpeg/ico/woff2
+     当文本做 CRLF→LF 转换，文件损坏但构建与运行**都不报错**。
+     v0.26.0 实测：`login-bg.jpeg` 从 184122 变成 184118 字节。
+     `sh tools/verify-theme-vendor.sh` 会断言这个顺序。
 
 2. **禁止修改上游仓库。** dnsproxy 的所有改动只以 patch 落地：
    上游 clone → `git apply --check` → `git apply`。CI 每次全新克隆，因此**天然幂等**。
@@ -91,6 +98,11 @@
 - **gn host 工具需 gcc-13 预编译**：naiveproxy 依赖 gn，gn 新版在 ubuntu-22.04 默认 gcc-12 上
   编译失败（libstdc++-12 ranges 不全），CI 装 gcc-13 并预生成 `.built` stamp。
 - patch 应用时必须**先转绝对路径**：在 `(cd package/... )` 子 shell 内相对路径会失效。
+- **`luci-theme-shadcn` 由本仓库 vendored，CI 不再 clone 上游**（v0.26.0）。
+  源码在 `package/luci-theme-shadcn/`，上游 commit 记在该目录的 `UPSTREAM`。
+  `build-openwrt.yml` 与 `cache-deps.yml`（两个 job）三处都从
+  `../openwrt-build/package/luci-theme-shadcn` 复制，三处配方必须一致。
+  改主题静态资源后跑 `sh tools/verify-theme-vendor.sh`。
 - 启用的关键 CONFIG：`luci-app-ssr-plus`（含 Iptables 透明代理、Xray、ChinaDNS-NG、MosDNS 等）、
   `luci-app-dnschain` + `luci-i18n-dnschain-zh-cn`、`dnsproxy`（**二进制**，框架托管两个实例）+ CA 证书、
   `kmod-tcp-bbr`、`iptables-mod-fullconenat`。
@@ -222,6 +234,12 @@ sh tools/verify-dnschain-ci-sim.sh           # 复现 CI 的目录场景
 ```
 
 ⚠️ **只有第一个被 CI 调用**，其余四个是纯本地工具 —— 不能指望 CI 拦住。
+
+主题 vendoring 的校验同样 CI 与本地共用一份：
+
+```sh
+sh tools/verify-theme-vendor.sh   # CI 也跑；改 package/luci-theme-shadcn/ 后必跑
+```
 
 ### 4.1 ⚠️ `enable_switch` 必须为 `'0'`（v0.8.1 起的硬约束）
 
@@ -656,6 +674,8 @@ MosDNS 的 `reject 0` 返回的是 `rcode=0` + `ancount=0`（合法答复：明�
      `files/usr/share/dnschain/dnschain.sh` 的参数生成函数。
    - 固件运行时配置 → 改 `files/` overlay；**首次开机默认值**改 `files/etc/uci-defaults/99-gaming-optimize`。
    - 编译流程/依赖 → 改 `.github/workflows/build-openwrt.yml`。
+   - LuCI 主题（外观/图标/登录页）→ 改 `package/luci-theme-shadcn/`，
+     上游来源与升级方式见该目录 `UPSTREAM`。**不要**改回 CI 里 clone。
 3. 本地**无法**完整编译（需 lede 全量环境）；至少做静态检查：
    - shell：`ash -n` / `sh -n`；JS：`node --check`；patch：干净克隆上 `git apply --check`。
 4. 更新 `CHANGELOG.md`：`## [vX.Y.Z] - YYYY-MM-DD` + 变更/修复/新增/验证 小节。

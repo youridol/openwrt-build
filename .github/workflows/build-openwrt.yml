@@ -524,48 +524,55 @@ jobs:
             exit 1
           fi
 
-      - name: Fetch luci-theme-shadcn (默认 LuCI 主题)
+          # ── v0.26.0：主题 vendoring 的契约 ──────────────────────────
+          #
+          # 主题改为「本仓库 vendored」之后，出现了一类新的静默失效：
+          # .gitattributes 的行尾规则会把 png/jpeg/ico/woff2 当文本转换，
+          # 文件损坏但构建与运行都不报错（只表现为登录页背景图裂开）。
+          # 这类问题上一条断言完全覆盖不到，故单独一个脚本，本地可复跑。
+          if [ ! -f ../openwrt-build/tools/verify-theme-vendor.sh ]; then
+            echo "FAIL 缺少 tools/verify-theme-vendor.sh" >&2
+            exit 1
+          fi
+          if sh ../openwrt-build/tools/verify-theme-vendor.sh; then
+            echo "OK   主题 vendoring 契约校验通过"
+          else
+            echo "FAIL 主题 vendoring 契约校验失败（见上方 FAIL 行）" >&2
+            exit 1
+          fi
+
+      - name: Add luci-theme-shadcn (本地包，默认 LuCI 主题)
         working-directory: lede
         run: |
-          # ── 为什么用 git clone 而不是 feed ────────────────────────
+          # ── 为什么是 vendored 而不是 CI 里 git clone ──────────────
           #
-          # 该主题不在 lede 的任何 feed 里（自建仓库），且它的 main.css 与
-          # 字体文件已预构建并入库（实测 htdocs/luci-static/shadcn/main.css
-          # 134262 字节、6 个 woff2），故**不需要前端构建**，直接当
-          # LuCI 包编译即可。
+          # 用户要求「编译时不要再拉上游代码，改用本仓库的 luci-theme-shadcn」。
+          # 主题源码已固定在 ../openwrt-build/package/luci-theme-shadcn/
+          # （提交 ed806504，见该目录下的 UPSTREAM 文件）。
           #
-          # 用固定 commit 而不是 main：主题更新会改 CSS/JS 结构，
-          # 与 LuCI 版本不匹配时表现为「页面样式错乱」而非报错，
-          # 固定 commit 才能保证同一份固件可重现。
-          # 升级时只改 THEME_REF 并重跑。
+          # 好处：
+          #   1. 构建不依赖 github.com/youridol/luci-theme-shadcn 的可用性；
+          #   2. 主题内容与固件版本一一对应，可复现（原先 clone main 是浮动的）；
+          #   3. 改主题样式可直接在本仓库评审，不必先推上游。
           #
-          # 注意: 不要放进 feeds.conf —— feed 机制会拉全部分支且
-          # 没有 commit 固定，出问题后很难定位是哪个版本引入的。
-          THEME_REPO="https://github.com/youridol/luci-theme-shadcn.git"
-          THEME_REF="main"
+          # 该主题的 main.css 与字体已由上游预构建并入库（main.css 136279 字节、
+          # 7 个 woff2），故**不需要前端构建**，直接当 LuCI 包编译即可。
+          SRC=../openwrt-build/package/luci-theme-shadcn
+          if [ ! -d "$SRC" ]; then
+            echo "FAIL 缺少 $SRC（主题未 vendored？）" >&2
+            exit 1
+          fi
 
-          rm -rf /tmp/luci-theme-shadcn
-          git clone --depth 1 --branch "$THEME_REF" "$THEME_REPO" /tmp/luci-theme-shadcn
-          THEME_SHA=$(git -C /tmp/luci-theme-shadcn rev-parse HEAD)
-          echo "主题 commit: $THEME_SHA"
-
-          # 只复制构建需要的部分。.dev / .husky / .github / node_modules 等
-          # 是开发工具链，进了固件会白占空间。
           DEST=package/luci-theme-shadcn
           rm -rf "$DEST"
-          mkdir -p "$DEST"
-          for item in Makefile root htdocs ucode LICENSE; do
-            if [ -e "/tmp/luci-theme-shadcn/$item" ]; then
-              cp -r "/tmp/luci-theme-shadcn/$item" "$DEST/"
-            fi
-          done
-
+          cp -r "$SRC" "$DEST"
           echo "--- 复制后的内容 ---"
           find "$DEST" -maxdepth 2 | sort | head -20
 
           # 契约断言：缺任何一个都说明主题包不完整，编出来会白屏
           echo "--- 关键文件断言 ---"
           for f in Makefile \
+                   UPSTREAM \
                    root/etc/uci-defaults/30_luci-theme-shadcn \
                    htdocs/luci-static/shadcn/main.css \
                    htdocs/luci-static/shadcn/login.css ; do
@@ -585,7 +592,45 @@ jobs:
           fi
           echo "OK   main.css $css_size 字节（已预构建）"
 
-          # 记下 commit 供产物命名/溯源
+          # ── 二进制资源完整性（v0.26.0 新增）──────────────────────
+          #
+          # 主题自带 13 个二进制资源（4 png / 1 jpeg / 1 ico / 7 woff2）。它们曾被
+          # `package/** text eol=lf` 命中并做 CRLF→LF 转换 —— 实测
+          # login-bg.jpeg 从 184122 变成 184118 字节，图片损坏，
+          # 而构建与运行都不报错，只表现为「登录页背景图裂开」。
+          #
+          # 现已在 .gitattributes 里用 `*.png binary` 等规则修掉（且必须排在
+          # package/** 之后才生效）。这里再用 `file` 复核一遍：
+          # 转换过的二进制会被 file 识别成 data，而不是 PNG/JPEG/WOFF。
+          echo "--- 二进制资源完整性 ---"
+          for f in htdocs/luci-static/shadcn/images/login-bg.jpeg \
+                   htdocs/luci-static/shadcn/images/favicon.ico \
+                   htdocs/luci-static/shadcn/images/web-app-manifest-512x512.png \
+                   htdocs/luci-static/shadcn/inter-latin-wght-normal.woff2 ; do
+            if [ ! -f "$DEST/$f" ]; then
+              echo "FAIL 缺少二进制资源 $f" >&2
+              exit 1
+            fi
+            desc=$(file -b "$DEST/$f")
+            case "$desc" in
+              PNG\ image*|JPEG\ image*|MS\ Windows\ icon*|Web\ Open\ Font*)
+                echo "OK   $f -> ${desc%%,*}" ;;
+              *)
+                echo "FAIL $f 类型异常（疑似被行尾转换损坏）：$desc" >&2
+                echo "     检查 .gitattributes 里 *.png/*.jpg/*.ico/*.woff2 的 binary 规则" >&2
+                echo "     是否仍在 package/** 之后。" >&2
+                exit 1 ;;
+            esac
+          done
+
+          # 记下 vendored 的 commit 供产物命名/溯源（不再运行时 clone，
+          # 故从 UPSTREAM 文件读，而不是 git rev-parse）
+          THEME_SHA=$(sed -n 's/^commit: *//p' "$DEST/UPSTREAM" | head -1)
+          if [ -z "$THEME_SHA" ]; then
+            echo "FAIL $DEST/UPSTREAM 缺少 commit 行（无法溯源）" >&2
+            exit 1
+          fi
+          echo "主题 commit: $THEME_SHA"
           echo "THEME_SHA=$THEME_SHA" >> "$GITHUB_ENV"
 
       - name: Update and install feeds
@@ -758,8 +803,9 @@ jobs:
           if [ "$tfail2" != "0" ]; then
             echo "--- .config 中与 luci-theme 有关的全部符号 ---"
             grep -E 'luci-theme' .config || echo "  (一条都没有 → 主题包未被识别)"
-            echo "  提示：检查 'Fetch luci-theme-shadcn' 步骤是否成功，
-                     以及 package/luci-theme-shadcn/Makefile 是否存在。"
+            echo "  提示：检查 'Add luci-theme-shadcn' 步骤是否成功，
+                     以及 ../openwrt-build/package/luci-theme-shadcn/Makefile
+                     是否存在（v0.26.0 起主题由本仓库提供，不再 runtime clone）。"
             exit 1
           fi
 

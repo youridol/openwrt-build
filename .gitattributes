@@ -71,3 +71,21 @@
 # package/ 下 vendored 包的全部文件（含无扩展名的 Makefile / LICENSE /
 # root/etc/config/* / root/etc/hotplug.d/* / root/etc/init.d/*）
 package/**                            text eol=lf
+
+# ⚠️ 二进制资源必须显式标记为 binary，且规则必须排在 `package/**` **之后**。
+#
+# 背景（v0.26.0）：把 luci-theme-shadcn 从「CI 里 git clone」改为 vendored 到
+# package/ 之后，主题自带 13 个二进制资源（4 png / 1 jpeg / 1 ico / 7 woff2）。上面的
+# `package/** text eol=lf` 会命中它们并把 CRLF→LF 转换应用到二进制字节上。
+# 实测：login-bg.jpeg 184122 → 184118 字节（4 字节被吃掉），图片损坏。
+# 这类损坏构建与运行都不报错，只表现为「登录页背景图裂开」。
+#
+# git 的规则是**后出现的覆盖先出现的**，故这些行必须放在 package/** 之下。
+# 自测命令（改完必跑）：
+#   git cat-file blob :package/luci-theme-shadcn/htdocs/luci-static/shadcn/images/login-bg.jpeg | cmp - <原文件>
+*.png   binary
+*.jpg   binary
+*.jpeg  binary
+*.ico   binary
+*.woff  binary
+*.woff2 binary

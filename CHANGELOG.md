@@ -3,6 +3,76 @@
 本仓库所有功能/配置改动均记录于此。版本判型遵循全局规范（PATCH / MINOR / MAJOR）。
 
 
+## [v0.26.0] - 2026-11-04
+
+### 构建 — `luci-theme-shadcn` 改为本仓库 vendored，CI 不再拉上游
+
+用户要求：「把 https://github.com/youridol/luci-theme-shadcn 拉到项目的 package 目录中，
+CI/CD 编译的时候不要再拉 luci-theme-shadcn 的上游代码，改用本仓库的主题」。
+
+#### ① 新增 `package/luci-theme-shadcn/`（72 个文件，1.2 MB）
+
+从上游 `github.com/youridol/luci-theme-shadcn` 复制**构建需要的 5 项**：
+`Makefile` / `root/` / `htdocs/` / `ucode/` / `LICENSE`。
+上游的 `.dev` / `.github` / `.husky` / `*.md` / `node_modules` 属开发工具链，不进固件。
+
+| 项 | 值 |
+|---|---|
+| 上游 commit | `ed8065043eef7af8577609c4fbd9a0f0f1c5b9ea`（2026-10-26） |
+| 溯源文件 | `package/luci-theme-shadcn/UPSTREAM`（记录 repo / ref / commit / 升级步骤） |
+| 逐字节校验 | 72 个文件与上游 **完全一致**（`git cat-file blob` vs 上游工作树 `cmp`） |
+| 执行位 | `root/etc/uci-defaults/30_luci-theme-shadcn`、`root/etc/init.d/shadcn-dashboard` 均为 `100755`，与上游一致 |
+
+#### ② ⚠️ 修一个会静默损坏主题的坑：`.gitattributes` 二进制规则
+
+`package/** text eol=lf` 会命中主题自带的 13 个二进制资源（4 png / 1 jpeg / 1 ico / 7 woff2），
+把 CRLF→LF 转换应用到**二进制字节**上。实测：
+
+```
+login-bg.jpeg  上游 184122 字节 → 索引 184118 字节（4 字节被吃掉）
+```
+
+**构建不报错、运行不报错**，唯一表现是登录页背景图裂开。
+修法：在 `.gitattributes` **`package/**` 之后**追加 `*.png binary` / `*.jpg binary` /
+`*.jpeg binary` / `*.ico binary` / `*.woff binary` / `*.woff2 binary`。
+顺序不能反 —— git 是「后出现的规则覆盖先出现的」。
+
+#### ③ CI 改动
+
+| 文件 | 改动 |
+|---|---|
+| `build-openwrt.yml` | 删 `Fetch luci-theme-shadcn`（`git clone --depth 1` + 裁剪复制），改为 `Add luci-theme-shadcn`：从 `../openwrt-build/package/luci-theme-shadcn` 整体复制。`THEME_SHA` 改从 `UPSTREAM` 的 `commit:` 行读取，不再 `git rev-parse` |
+| `build-openwrt.yml` | 该步骤新增**二进制完整性断言**：4 个资源过 `file` 类型检查，被行尾转坏则 `exit 1` |
+| `build-openwrt.yml` | 新增步骤前置守卫：`sh ../openwrt-build/tools/verify-theme-vendor.sh` |
+| `build-openwrt.yml` | `.config` 校验失败提示里 `'Fetch luci-theme-shadcn'` → `'Add luci-theme-shadcn'` |
+| `cache-deps.yml` | `warm-dl` 与 `warm-toolchain` 两个 job 的 `Prepare source tree` 各加一段：从本地 `package/` 复制主题（原先 warm-dl 里也是 runtime clone）。两处与主构建配方保持一致，否则预热的 `.config` 会漂移 |
+
+#### ④ 新增 `tools/verify-theme-vendor.sh`（CI 与本地同一份）
+
+覆盖 6 类**构建发现不了**的失效：
+
+| 断言 | 为什么构建发现不了 |
+|---|---|
+| 关键文件齐全（含 `UPSTREAM`） | 缺 `main.css` 照样编过，登录后白屏 |
+| `main.css ≥ 20000` 字节 | 误传 tailwind 源码版只有几 KB，页面静默无样式 |
+| 4 个二进制资源 `file` 类型正确 | 行尾转换损坏后构建/运行都不报错 |
+| `*.png binary` 等规则**行号晚于** `package/**` | 顺序写反等于没写 |
+| 无扩展名脚本无 CRLF、有执行位 | CRLF 只在 busybox ash 上炸；缺执行位则默认主题不生效 |
+| `build-openwrt.yml` / `cache-deps.yml` 不再 `clone … luci-theme-shadcn` | 配方回退时构建仍然成功 |
+
+已做 4 项反向测试确认断言有效（删规则、挪位置、注入 CRLF、去执行位 → 各自都 FAIL）。
+脚本遵循 AGENTS §6 第 11 条：POSIX sh（dash）兼容，`sh -n` 通过，无 bash 专有语法。
+
+#### ⑤ 文档联动
+
+| 文档 | 改动 |
+|---|---|
+| `AGENTS.md` | §1 仓库地图加 `tools/verify-theme-vendor.sh` 与 `package/luci-theme-shadcn/` 两行；红线 1 加「二进制资源必须写 `binary` 规则且排在 `package/**` 之后」；§3 加 vendored 说明与三处配方一致性要求；§4 命令清单加主题校验；§7 加「LuCI 主题 → 改 `package/luci-theme-shadcn/`」 |
+| `docs/build/ci.md` | §4 步骤 9 改写（不再是 clone）；新增 §5.2.1「主题 vendoring 契约」 |
+
+**未改动**：`tools/gen-openwrt-config.sh`（`CONFIG_PACKAGE_luci-theme-shadcn=y` 与
+`THEME_SHA` 都与此无关，`THEME_SHA` 在仓库里没有任何下游消费者）。
+
 ## [v0.25.0] - 2026-11-02
 
 ### 移除 — `luci-app-trafficctl` 整包及其构建/文档联动

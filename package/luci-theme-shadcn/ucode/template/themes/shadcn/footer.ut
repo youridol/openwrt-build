@@ -1,0 +1,25 @@
+{#
+ luci-theme-shadcn: footer template
+ Copyright 2025 eamonxg <eamonxiong@gmail.com>
+ Licensed to the public under the Apache License 2.0.
+-#}
+    {% if (!blank_page): %}
+      </div>{# /maincontent #}
+    </div>{# /content-card #}
+    </div>{# /main-wrapper #}
+
+    <script>
+      window.ShadcnSidebar = null;
+      L.require('sidebar-shadcn').then(function (m) {
+        window.ShadcnSidebar = m;
+      });
+      L.require('menu-shadcn').then(function () {
+        if (window.navigation) L.require('router-shadcn');
+      });
+      /* 全站表格排序与「无表头时给排序菜单」。纯 DOM 增强，不依赖路由，
+         也不改任何页面的脚本；自己观察 DOM 变化以跟上 LuCI 的表格重写。 */
+      L.require('table-sort');
+    </script>
+    {% endif %}
+  </body>
+</html>
